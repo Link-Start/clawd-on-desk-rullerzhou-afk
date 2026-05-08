@@ -171,16 +171,21 @@ function buildStateBody(event, payload, resolve) {
     if (agentPid) {
       body.agent_pid = agentPid;
       body.claude_pid = agentPid; // backward compat with older Clawd versions
-      // Check if claude process is running in non-interactive (-p/--print) mode
+      // Check if claude process is running in non-interactive (-p/--print) mode.
+      // Windows 11 24H2+ removed wmic, so fall back to PowerShell Get-CimInstance.
       try {
-        const { execSync } = require("child_process");
+        const { execFileSync } = require("child_process");
         const isWin = process.platform === "win32";
         const cmdOut = isWin
-          ? execSync(
-              `wmic process where "ProcessId=${agentPid}" get CommandLine /format:csv`,
+          ? execFileSync(
+              "powershell.exe",
+              [
+                "-NoProfile", "-NonInteractive", "-Command",
+                `(Get-CimInstance Win32_Process -Filter "ProcessId=${agentPid}" -ErrorAction SilentlyContinue).CommandLine`,
+              ],
               { encoding: "utf8", timeout: 500, windowsHide: true }
             )
-          : execSync(`ps -o command= -p ${agentPid}`, { encoding: "utf8", timeout: 500 });
+          : execFileSync("ps", ["-o", "command=", "-p", String(agentPid)], { encoding: "utf8", timeout: 500 });
         if (/\s(-p|--print)(\s|$)/.test(cmdOut)) body.headless = true;
       } catch {}
     }

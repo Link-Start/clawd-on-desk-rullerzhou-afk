@@ -112,15 +112,21 @@ function createPidResolver(options) {
       let name, parentPid;
       try {
         if (isWin) {
+          // Windows 11 24H2+ removed wmic from the default install. Use
+          // PowerShell Get-CimInstance for the same fields.
           const out = execFileSync(
-            "wmic", ["process", "where", `ProcessId=${pid}`, "get", "Name,ParentProcessId", "/format:csv"],
+            "powershell.exe",
+            [
+              "-NoProfile", "-NonInteractive", "-Command",
+              `Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" | Select-Object Name, ParentProcessId | ConvertTo-Json -Compress`,
+            ],
             { encoding: "utf8", timeout: 1500, windowsHide: true }
           );
-          const lines = out.trim().split("\n").filter(l => l.includes(","));
-          if (!lines.length) break;
-          const parts = lines[lines.length - 1].split(",");
-          name = (parts[1] || "").trim().toLowerCase();
-          parentPid = parseInt(parts[2], 10);
+          const trimmed = (out || "").trim();
+          if (!trimmed) break;
+          const info = JSON.parse(trimmed);
+          name = typeof info.Name === "string" ? info.Name.toLowerCase() : "";
+          parentPid = Number(info.ParentProcessId) || 0;
         } else {
           const ppidOut = execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8", timeout: 1000 }).trim();
           const commOut = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf8", timeout: 1000 }).trim();
@@ -145,8 +151,10 @@ function createPidResolver(options) {
         } else if (agentCmdlineCheck && (name === "node.exe" || name === "node")) {
           try {
             const cmdOut = isWin
-              ? execFileSync("wmic", ["process", "where", `ProcessId=${pid}`, "get", "CommandLine", "/format:csv"],
-                  { encoding: "utf8", timeout: 500, windowsHide: true })
+              ? execFileSync("powershell.exe", [
+                  "-NoProfile", "-NonInteractive", "-Command",
+                  `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue).CommandLine`,
+                ], { encoding: "utf8", timeout: 500, windowsHide: true })
               : execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 500 });
             if (agentCmdlineCheck(cmdOut)) agentPid = pid;
           } catch {}
