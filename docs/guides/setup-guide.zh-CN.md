@@ -30,32 +30,24 @@
 
 <img src="../assets/screenshot-remote-ssh.png" width="560" alt="远程 SSH — 来自树莓派的权限气泡">
 
-Clawd 支持通过 SSH 反向端口转发感知远程服务器上的 AI Agent 状态。Hook 事件和权限请求通过 SSH 隧道传回本地 Clawd，无需修改 Clawd 本体代码。
+Clawd 支持通过 SSH 反向端口转发感知远程服务器上的 AI Agent 状态。Hook 事件和权限请求通过 SSH 隧道传回本地 Clawd。打包版应用的主路径是 Settings -> 远程 SSH：
 
-**一键部署：**
+1. 新增一个 `user@远程主机` 配置。
+2. 如果 SSH 需要首次确认 host key、输入私钥口令或加载 ssh-agent，先点 **首次认证**。
+3. 点击 **一键部署**。Clawd 会打开 SSH 隧道，在配置下方展示连接 / 部署日志，从当前已安装的 Clawd 应用复制 hook 文件到远端，并以远程模式注册 Claude Code / Codex hooks。
+4. 在远端启动 Claude Code 或 Codex CLI。Dashboard 要等第一条远端 hook 事件到达后才会显示会话。
 
-```bash
-bash scripts/remote-deploy.sh user@远程主机
-```
+Doctor 里的本地服务显示 `127.0.0.1:<端口>` 是正常的，它指的是你这台电脑上的 Clawd HTTP 服务。远端 hook 不直接连你的局域网 IP；SSH 反向隧道会把这个本地服务映射成远端机器上的 `127.0.0.1:<远端转发端口>`。
 
-脚本会将 hook 文件复制到远程服务器，以远程模式注册 Claude Code hooks 和 Codex official hooks，并打印 SSH 配置指引。
-
-**SSH 配置**（添加到本地 `~/.ssh/config`）：
-
-```
-Host my-server
-    HostName 远程主机
-    User user
-    RemoteForward 127.0.0.1:23333 127.0.0.1:23333
-    ServerAliveInterval 30
-    ServerAliveCountMax 3
-```
+`bash scripts/remote-deploy.sh user@远程主机` 仍保留给源码 checkout 和调试使用，但它不是 DMG / 安装包用户的默认流程。
 
 **工作原理：**
 - **Claude Code** — 远程 hook 将状态 POST 到 `localhost:23333`，SSH 隧道转发回本地 Clawd。权限气泡也能正常弹出——HTTP 往返通过隧道完成。
 - **Codex CLI** — 远程 official hooks 通过同一隧道 POST 状态和权限请求。如果远程 Codex hooks 不可用或被禁用，再使用 fallback 日志监控：`node ~/.claude/hooks/codex-remote-monitor.js --port 23333`
 
 远程 hook 以 `CLAWD_REMOTE` 模式运行，跳过 PID 采集（远程 PID 在本地无意义）。远程会话不支持终端聚焦。
+
+Doctor 的 Agent 集成检查只诊断本机配置。本机 Claude Code 显示 `broken path` 不等于远端 hook 部署失败；远端状态请看 Remote SSH 配置里的 Hook 状态和部署日志。
 
 > 感谢 [@Magic-Bytes](https://github.com/Magic-Bytes) 提出 SSH 隧道方案（[#9](https://github.com/rullerzhou-afk/clawd-on-desk/issues/9)）。
 

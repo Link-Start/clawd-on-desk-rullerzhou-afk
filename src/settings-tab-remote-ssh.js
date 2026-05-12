@@ -3,10 +3,10 @@
 // Remote SSH tab — Phase 2 plan-remote-ssh-one-click
 //
 // UI surfaces:
-//   - profile list (each card shows label / host / status + Connect/Disconnect)
+//   - profile list (each card shows label / host / status + One-click deploy)
 //   - "+ Add profile" button → edit form
-//   - selected profile detail panel: Connect / Disconnect / Authenticate /
-//     Open Terminal / Deploy buttons + status / progress log
+//   - selected profile detail panel: One-click deploy / Disconnect /
+//     Authenticate / Open Terminal buttons + status / progress log
 //
 // All profile CRUD goes through window.settingsAPI.command using the
 // remoteSsh.add / .update / .delete actions registered on settings-actions.js.
@@ -101,6 +101,10 @@
     return s || { profileId: id, status: "idle" };
   }
 
+  function hasDeployedHooks(profile) {
+    return !!(profile && Number.isFinite(profile.lastDeployedAt) && profile.lastDeployedAt > 0);
+  }
+
   function statusBadgeClass(status) {
     switch (status) {
       case "connected": return "remote-ssh-status-connected";
@@ -143,6 +147,145 @@
       ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
       return { status: "error", message: err && err.message };
     });
+  }
+
+  function appendProgress(profileId, step, status, message) {
+    let log = view.progressLog.get(profileId);
+    if (!log) {
+      log = [];
+      view.progressLog.set(profileId, log);
+    }
+    log.push({ profileId, step, status, message, ts: Date.now() });
+    if (log.length > PROGRESS_LOG_MAX) {
+      log.splice(0, log.length - PROGRESS_LOG_MAX);
+    }
+    ops.requestRender({ content: true });
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function fetchProfileStatus(profileId) {
+    if (window.remoteSsh && typeof window.remoteSsh.status === "function") {
+      const res = await window.remoteSsh.status(profileId);
+      if (res && res.status === "ok" && res.state) {
+        view.runtimeStatuses.set(profileId, res.state);
+        return res.state;
+      }
+    }
+    return statusForProfile(profileId);
+  }
+
+  async function waitForTunnel(profileId, timeoutMs = 15000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const s = await fetchProfileStatus(profileId);
+      if (s && s.status === "connected") return s;
+      if (s && s.status === "failed") {
+        throw new Error(s.message || t("remoteSshConnectFailed"));
+      }
+      await sleep(300);
+    }
+    throw new Error(t("remoteSshConnectTimeout"));
+  }
+
+  function deployProfile(profileId, options = {}) {
+    if (!window.remoteSsh) return Promise.resolve({ status: "error", message: "remote SSH API unavailable" });
+    const wasBusy = view.deployingProfileIds.has(profileId);
+    if (wasBusy && options.reuseBusy !== true) return Promise.resolve({ status: "busy" });
+
+    if (!wasBusy) view.deployingProfileIds.add(profileId);
+    // Clear ONLY this profile's log; other profiles mid-deploy keep theirs.
+    if (options.clearLog !== false) view.progressLog.set(profileId, []);
+    ops.requestRender({ content: true });
+
+    return window.remoteSsh.deploy(profileId)
+      .then((r) => {
+        if (r && r.status === "ok") {
+          if (r.warning === "target_drift") {
+            // The user edited host/port/identityFile/remoteForwardPort/
+            // hostPrefix while the 30s deploy was running. The deploy ran
+            // against the OLD target — markDeployed refused to stamp the
+            // new (drifted) profile as deployed. Tell the user to redeploy.
+            const driftedField = r.driftedField || "target";
+            ops.showToast(
+              `${t("remoteSshDeployDriftWarning")} (${driftedField})`,
+              { ttl: 10000, error: true }
+            );
+            return r;
+          }
+
+          if (r.warning === "stamp_failed") {
+            // Deploy itself ran but lastDeployedAt couldn't be persisted
+            // (validator/persist error). Show as error so the user knows
+            // the "deployed" timestamp on the card is stale.
+            ops.showToast(
+              `${t("remoteSshDeploySuccess")} (${r.message || "stamp failed"})`,
+              { ttl: 10000, error: true }
+            );
+          } else {
+            // Append codex /hooks reminder — Deploy installs the hooks but the
+            // user still has to review them once in codex TUI before they go
+            // live (sha256 trusted_hash gate in ~/.codex/config.toml).
+            ops.showToast(`${t("remoteSshDeploySuccess")} ${t("codexHookReviewReminder")}`,
+              { ttl: 8000 });
+          }
+          return r;
+        }
+
+        ops.showToast((r && r.message) || "deploy failed", { error: true });
+        return r || { status: "error" };
+      })
+      .catch((err) => {
+        // IPC invoke can reject (channel not registered, main crashed, etc).
+        // Without this catch the .finally cleanup still runs but the user
+        // sees no feedback for the failure.
+        ops.showToast((err && err.message) || "deploy IPC failed", { error: true });
+        return { status: "error", message: err && err.message };
+      })
+      .finally(() => {
+        // Always clear the deploying flag — otherwise an unexpected reject
+        // leaves the button stuck on "Deploying…" until a tab re-render.
+        if (!wasBusy || options.reuseBusy === true) {
+          view.deployingProfileIds.delete(profileId);
+        }
+        ops.requestRender({ content: true });
+      });
+  }
+
+  async function oneClickDeploy(profile) {
+    if (!window.remoteSsh || !profile) return;
+    if (view.deployingProfileIds.has(profile.id)) return;
+
+    view.deployingProfileIds.add(profile.id);
+    view.selectedProfileId = profile.id;
+    view.editing = null;
+    view.progressLog.set(profile.id, []);
+    ops.requestRender({ content: true });
+
+    try {
+      const current = await fetchProfileStatus(profile.id);
+      if (current.status === "connected") {
+        appendProgress(profile.id, "connect", "ok", t("remoteSshConnectAlreadyConnected"));
+      } else {
+        appendProgress(profile.id, "connect", "start");
+        const r = await window.remoteSsh.connect(profile.id);
+        if (!r || r.status !== "ok") {
+          throw new Error((r && r.message) || t("remoteSshConnectFailed"));
+        }
+        await waitForTunnel(profile.id);
+        appendProgress(profile.id, "connect", "ok");
+      }
+    } catch (err) {
+      appendProgress(profile.id, "connect", "fail", (err && err.message) || t("remoteSshConnectFailed"));
+      ops.showToast((err && err.message) || t("remoteSshConnectFailed"), { error: true });
+      view.deployingProfileIds.delete(profile.id);
+      ops.requestRender({ content: true });
+      return;
+    }
+
+    await deployProfile(profile.id, { clearLog: false, reuseBusy: true });
   }
 
   // ── Render ──
@@ -243,11 +386,10 @@
     actions.className = "remote-ssh-card-actions";
     actions.appendChild(badge);
 
-    // Surface "hooks never deployed" before the user clicks Connect — Connect
-    // alone only builds the reverse tunnel, it does not push hook files. A
-    // tunnel with no hooks shows green "connected" but the desktop pet
-    // never reacts because remote codex/claude has no hook config.
-    if (!Number.isFinite(profile.lastDeployedAt)) {
+    // Surface "hooks never deployed" before the user clicks One-click deploy.
+    // The warning explains why Dashboard is empty until deployment and a
+    // remote hook event both happen.
+    if (!hasDeployedHooks(profile)) {
       const warn = document.createElement("span");
       warn.className = "remote-ssh-deploy-warn";
       warn.textContent = "⚠";
@@ -255,22 +397,16 @@
       actions.appendChild(warn);
     }
 
-    const connectBtn = document.createElement("button");
-    connectBtn.className = "soft-btn";
-    if (status.status === "connected" || status.status === "connecting" || status.status === "reconnecting") {
-      connectBtn.textContent = t("remoteSshDisconnect");
-      connectBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (window.remoteSsh) window.remoteSsh.disconnect(profile.id);
-      });
-    } else {
-      connectBtn.textContent = t("remoteSshConnect");
-      connectBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (window.remoteSsh) window.remoteSsh.connect(profile.id);
-      });
-    }
-    actions.appendChild(connectBtn);
+    const cardDeployBtn = document.createElement("button");
+    cardDeployBtn.className = "soft-btn accent";
+    const isDeploying = view.deployingProfileIds.has(profile.id);
+    cardDeployBtn.textContent = isDeploying ? t("remoteSshDeploying") : t("remoteSshDeployShort");
+    cardDeployBtn.disabled = isDeploying;
+    cardDeployBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      oneClickDeploy(profile);
+    });
+    actions.appendChild(cardDeployBtn);
 
     card.appendChild(meta);
     card.appendChild(actions);
@@ -339,10 +475,10 @@
     }
     section.appendChild(statusRow);
 
-    // Hooks deployment row — independent of tunnel status. Connect alone does
-    // not push hooks; users need to see clearly whether hooks ever made it
-    // to the remote, otherwise a green "connected" looks like everything's
-    // fine while the desktop pet stays silent.
+    // Hooks deployment row — independent of tunnel status. Users need to see
+    // clearly whether hooks ever made it to the remote, otherwise a green
+    // "connected" looks like everything's fine while the desktop pet stays
+    // silent.
     const hooksRow = document.createElement("div");
     hooksRow.className = "remote-ssh-hooks-row";
     const hooksLabel = document.createElement("span");
@@ -350,7 +486,7 @@
     hooksLabel.textContent = t("remoteSshHooksLabel");
     hooksRow.appendChild(hooksLabel);
     const hooksValue = document.createElement("span");
-    if (Number.isFinite(profile.lastDeployedAt) && profile.lastDeployedAt > 0) {
+    if (hasDeployedHooks(profile)) {
       hooksValue.className = "remote-ssh-hooks-value remote-ssh-hooks-deployed";
       hooksValue.textContent = formatTimeAgo(profile.lastDeployedAt) || "";
       hooksValue.title = new Date(profile.lastDeployedAt).toLocaleString();
@@ -365,6 +501,28 @@
     // Action buttons
     const actions = document.createElement("div");
     actions.className = "remote-ssh-actions";
+    const isDeploying = view.deployingProfileIds.has(profile.id);
+
+    const deployBtn = document.createElement("button");
+    deployBtn.className = "soft-btn accent";
+    deployBtn.textContent = isDeploying ? t("remoteSshDeploying") : t("remoteSshDeployShort");
+    deployBtn.disabled = isDeploying;
+    deployBtn.addEventListener("click", () => {
+      oneClickDeploy(profile);
+    });
+    actions.appendChild(deployBtn);
+
+    const activeTunnel = status.status === "connected" || status.status === "connecting" || status.status === "reconnecting";
+    if (activeTunnel) {
+      const disconnectBtn = document.createElement("button");
+      disconnectBtn.className = "soft-btn";
+      disconnectBtn.textContent = t("remoteSshDisconnect");
+      disconnectBtn.addEventListener("click", () => {
+        if (window.remoteSsh) window.remoteSsh.disconnect(profile.id);
+      });
+      actions.appendChild(disconnectBtn);
+    }
+
     const authBtn = document.createElement("button");
     authBtn.className = "soft-btn";
     authBtn.textContent = t("remoteSshAuthenticate");
@@ -388,63 +546,6 @@
     });
     actions.appendChild(termBtn);
 
-    const deployBtn = document.createElement("button");
-    deployBtn.className = "soft-btn accent";
-    const isDeploying = view.deployingProfileIds.has(profile.id);
-    deployBtn.textContent = isDeploying ? t("remoteSshDeploying") : t("remoteSshDeploy");
-    deployBtn.disabled = isDeploying;
-    deployBtn.addEventListener("click", () => {
-      if (!window.remoteSsh) return;
-      view.deployingProfileIds.add(profile.id);
-      // Clear ONLY this profile's log; other profiles mid-deploy keep theirs.
-      view.progressLog.set(profile.id, []);
-      ops.requestRender({ content: true });
-      window.remoteSsh.deploy(profile.id)
-        .then((r) => {
-          if (r && r.status === "ok") {
-            if (r.warning === "target_drift") {
-              // The user edited host/port/identityFile/remoteForwardPort/
-              // hostPrefix while the 30s deploy was running. The deploy ran
-              // against the OLD target — markDeployed refused to stamp the
-              // new (drifted) profile as deployed. Tell the user to redeploy.
-              const driftedField = r.driftedField || "target";
-              ops.showToast(
-                `${t("remoteSshDeployDriftWarning")} (${driftedField})`,
-                { ttl: 10000, error: true }
-              );
-            } else if (r.warning === "stamp_failed") {
-              // Deploy itself ran but lastDeployedAt couldn't be persisted
-              // (validator/persist error). Show as error so the user knows
-              // the "deployed" timestamp on the card is stale.
-              ops.showToast(
-                `${t("remoteSshDeploySuccess")} (${r.message || "stamp failed"})`,
-                { ttl: 10000, error: true }
-              );
-            } else {
-              // Append codex /hooks reminder — Deploy installs the hooks but the
-              // user still has to review them once in codex TUI before they go
-              // live (sha256 trusted_hash gate in ~/.codex/config.toml).
-              ops.showToast(`${t("remoteSshDeploySuccess")} ${t("codexHookReviewReminder")}`,
-                { ttl: 8000 });
-            }
-          } else {
-            ops.showToast((r && r.message) || "deploy failed", { error: true });
-          }
-        })
-        .catch((err) => {
-          // IPC invoke can reject (channel not registered, main crashed, etc).
-          // Without this catch the .finally cleanup still runs but the user
-          // sees no feedback for the failure.
-          ops.showToast((err && err.message) || "deploy IPC failed", { error: true });
-        })
-        .finally(() => {
-          // Always clear the deploying flag — otherwise an unexpected reject
-          // leaves the button stuck on "Deploying…" until a tab re-render.
-          view.deployingProfileIds.delete(profile.id);
-          ops.requestRender({ content: true });
-        });
-    });
-    actions.appendChild(deployBtn);
     section.appendChild(actions);
 
     // Progress log slice for this profile (multi-profile concurrent deploys

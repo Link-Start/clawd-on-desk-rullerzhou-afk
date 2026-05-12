@@ -30,32 +30,24 @@
 
 <img src="../assets/screenshot-remote-ssh.png" width="560" alt="Remote SSH — permission bubble from Raspberry Pi">
 
-Clawd can sense AI agent activity on remote servers via SSH reverse port forwarding. Hook events and permission requests travel through the SSH tunnel back to your local Clawd — no code changes needed on the Clawd side.
+Clawd can sense AI agent activity on remote servers via SSH reverse port forwarding. Hook events and permission requests travel through the SSH tunnel back to your local Clawd. The packaged app path is Settings -> Remote SSH:
 
-**One-click deploy:**
+1. Add a profile for `user@remote-host`.
+2. Click **Authenticate** once if SSH needs host-key confirmation, a passphrase, or ssh-agent setup.
+3. Click **One-click Deploy**. Clawd opens the SSH tunnel, shows the connection/deploy log below the profile, copies hook files from the installed app to the remote server, and registers Claude Code and Codex hooks in remote mode.
+4. Start Claude Code or Codex CLI on the remote server. The Dashboard shows the session after the first remote hook event arrives.
 
-```bash
-bash scripts/remote-deploy.sh user@remote-host
-```
+The local server entry in Doctor is expected to show `127.0.0.1:<port>` on your computer. Remote hooks do not connect to your LAN IP directly; the SSH reverse tunnel exposes that local server as `127.0.0.1:<remote-forward-port>` on the remote host.
 
-This copies hook files to the remote server, registers Claude Code hooks and Codex official hooks in remote mode, and prints SSH configuration instructions.
-
-**SSH configuration** (add to your local `~/.ssh/config`):
-
-```
-Host my-server
-    HostName remote-host
-    User user
-    RemoteForward 127.0.0.1:23333 127.0.0.1:23333
-    ServerAliveInterval 30
-    ServerAliveCountMax 3
-```
+`bash scripts/remote-deploy.sh user@remote-host` is still available for source checkouts and debugging, but it is not the packaged DMG/installer workflow.
 
 **How it works:**
 - **Claude Code** — command hooks on the remote server POST state changes to `localhost:23333`, which the SSH tunnel forwards back to your local Clawd. Permission bubbles work too — the HTTP round-trip goes through the tunnel.
 - **Codex CLI** — official hooks on the remote server POST state changes and permission requests through the same tunnel. If Codex hooks are unavailable or disabled on the remote install, use the fallback log monitor: `node ~/.claude/hooks/codex-remote-monitor.js --port 23333`
 
 Remote hooks run in `CLAWD_REMOTE` mode which skips PID collection (remote PIDs are meaningless locally). Terminal focus is not available for remote sessions.
+
+Doctor's agent integration checks are local-only. A local Claude Code "broken path" warning does not diagnose remote hook deployment; use the Remote SSH profile's hook status and deploy log for the remote side.
 
 > Thanks to [@Magic-Bytes](https://github.com/Magic-Bytes) for the original SSH tunneling idea ([#9](https://github.com/rullerzhou-afk/clawd-on-desk/issues/9)).
 

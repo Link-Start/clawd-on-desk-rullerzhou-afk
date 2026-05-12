@@ -31,6 +31,27 @@ test("settings-renderer.js SIDEBAR_TABS includes remote-ssh entry", () => {
   assert.match(code, /labelKey:\s*"sidebarRemoteSsh"/);
 });
 
+test("settings-tab-remote-ssh.js one-click deploy opens tunnel before deploying hooks", () => {
+  const code = fs.readFileSync(path.join(SRC_DIR, "settings-tab-remote-ssh.js"), "utf8");
+  assert.match(code, /async\s+function\s+oneClickDeploy\(profile\)/);
+  assert.match(code, /view\.selectedProfileId\s*=\s*profile\.id/);
+  assert.match(code, /appendProgress\(profile\.id,\s*"connect",\s*"start"\)/);
+  assert.match(code, /await\s+window\.remoteSsh\.connect\(profile\.id\)/);
+  assert.match(code, /await\s+waitForTunnel\(profile\.id\)/);
+  assert.match(code, /function\s+deployProfile\(profileId,\s*options\s*=\s*\{\}\)/);
+  assert.match(code, /deployProfile\(profile\.id,\s*\{\s*clearLog:\s*false,\s*reuseBusy:\s*true\s*\}\)/);
+  assert.doesNotMatch(code, /connectAfter/);
+});
+
+test("settings-tab-remote-ssh.js exposes only one-click deploy on profile cards", () => {
+  const code = fs.readFileSync(path.join(SRC_DIR, "settings-tab-remote-ssh.js"), "utf8");
+  assert.match(code, /cardDeployBtn\.textContent\s*=\s*isDeploying\s*\?\s*t\("remoteSshDeploying"\)\s*:\s*t\("remoteSshDeployShort"\)/);
+  assert.match(code, /cardDeployBtn\.addEventListener\("click"/);
+  assert.match(code, /oneClickDeploy\(profile\)/);
+  assert.doesNotMatch(code, /const\s+connectBtn\s*=/);
+  assert.doesNotMatch(code, /connectDetailBtn/);
+});
+
 // ── i18n: all four language packs include the new keys ──
 
 test("settings-i18n.js: all 4 language packs include remote-ssh keys", () => {
@@ -44,7 +65,12 @@ test("settings-i18n.js: all 4 language packs include remote-ssh keys", () => {
     "remoteSshDisconnect",
     "remoteSshAuthenticate",
     "remoteSshOpenTerminal",
+    "remoteSshConnectFailed",
+    "remoteSshConnectTimeout",
+    "remoteSshConnectAlreadyConnected",
+    "remoteSshDeployShort",
     "remoteSshDeploy",
+    "remoteSshStep_connect",
     "remoteSshFieldHost",
     "remoteSshFieldRemoteForwardPort",
     "remoteSshStatus_idle",
