@@ -20,7 +20,7 @@ const {
   redactText,
   SIDECAR_ENV_CONFIG,
   SIDECAR_ENV_TOKEN_FILE,
-  SIDE_CAR_PATH_ENV,
+  SIDECAR_PATH_ENV,
 } = require("../src/telegram-approval-sidecar");
 
 class FakeStream extends EventEmitter {
@@ -128,6 +128,7 @@ test("sidecar manager parses handshake and creates a client", async () => {
   const client = await ready;
 
   assert.equal(sidecar.getStatus().status, "running");
+  assert.equal(sidecar.getStatus().binaryPathSource, "explicit");
   assert.equal(sidecar.getStatus().listen, "127.0.0.1:24444");
   assert.equal(client.isEnabled(), true);
   assert.equal(calls.length, 1);
@@ -284,7 +285,7 @@ test("sidecar manager restarts unexpected exits with a rate limit", async () => 
 test("resolveSidecarBinaryPath honors explicit and env executable paths", () => {
   assert.equal(resolveSidecarBinaryPath({ binaryPath: "explicit.exe" }), "explicit.exe");
   assert.equal(resolveSidecarBinaryPath({
-    env: { [SIDE_CAR_PATH_ENV]: "env.exe" },
+    env: { [SIDECAR_PATH_ENV]: "env.exe" },
   }), "env.exe");
 });
 
@@ -321,6 +322,19 @@ test("resolveSidecarBinaryPath ignores resourcesPath in source mode and falls ba
   );
 });
 
+test("resolveSidecarBinaryPath treats resourcesPath without packaged mode as source fallback", () => {
+  const resolved = resolveSidecarBinary({
+    resourcesPath: "C:\\resources",
+    platform: "win32",
+    arch: "x64",
+  });
+  assert.equal(resolved.source, "dev");
+  assert.equal(
+    resolved.path,
+    path.join(__dirname, "..", "bin", "cc-connect-clawd", "windows-x64", "cc-connect-clawd.exe")
+  );
+});
+
 test("sidecar binary names are stable across packaged platforms", () => {
   assert.equal(sidecarExecutableName("win32"), "cc-connect-clawd.exe");
   assert.equal(sidecarExecutableName("darwin"), "cc-connect-clawd");
@@ -347,6 +361,36 @@ test("sidecar manager reports a clear missing binary error for resolved paths", 
   await assert.rejects(sidecar.start(), /sidecar binary not found/);
   assert.equal(sidecar.getStatus().status, "failed");
   assert.match(sidecar.getStatus().message, /windows-x64/);
+});
+
+test("sidecar manager reports a clear missing binary error for source-mode fallback", async () => {
+  const sidecar = new TelegramApprovalSidecar({
+    env: {},
+    baseEnv: {},
+    platform: "linux",
+    arch: "x64",
+    isPackaged: false,
+    fs: { existsSync: () => false },
+  });
+
+  await assert.rejects(sidecar.start(), /sidecar binary not found/);
+  assert.equal(sidecar.getStatus().status, "failed");
+  assert.equal(sidecar.getStatus().binaryPathSource, "dev");
+  assert.match(sidecar.getStatus().message, /linux-x64/);
+});
+
+test("sidecar manager fails closed when binary availability cannot be checked", async () => {
+  const sidecar = new TelegramApprovalSidecar({
+    env: {},
+    baseEnv: {},
+    platform: "win32",
+    arch: "x64",
+    isPackaged: false,
+    fs: {},
+  });
+
+  await assert.rejects(sidecar.start(), /availability check is unavailable/);
+  assert.equal(sidecar.getStatus().status, "failed");
 });
 
 test("redactText masks known Telegram identifiers and token-like values", () => {

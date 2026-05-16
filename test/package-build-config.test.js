@@ -143,7 +143,7 @@ describe("package build config", () => {
       );
     });
 
-    it("documents the expected sidecar binary layout", () => {
+    it("documents the expected sidecar binary names in the README", () => {
       const readme = path.join(ROOT, "bin", "cc-connect-clawd", "README.md");
       assert.ok(fs.existsSync(readme), "bin/cc-connect-clawd/README.md should document release binary names");
       const text = fs.readFileSync(readme, "utf8");

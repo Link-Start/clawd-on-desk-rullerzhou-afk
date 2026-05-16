@@ -14,7 +14,7 @@ const DEFAULT_RESTART_BACKOFF_MS = 1000;
 const MAX_HANDSHAKE_BUFFER = 8192;
 const SIDECAR_ENV_CONFIG = "CLAWD_BRIDGE_CONFIG";
 const SIDECAR_ENV_TOKEN_FILE = "CLAWD_TG_BOT_TOKEN_FILE";
-const SIDE_CAR_PATH_ENV = "CLAWD_CC_CONNECT_CLAWD_PATH";
+const SIDECAR_PATH_ENV = "CLAWD_CC_CONNECT_CLAWD_PATH";
 const SIDECAR_BINARY_BASENAME = "cc-connect-clawd";
 const SIDECAR_RESOURCE_ROOT = path.join("sidecars", "cc-connect-clawd");
 // Note: the sidecar reads the token from the env-file at SIDECAR_ENV_TOKEN_FILE
@@ -150,15 +150,15 @@ function resolveSidecarBinary(options = {}) {
   const env = options.env || process.env;
   const platform = options.platform || process.platform;
   const arch = options.arch || process.arch;
-  if (env[SIDE_CAR_PATH_ENV]) {
+  if (env[SIDECAR_PATH_ENV]) {
     return {
-      path: resolveOverrideBinaryPath(env[SIDE_CAR_PATH_ENV], { platform, fs: options.fs }),
+      path: resolveOverrideBinaryPath(env[SIDECAR_PATH_ENV], { platform, fs: options.fs }),
       source: "env",
     };
   }
 
   const resourceRoot = options.resourcesPath || (options.isPackaged ? process.resourcesPath : "");
-  if (resourceRoot && options.isPackaged !== false) {
+  if (resourceRoot && options.isPackaged === true) {
     return {
       path: path.join(resourceRoot, sidecarResourceRelativePath({ platform, arch })),
       source: "packaged",
@@ -233,7 +233,7 @@ class TelegramApprovalSidecar extends EventEmitter {
   }
 
   getStatus() {
-    return { ...this.status };
+    return { ...this.status, binaryPathSource: this.binaryPathSource };
   }
 
   isRunning() {
@@ -385,7 +385,9 @@ class TelegramApprovalSidecar extends EventEmitter {
   _getBinaryAvailabilityError() {
     if (this.skipBinaryExistsCheck) return "";
     if (!this.binaryPath) return "telegram approval sidecar binary path is empty";
-    if (!this.fs || typeof this.fs.existsSync !== "function") return "";
+    if (!this.fs || typeof this.fs.existsSync !== "function") {
+      return "telegram approval sidecar binary availability check is unavailable";
+    }
     try {
       if (this.fs.existsSync(this.binaryPath)) return "";
     } catch {}
@@ -550,6 +552,6 @@ module.exports = {
   redactText,
   SIDECAR_ENV_CONFIG,
   SIDECAR_ENV_TOKEN_FILE,
-  SIDE_CAR_PATH_ENV,
+  SIDECAR_PATH_ENV,
   SIDECAR_RESOURCE_ROOT,
 };
