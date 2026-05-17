@@ -11,6 +11,7 @@ const {
 const ENSURE_COMMAND = "node scripts/ensure-sidecar-binaries.js";
 const SKIP_ENV = "CLAWD_SKIP_SIDECAR_FETCH";
 const OVERRIDE_ENV = "CLAWD_CC_CONNECT_CLAWD_PATH";
+const DEFAULT_PREFLIGHT_REQUEST_TIMEOUT_MS = 30000;
 
 function runtimePlatformName(platform = process.platform) {
   if (platform === "win32") return "windows";
@@ -48,6 +49,29 @@ function sidecarFetchCommand(targetDir) {
   return `npm run fetch:sidecars -- --target ${targetDir}`;
 }
 
+function runtimeExecutableName(platform = process.platform) {
+  return platform === "win32" ? "cc-connect-clawd.exe" : "cc-connect-clawd";
+}
+
+function resolveOverridePath(rawValue, options = {}) {
+  const value = String(rawValue || "").trim();
+  if (!value) return "";
+  const fsModule = options.fs || fs;
+  const platform = options.platform || process.platform;
+  try {
+    if (fsModule && typeof fsModule.statSync === "function") {
+      const stat = fsModule.statSync(value);
+      if (stat && typeof stat.isDirectory === "function" && stat.isDirectory()) {
+        return path.join(value, runtimeExecutableName(platform));
+      }
+    }
+  } catch {
+    // Treat the override as a direct executable path below.
+  }
+  if (/[\\/]$/.test(value)) return path.join(value, runtimeExecutableName(platform));
+  return value;
+}
+
 function write(stream, message) {
   if (stream && typeof stream.write === "function") stream.write(message);
 }
@@ -64,7 +88,16 @@ async function ensureCurrentPlatformSidecar(options = {}) {
     return { ok: true, skipped: true, reason: "env-skip" };
   }
   if (env[OVERRIDE_ENV]) {
-    return { ok: true, skipped: true, reason: "override-path" };
+    const overridePath = resolveOverridePath(env[OVERRIDE_ENV], { fs: fsModule, platform: options.platform });
+    if (isExistingFile(fsModule, overridePath)) {
+      return { ok: true, skipped: true, reason: "override-path", path: overridePath };
+    }
+    write(stderr, [
+      `${OVERRIDE_ENV} is set but no sidecar executable was found: ${overridePath || env[OVERRIDE_ENV]}`,
+      "Clawd will still launch. Fix the override path, or unset it to allow automatic sidecar fetch.",
+      "",
+    ].join("\n"));
+    return { ok: false, skipped: true, reason: "override-path-missing", path: overridePath || String(env[OVERRIDE_ENV]) };
   }
   if (!target) {
     return {
@@ -89,13 +122,19 @@ async function ensureCurrentPlatformSidecar(options = {}) {
   write(stdout, `Missing ${target.dir} cc-connect-clawd sidecar; fetching pinned binary...\n`);
   try {
     const fetch = options.fetchSidecarBinaries || fetchSidecarBinaries;
-    await fetch({ rootDir, target: target.dir, fs: fsModule });
+    await fetch({
+      rootDir,
+      target: target.dir,
+      fs: fsModule,
+      requestTimeoutMs: options.requestTimeoutMs || DEFAULT_PREFLIGHT_REQUEST_TIMEOUT_MS,
+    });
     return { ok: true, fetched: true, target: target.dir, path: binaryPath };
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
     write(stderr, [
       "Telegram approval sidecar is missing and could not be fetched automatically.",
       `Run: ${command}`,
+      `Skip next time: ${SKIP_ENV}=1 npm start`,
       `Reason: ${message}`,
       "",
     ].join("\n"));
@@ -146,11 +185,14 @@ module.exports = {
   ENSURE_COMMAND,
   SKIP_ENV,
   OVERRIDE_ENV,
+  DEFAULT_PREFLIGHT_REQUEST_TIMEOUT_MS,
   runtimePlatformName,
   runtimeSidecarTarget,
   truthyEnv,
   isExistingFile,
   sidecarFetchCommand,
+  runtimeExecutableName,
+  resolveOverridePath,
   ensureCurrentPlatformSidecar,
   parseArgs,
 };

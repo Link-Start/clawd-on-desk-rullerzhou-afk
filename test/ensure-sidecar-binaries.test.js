@@ -72,6 +72,7 @@ test("ensureCurrentPlatformSidecar fetches only the current platform target when
   assert.equal(fetchCalls.length, 1);
   assert.equal(fetchCalls[0].target, "windows-x64");
   assert.equal(fetchCalls[0].rootDir, "D:\\repo");
+  assert.equal(fetchCalls[0].requestTimeoutMs, ensure.DEFAULT_PREFLIGHT_REQUEST_TIMEOUT_MS);
   assert.match(stdout.text(), /fetching pinned binary/);
 });
 
@@ -96,9 +97,10 @@ test("ensureCurrentPlatformSidecar reports fetch failures without throwing", asy
   assert.equal(result.command, "npm run fetch:sidecars -- --target darwin-arm64");
   assert.match(stderr.text(), /could not be fetched automatically/);
   assert.match(stderr.text(), /npm run fetch:sidecars -- --target darwin-arm64/);
+  assert.match(stderr.text(), /CLAWD_SKIP_SIDECAR_FETCH=1 npm start/);
 });
 
-test("ensureCurrentPlatformSidecar honors skip and explicit override env vars", async () => {
+test("ensureCurrentPlatformSidecar honors skip and valid override env vars", async () => {
   const fetchSidecarBinaries = () => {
     throw new Error("should not fetch");
   };
@@ -106,10 +108,52 @@ test("ensureCurrentPlatformSidecar honors skip and explicit override env vars", 
     env: { CLAWD_SKIP_SIDECAR_FETCH: "1" },
     fetchSidecarBinaries,
   }), { ok: true, skipped: true, reason: "env-skip" });
-  assert.deepEqual(await ensure.ensureCurrentPlatformSidecar({
-    env: { CLAWD_CC_CONNECT_CLAWD_PATH: "/tmp/sidecar" },
+  const overrideDir = path.join("D:\\tools", "sidecar");
+  const overrideExe = path.join(overrideDir, "cc-connect-clawd.exe");
+  const result = await ensure.ensureCurrentPlatformSidecar({
+    platform: "win32",
+    env: { CLAWD_CC_CONNECT_CLAWD_PATH: overrideDir },
+    fs: {
+      existsSync: (filePath) => filePath === overrideExe,
+      statSync: (filePath) => {
+        if (filePath === overrideDir) return { isDirectory: () => true, isFile: () => false };
+        if (filePath === overrideExe) return { isDirectory: () => false, isFile: () => true };
+        throw new Error(`unexpected path: ${filePath}`);
+      },
+    },
     fetchSidecarBinaries,
-  }), { ok: true, skipped: true, reason: "override-path" });
+  });
+  assert.deepEqual(result, { ok: true, skipped: true, reason: "override-path", path: overrideExe });
+});
+
+test("ensureCurrentPlatformSidecar reports a missing override path without fetching", async () => {
+  const stderr = makeStream();
+  const result = await ensure.ensureCurrentPlatformSidecar({
+    env: { CLAWD_CC_CONNECT_CLAWD_PATH: "/tmp/missing-sidecar" },
+    stderr,
+    fs: {
+      existsSync: () => false,
+      statSync: () => {
+        throw new Error("missing");
+      },
+    },
+    fetchSidecarBinaries: () => {
+      throw new Error("should not fetch");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "override-path-missing");
+  assert.match(result.path, /missing-sidecar/);
+  assert.match(stderr.text(), /CLAWD_CC_CONNECT_CLAWD_PATH is set but no sidecar executable was found/);
+});
+
+test("resolveOverridePath appends the runtime executable for directory-like values", () => {
+  assert.equal(
+    ensure.resolveOverridePath("D:\\tools\\sidecar\\", { platform: "win32", fs: { statSync: () => { throw new Error("skip"); } } }),
+    path.join("D:\\tools\\sidecar\\", "cc-connect-clawd.exe")
+  );
 });
 
 test("sidecarFetchCommand gives the manual recovery command", () => {

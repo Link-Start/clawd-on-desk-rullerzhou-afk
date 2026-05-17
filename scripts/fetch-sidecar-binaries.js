@@ -241,7 +241,7 @@ function installBinary(fsModule, filePath, buffer) {
 
 async function fetchSidecarBinaries(options = {}) {
   const fsModule = options.fs || fs;
-  const download = options.download || downloadBuffer;
+  const download = options.download || ((url) => downloadBuffer(url, 0, options.requestTimeoutMs));
   const rootDir = options.rootDir || path.join(__dirname, "..");
   const release = {
     ...DEFAULT_RELEASE,
@@ -265,7 +265,7 @@ async function fetchSidecarBinaries(options = {}) {
   return { ok: true, manifest, installed };
 }
 
-function downloadBuffer(url, redirects = 0) {
+function downloadBuffer(url, redirects = 0, timeoutMs = 120000) {
   if (redirects > 5) return Promise.reject(new Error(`Too many redirects while downloading ${url}`));
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
@@ -278,7 +278,7 @@ function downloadBuffer(url, redirects = 0) {
       if (status >= 300 && status < 400 && res.headers.location) {
         res.resume();
         const next = new URL(res.headers.location, url).toString();
-        downloadBuffer(next, redirects + 1).then(resolve, reject);
+        downloadBuffer(next, redirects + 1, timeoutMs).then(resolve, reject);
         return;
       }
       if (status !== 200) {
@@ -291,7 +291,7 @@ function downloadBuffer(url, redirects = 0) {
       res.on("end", () => resolve(Buffer.concat(chunks)));
     });
     req.on("error", reject);
-    req.setTimeout(120000, () => {
+    req.setTimeout(timeoutMs || 120000, () => {
       req.destroy(new Error(`Download timed out for ${url}`));
     });
   });
@@ -361,6 +361,7 @@ module.exports = {
   extractTarGzEntry,
   extractSidecarBinary,
   installBinary,
+  downloadBuffer,
   fetchSidecarBinaries,
   parseArgs,
 };

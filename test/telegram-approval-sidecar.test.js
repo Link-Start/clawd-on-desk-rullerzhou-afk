@@ -380,6 +380,24 @@ test("sidecar manager reports a clear missing binary error for source-mode fallb
   assert.match(sidecar.getStatus().message, /npm run fetch:sidecars -- --target linux-x64/);
 });
 
+test("sidecar manager does not suggest an unsupported source fetch target", async () => {
+  const sidecar = new TelegramApprovalSidecar({
+    env: {},
+    baseEnv: {},
+    platform: "linux",
+    arch: "arm64",
+    isPackaged: false,
+    fs: { existsSync: () => false },
+  });
+
+  await assert.rejects(sidecar.start(), /sidecar binary not found/);
+  assert.equal(sidecar.getStatus().status, "failed");
+  assert.equal(sidecar.getStatus().binaryPathSource, "dev");
+  assert.match(sidecar.getStatus().message, /No pinned Telegram approval sidecar is available for linux-arm64/);
+  assert.match(sidecar.getStatus().message, /CLAWD_CC_CONNECT_CLAWD_PATH/);
+  assert.doesNotMatch(sidecar.getStatus().message, /npm run fetch:sidecars -- --target linux-arm64/);
+});
+
 test("sidecar manager fails closed when binary availability cannot be checked", async () => {
   const sidecar = new TelegramApprovalSidecar({
     env: {},
