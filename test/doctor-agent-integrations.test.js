@@ -10,7 +10,7 @@ const {
   findOpencodePluginEntry,
 } = require("../src/doctor-detectors/agent-integrations");
 const { GEMINI_HOOK_EVENTS } = require("../hooks/gemini-install");
-const { ANTIGRAVITY_HOOK_EVENTS } = require("../hooks/antigravity-install");
+const { ANTIGRAVITY_HOOK_EVENTS, __test: antigravityInstallTest } = require("../hooks/antigravity-install");
 
 const tempDirs = [];
 
@@ -423,6 +423,41 @@ describe("checkAgentIntegrations", () => {
     assert.strictEqual(detail.status, "ok");
     assert.strictEqual(detail.commandCount, ANTIGRAVITY_HOOK_EVENTS.length);
     assert.strictEqual(detail.scriptPath, "/app/hooks/antigravity-hook.js");
+  });
+
+  it("validates Windows Antigravity EncodedCommand hooks for every required event", () => {
+    const descriptor = antigravityDescriptor();
+    const nodeBin = "C:\\Program Files\\nodejs\\node.exe";
+    const scriptPath = "D:/app/hooks/antigravity-hook.js";
+    writeAntigravityHooks(descriptor, antigravityHooksConfig((event) =>
+      antigravityInstallTest.buildWindowsAntigravityHookCommand(
+        nodeBin,
+        scriptPath,
+        event,
+        {
+          platform: "win32",
+          powerShellBin: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        }
+      )
+    ));
+
+    const seen = [];
+    const detail = runOne(descriptor, {
+      validateCommand: (command) => {
+        seen.push(command);
+        assert.strictEqual(command.includes("antigravity-hook.js"), false);
+        return {
+          ok: true,
+          nodeBin,
+          scriptPath,
+        };
+      },
+    });
+
+    assert.strictEqual(seen.length, ANTIGRAVITY_HOOK_EVENTS.length);
+    assert.strictEqual(detail.status, "ok");
+    assert.strictEqual(detail.commandCount, ANTIGRAVITY_HOOK_EVENTS.length);
+    assert.strictEqual(detail.scriptPath, scriptPath);
   });
 
   it("warns when Antigravity hooks are missing any required event", () => {

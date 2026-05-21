@@ -9,7 +9,7 @@ const { GEMINI_HOOK_EVENTS } = require("../../hooks/gemini-install");
 const { ANTIGRAVITY_HOOK_EVENTS, HOOK_GROUP_ID: ANTIGRAVITY_HOOK_GROUP_ID } = require("../../hooks/antigravity-install");
 const { findKimiHookCommands } = require("../../hooks/kimi-install");
 const { getAgentDescriptors } = require("./agent-descriptors");
-const { validateHookCommand } = require("./agent-node-bin-parser");
+const { commandContainsFragment, validateHookCommand } = require("./agent-node-bin-parser");
 const { checkCodexHookTrust, checkCodexHooksFeature } = require("./codex-features-check");
 const { validateOpencodeEntry } = require("./opencode-entry-validator");
 const { validateOpenClawEntry } = require("./openclaw-entry-validator");
@@ -240,12 +240,12 @@ function findAntigravityHookCommandsForEvent(settings, eventName, marker) {
     if (!Array.isArray(entries)) continue;
     for (const entry of entries) {
       if (!entry || typeof entry !== "object") continue;
-      if (typeof entry.command === "string" && entry.command.includes(marker)) {
+      if (typeof entry.command === "string" && commandContainsFragment(entry.command, marker)) {
         commands.push(entry.command);
       }
       if (!Array.isArray(entry.hooks)) continue;
       for (const hook of entry.hooks) {
-        if (hook && typeof hook.command === "string" && hook.command.includes(marker)) {
+        if (hook && typeof hook.command === "string" && commandContainsFragment(hook.command, marker)) {
           commands.push(hook.command);
         }
       }

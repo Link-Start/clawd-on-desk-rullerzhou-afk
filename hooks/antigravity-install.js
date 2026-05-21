@@ -53,6 +53,68 @@ function buildWindowsAntigravityHookCommand(nodeBin, hookScript, event, options 
   return `${windowsPowerShellBin(options)} -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedCommand}`;
 }
 
+function decodeWindowsEncodedCommand(command) {
+  const match = String(command || "").match(/(?:^|\s)-(?:EncodedCommand|enc|e)\s+([A-Za-z0-9+/=]+)/i);
+  if (!match) return null;
+  try {
+    const decoded = Buffer.from(match[1], "base64").toString("utf16le").trim();
+    return decoded || null;
+  } catch {
+    return null;
+  }
+}
+
+function extractFirstQuotedToken(command) {
+  const text = String(command || "").trim().replace(/^&\s+/, "");
+  const single = text.match(/^'((?:''|[^'])*)'/);
+  if (single) return single[1].replace(/''/g, "'");
+  const double = text.match(/^"((?:\\"|[^"])*)"/);
+  if (double) return double[1].replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
+  const bare = text.match(/^(\S+)/);
+  return bare ? bare[1] : null;
+}
+
+function extractNodeBinFromCommand(command) {
+  const decoded = decodeWindowsEncodedCommand(command);
+  const token = extractFirstQuotedToken(decoded || command);
+  if (!token || token.includes(MARKER)) return null;
+  return token;
+}
+
+function collectHookCommandsFromEntries(entries) {
+  const commands = [];
+  if (!Array.isArray(entries)) return commands;
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    if (typeof entry.command === "string") {
+      const decoded = decodeWindowsEncodedCommand(entry.command);
+      if (entry.command.includes(MARKER) || (decoded && decoded.includes(MARKER))) {
+        commands.push(entry.command);
+      }
+    }
+    if (!Array.isArray(entry.hooks)) continue;
+    for (const hook of entry.hooks) {
+      if (!hook || typeof hook.command !== "string") continue;
+      const decoded = decodeWindowsEncodedCommand(hook.command);
+      if (hook.command.includes(MARKER) || (decoded && decoded.includes(MARKER))) {
+        commands.push(hook.command);
+      }
+    }
+  }
+  return commands;
+}
+
+function extractExistingAntigravityNodeBin(existingGroup) {
+  if (!existingGroup || typeof existingGroup !== "object") return null;
+  for (const event of ANTIGRAVITY_HOOK_EVENTS) {
+    for (const command of collectHookCommandsFromEntries(existingGroup[event])) {
+      const nodeBin = extractNodeBinFromCommand(command);
+      if (nodeBin) return nodeBin;
+    }
+  }
+  return null;
+}
+
 function isNodeExecutablePath(value) {
   return /(?:^|[\\/])node(?:\.exe)?$/i.test(String(value || ""));
 }
@@ -89,9 +151,9 @@ function resolveAntigravityNodeBin(options = {}) {
   if (options.nodeBin !== undefined) return options.nodeBin;
   const platform = options.platform || process.platform;
   if (platform === "win32") {
-    return resolveWindowsNodeBin(options) || resolveNodeBin(options) || "node";
+    return resolveWindowsNodeBin(options);
   }
-  return resolveNodeBin(options) || "node";
+  return resolveNodeBin(options);
 }
 
 function buildHookHandler(command) {
@@ -143,13 +205,15 @@ function registerAntigravityHooks(options = {}) {
     return { installed: false, added: 0, updated: 0, skipped: 0, configPath };
   }
 
-  const hookScript = asarUnpackedPath(path.resolve(__dirname, "antigravity-hook.js").replace(/\\/g, "/"));
-  const nodeBin = resolveAntigravityNodeBin(options);
-  const desiredGroup = buildAntigravityHooks((event) => buildAntigravityHookCommand(nodeBin, hookScript, event, options))[HOOK_GROUP_ID];
   const settings = normalizeSettings(readJsonIfExists(configPath));
   const existingGroup = settings[HOOK_GROUP_ID] && typeof settings[HOOK_GROUP_ID] === "object" && !Array.isArray(settings[HOOK_GROUP_ID])
     ? settings[HOOK_GROUP_ID]
     : null;
+  const hookScript = asarUnpackedPath(path.resolve(__dirname, "antigravity-hook.js").replace(/\\/g, "/"));
+  const nodeBin = resolveAntigravityNodeBin(options)
+    || extractExistingAntigravityNodeBin(existingGroup)
+    || "node";
+  const desiredGroup = buildAntigravityHooks((event) => buildAntigravityHookCommand(nodeBin, hookScript, event, options))[HOOK_GROUP_ID];
 
   let added = 0;
   let updated = 0;
@@ -196,6 +260,9 @@ module.exports = {
     buildAntigravityHookCommand,
     buildAntigravityHooks,
     buildWindowsAntigravityHookCommand,
+    decodeWindowsEncodedCommand,
+    extractExistingAntigravityNodeBin,
+    extractNodeBinFromCommand,
     hasAntigravityConfig,
     normalizeSettings,
     resolveAntigravityNodeBin,

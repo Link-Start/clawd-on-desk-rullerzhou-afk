@@ -159,4 +159,31 @@ describe("Antigravity hook installer", () => {
 
     assert.strictEqual(resolved, nodeBin);
   });
+
+  it("preserves an existing Windows node.exe path when detection fails later", () => {
+    const homeDir = makeTempHome();
+    const nodeBin = "C:\\Tools\\node.exe";
+    const options = {
+      silent: true,
+      homeDir,
+      platform: "win32",
+      nodeBin,
+      powerShellBin: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    };
+    registerAntigravityHooks(options);
+
+    const result = registerAntigravityHooks({
+      silent: true,
+      homeDir,
+      platform: "win32",
+      execPath: "C:\\Program Files\\Clawd\\Clawd.exe",
+      execFileSync: () => { throw new Error("where failed"); },
+      powerShellBin: options.powerShellBin,
+    });
+
+    const hooks = readJson(path.join(homeDir, ".gemini", "config", "hooks.json"));
+    assert.strictEqual(result.updated, 0);
+    assert.strictEqual(result.skipped, 5);
+    assert.match(decodeEncodedCommand(hooks[HOOK_GROUP_ID].PreInvocation[0].command), /C:\\Tools\\node\.exe/);
+  });
 });
