@@ -24,6 +24,7 @@ const {
 const {
   handlePermissionPost,
   shouldBypassCCBubble,
+  shouldBypassAntigravityBubble,
   shouldBypassCodexBubble,
   shouldBypassOpencodeBubble,
   shouldBypassPiBubble,
@@ -279,6 +280,7 @@ module.exports.__test = {
   entriesContainHttpHookUrl,
   settingsNeedClaudeHookResync,
   shouldBypassCCBubble,
+  shouldBypassAntigravityBubble,
   shouldBypassCodexBubble,
   shouldBypassOpencodeBubble,
   shouldBypassPiBubble,

@@ -20,6 +20,8 @@ const ANTIGRAVITY_HOOK_EVENTS = [
   "PostInvocation",
   "Stop",
 ];
+const DEFAULT_HOOK_TIMEOUT_SECONDS = 10;
+const PRE_TOOL_USE_TIMEOUT_SECONDS = 600;
 
 function buildAntigravityHookCommand(nodeBin, hookScript, event, options = {}) {
   const platform = options.platform || process.platform;
@@ -156,8 +158,8 @@ function resolveAntigravityNodeBin(options = {}) {
   return resolveNodeBin(options);
 }
 
-function buildHookHandler(command) {
-  return { type: "command", command, timeout: 10 };
+function buildHookHandler(command, timeout = DEFAULT_HOOK_TIMEOUT_SECONDS) {
+  return { type: "command", command, timeout };
 }
 
 function buildAntigravityHooks(commandForEvent) {
@@ -166,7 +168,7 @@ function buildAntigravityHooks(commandForEvent) {
       PreInvocation: [buildHookHandler(commandForEvent("PreInvocation"))],
       PreToolUse: [{
         matcher: "*",
-        hooks: [buildHookHandler(commandForEvent("PreToolUse"))],
+        hooks: [buildHookHandler(commandForEvent("PreToolUse"), PRE_TOOL_USE_TIMEOUT_SECONDS)],
       }],
       PostToolUse: [{
         matcher: "*",

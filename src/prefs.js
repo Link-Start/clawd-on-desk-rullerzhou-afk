@@ -145,7 +145,7 @@ const SCHEMA = {
       "copilot-cli": { enabled: true, permissionsEnabled: true, notificationHookEnabled: true },
       "cursor-agent": { enabled: true, permissionsEnabled: true, notificationHookEnabled: true },
       "gemini-cli": { enabled: true, permissionsEnabled: true, notificationHookEnabled: true },
-      "antigravity-cli": { enabled: true },
+      "antigravity-cli": { enabled: true, permissionsEnabled: true },
       "codebuddy": { enabled: true, permissionsEnabled: true, notificationHookEnabled: true },
       "kiro-cli": { enabled: true, permissionsEnabled: true, notificationHookEnabled: true },
       "kimi-cli": { enabled: true, permissionsEnabled: true, notificationHookEnabled: true },

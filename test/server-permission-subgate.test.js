@@ -3,7 +3,12 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
 
-const { shouldBypassCCBubble, shouldBypassOpencodeBubble, shouldBypassPiBubble } = require("../src/server").__test;
+const {
+  shouldBypassAntigravityBubble,
+  shouldBypassCCBubble,
+  shouldBypassOpencodeBubble,
+  shouldBypassPiBubble,
+} = require("../src/server").__test;
 
 function makeCtx({ enabled = true, hideBubbles = false, permissionBubblesEnabled = true } = {}) {
   return {
@@ -117,5 +122,28 @@ describe("shouldBypassPiBubble", () => {
     };
     shouldBypassPiBubble(ctx);
     assert.deepStrictEqual(calls, ["pi"]);
+  });
+});
+
+describe("shouldBypassAntigravityBubble", () => {
+  it("does not bypass when the Antigravity sub-gate is on", () => {
+    assert.strictEqual(shouldBypassAntigravityBubble(makeCtx({ enabled: true })), false);
+  });
+
+  it("bypasses when the Antigravity sub-gate or split permission category is off", () => {
+    assert.strictEqual(shouldBypassAntigravityBubble(makeCtx({ enabled: false })), true);
+    assert.strictEqual(shouldBypassAntigravityBubble(makeCtx({ enabled: true, permissionBubblesEnabled: false })), true);
+  });
+
+  it("always queries the 'antigravity-cli' agent id regardless of call context", () => {
+    const calls = [];
+    const ctx = {
+      isAgentPermissionsEnabled: (id) => {
+        calls.push(id);
+        return false;
+      },
+    };
+    shouldBypassAntigravityBubble(ctx);
+    assert.deepStrictEqual(calls, ["antigravity-cli"]);
   });
 });

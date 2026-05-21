@@ -12,7 +12,7 @@
 
 **Gemini CLI** — hooks live in `~/.gemini/settings.json`. Clawd auto-registers them on launch when Gemini is installed, or you can run `npm run install:gemini-hooks` manually.
 
-**Antigravity CLI (agy)** — hooks live in `~/.gemini/config/hooks.json`. Clawd auto-registers them on launch when Antigravity config exists, or you can run `npm run install:antigravity-hooks` manually. Antigravity support is state-only for now: `PreToolUse` updates the pet and returns `ask` so agy keeps its native permission flow; Clawd does not intercept Antigravity permissions into a bubble yet.
+**Antigravity CLI (agy)** — hooks live in `~/.gemini/config/hooks.json`. Clawd auto-registers them on launch when Antigravity config exists, or you can run `npm run install:antigravity-hooks` manually. `PreToolUse` updates the pet and can show an experimental Allow/Deny permission bubble. If Clawd is unavailable, DND is on, bubbles are disabled, or the Antigravity sub-gate is off, the hook returns `ask` so agy keeps its native permission flow.
 
 **Cursor Agent** — hooks live in `~/.cursor/hooks.json`. Clawd auto-registers them on launch when Cursor is installed, or you can run `npm run install:cursor-hooks` manually.
 

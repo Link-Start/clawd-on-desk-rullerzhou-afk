@@ -44,6 +44,12 @@ function shouldBypassPiBubble(ctx) {
   return !ctx.isAgentPermissionsEnabled("pi");
 }
 
+function shouldBypassAntigravityBubble(ctx) {
+  if (!arePermissionBubblesEnabled(ctx)) return true;
+  if (typeof ctx.isAgentPermissionsEnabled !== "function") return false;
+  return !ctx.isAgentPermissionsEnabled("antigravity-cli");
+}
+
 function shouldBypassCodexBubble(ctx) {
   if (!arePermissionBubblesEnabled(ctx)) return true;
   if (typeof ctx.isAgentPermissionsEnabled !== "function") return false;
@@ -103,12 +109,41 @@ function buildCodexPermissionSessionOptions(data) {
   return options;
 }
 
+function buildAntigravityPermissionSessionOptions(data) {
+  const sourcePid = normalizePositiveInteger(data.source_pid);
+  const rawAgentPid = data.agent_pid ?? data.claude_pid ?? data.cursor_pid;
+  const agentPid = normalizePositiveInteger(rawAgentPid);
+  const pidChain = Array.isArray(data.pid_chain)
+    ? data.pid_chain.filter((n) => Number.isFinite(n) && n > 0).map((n) => Math.floor(n))
+    : null;
+  const options = {
+    agentId: "antigravity-cli",
+    hookSource: "antigravity-hook",
+  };
+
+  if (sourcePid) options.sourcePid = sourcePid;
+  if (agentPid) options.agentPid = agentPid;
+  if (pidChain && pidChain.length) options.pidChain = pidChain;
+  const cwd = normalizeString(data.cwd);
+  const host = normalizeString(data.host);
+  const platform = normalizeString(data.platform);
+  if (cwd) options.cwd = cwd;
+  if (host) options.host = host;
+  if (platform) options.platform = platform;
+  return options;
+}
+
 function sendCodexPermissionNoDecision(res) {
   res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
   res.end();
 }
 
 function sendPiPermissionNoDecision(res) {
+  res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
+  res.end();
+}
+
+function sendAntigravityPermissionNoDecision(res) {
   res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
   res.end();
 }
@@ -283,6 +318,95 @@ function handlePermissionPost(req, res, options) {
           removePendingPermission(ctx, permEntry, "opencode-bubble-failed");
           ctx.replyOpencodePermission({ bridgeUrl, bridgeToken, requestId, reply: "reject", toolName });
         }
+        return;
+      }
+
+      // ── Antigravity CLI PreToolUse branch ──
+      // Antigravity hooks are blocking and stdout maps directly to
+      // {decision:"allow"|"deny"|"ask"}. No-decision here means 204 so the
+      // hook prints ask and Antigravity's own approval prompt stays in charge.
+      if (data.agent_id === "antigravity-cli") {
+        const toolName = typeof data.tool_name === "string" && data.tool_name ? data.tool_name : "Unknown";
+        const rawInput = data.tool_input && typeof data.tool_input === "object" ? data.tool_input : {};
+        const toolInput = truncateDeep(rawInput);
+        const sessionId = typeof data.session_id === "string" && data.session_id ? data.session_id : "antigravity:default";
+        const toolUseId = normalizeHookToolUseId(
+          data.tool_use_id ?? data.toolUseId ?? data.toolUseID
+        );
+        const toolInputFingerprint = typeof data.tool_input_fingerprint === "string" && data.tool_input_fingerprint
+          ? data.tool_input_fingerprint
+          : buildToolInputFingerprint(rawInput);
+        const antigravitySessionOptions = buildAntigravityPermissionSessionOptions(data);
+
+        if (ctx.doNotDisturb) {
+          recordRequestHookEvent.droppedByDnd();
+          ctx.permLog(`antigravity DND -> ask fallback (tool=${toolName})`);
+          sendAntigravityPermissionNoDecision(res);
+          return;
+        }
+
+        if (typeof ctx.isAgentEnabled === "function" && !ctx.isAgentEnabled("antigravity-cli")) {
+          recordRequestHookEvent.droppedByDisabled();
+          ctx.permLog(`antigravity disabled -> ask fallback (tool=${toolName})`);
+          sendAntigravityPermissionNoDecision(res);
+          return;
+        }
+
+        if (shouldBypassAntigravityBubble(ctx)) {
+          recordRequestHookEvent.accepted();
+          const reason = !arePermissionBubblesEnabled(ctx)
+            ? "permission bubbles disabled"
+            : "antigravity bubbles disabled";
+          ctx.permLog(`${reason} -> ask fallback (tool=${toolName})`);
+          sendAntigravityPermissionNoDecision(res);
+          return;
+        }
+
+        const permEntry = {
+          res,
+          abortHandler: null,
+          suggestions: [],
+          sessionId,
+          bubble: null,
+          hideTimer: null,
+          toolName,
+          toolInput,
+          toolUseId,
+          toolInputFingerprint,
+          resolvedSuggestion: null,
+          createdAt: Date.now(),
+          agentId: "antigravity-cli",
+          isAntigravity: true,
+          sourcePid: antigravitySessionOptions.sourcePid || null,
+          cwd: antigravitySessionOptions.cwd || "",
+          agentPid: antigravitySessionOptions.agentPid || null,
+          pidChain: antigravitySessionOptions.pidChain || null,
+          host: antigravitySessionOptions.host || null,
+          platform: antigravitySessionOptions.platform || null,
+        };
+        const abortHandler = () => {
+          if (res.writableFinished) return;
+          ctx.permLog("abortHandler fired (antigravity)");
+          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+        };
+        permEntry.abortHandler = abortHandler;
+        res.on("close", abortHandler);
+
+        addPendingPermission(ctx, permEntry);
+        ctx.updateSession(sessionId, "notification", "PermissionRequest", antigravitySessionOptions);
+
+        ctx.permLog(`antigravity showing bubble: tool=${toolName} session=${sessionId} stack=${ctx.pendingPermissions.length}`);
+        recordRequestHookEvent.accepted();
+        try {
+          ctx.showPermissionBubble(permEntry);
+        } catch (bubbleErr) {
+          ctx.permLog(`antigravity bubble failed: ${bubbleErr && bubbleErr.message} -> ask fallback`);
+          removePendingPermission(ctx, permEntry, "antigravity-bubble-failed");
+          if (permEntry.abortHandler) res.removeListener("close", permEntry.abortHandler);
+          sendAntigravityPermissionNoDecision(res);
+          return;
+        }
+        startRemoteApproval(ctx, permEntry);
         return;
       }
 
@@ -661,9 +785,11 @@ module.exports = {
   shouldBypassCodexBubble,
   shouldBypassOpencodeBubble,
   shouldBypassPiBubble,
+  shouldBypassAntigravityBubble,
   arePermissionBubblesEnabled,
   shouldInterceptCodexPermission,
   sendCodexPermissionNoDecision,
   sendPiPermissionNoDecision,
+  sendAntigravityPermissionNoDecision,
   handlePermissionPost,
 };

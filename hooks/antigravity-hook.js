@@ -3,8 +3,14 @@
 // Registered in Antigravity's global hooks file by hooks/antigravity-install.js
 
 const path = require("path");
-const { postStateToRunningServer, readHostPrefix } = require("./server-config");
+const { postPermissionToRunningServer, postStateToRunningServer, readHostPrefix } = require("./server-config");
 const { createPidResolver, readStdinJson, getPlatformConfig } = require("./shared-process");
+
+const ANTIGRAVITY_PERMISSION_TIMEOUT_MS = 590000;
+const TOOL_INPUT_STRING_MAX = 2000;
+const TOOL_INPUT_ARRAY_MAX = 32;
+const TOOL_INPUT_OBJECT_KEYS_MAX = 64;
+const TOOL_INPUT_DEPTH_MAX = 6;
 
 const HOOK_MAP = {
   PreInvocation: { state: "thinking", event: "UserPromptSubmit" },
@@ -30,8 +36,20 @@ const resolve = createPidResolver({
   platformConfig: config,
 });
 
+function getAntigravityPermissionTimeoutMs(env = process.env) {
+  const raw = Number(env.CLAWD_ANTIGRAVITY_PERMISSION_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw > 0) return Math.min(raw, ANTIGRAVITY_PERMISSION_TIMEOUT_MS);
+  return ANTIGRAVITY_PERMISSION_TIMEOUT_MS;
+}
+
+function buildAntigravityNoDecisionOutput(reason) {
+  const body = { decision: "ask" };
+  if (typeof reason === "string" && reason.trim()) body.reason = reason.trim();
+  return JSON.stringify(body);
+}
+
 function stdoutForEvent(hookName) {
-  if (hookName === "PreToolUse") return JSON.stringify({ decision: "ask" });
+  if (hookName === "PreToolUse") return buildAntigravityNoDecisionOutput();
   if (hookName === "Stop") return JSON.stringify({ decision: "allow" });
   return "{}";
 }
@@ -60,6 +78,56 @@ function resolveCwd(payload) {
     if (first) return first;
   }
   return "";
+}
+
+function normalizeToolInputValue(value, depth = 0) {
+  if (depth > TOOL_INPUT_DEPTH_MAX) return null;
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, TOOL_INPUT_ARRAY_MAX)
+      .map((entry) => normalizeToolInputValue(entry, depth + 1));
+  }
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value).sort().slice(0, TOOL_INPUT_OBJECT_KEYS_MAX)) {
+      out[key] = normalizeToolInputValue(value[key], depth + 1);
+    }
+    return out;
+  }
+  if (typeof value === "string") {
+    return value.length > TOOL_INPUT_STRING_MAX
+      ? `${value.slice(0, TOOL_INPUT_STRING_MAX - 3)}...`
+      : value;
+  }
+  return value;
+}
+
+function resolveToolName(payload) {
+  const toolCall = payload && payload.toolCall && typeof payload.toolCall === "object"
+    ? payload.toolCall
+    : null;
+  const candidates = [
+    toolCall && toolCall.name,
+    toolCall && toolCall.toolName,
+    payload && payload.toolName,
+    payload && payload.tool_name,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return "Unknown";
+}
+
+function resolveToolInput(payload) {
+  const toolCall = payload && payload.toolCall && typeof payload.toolCall === "object"
+    ? payload.toolCall
+    : null;
+  const raw = toolCall && toolCall.args && typeof toolCall.args === "object"
+    ? toolCall.args
+    : (payload && payload.toolInput && typeof payload.toolInput === "object"
+      ? payload.toolInput
+      : (payload && payload.tool_input && typeof payload.tool_input === "object" ? payload.tool_input : {}));
+  return normalizeToolInputValue(raw) || {};
 }
 
 function hasToolError(payload) {
@@ -123,29 +191,149 @@ function buildStateBody(hookName, payload, options = {}) {
   return body;
 }
 
-function sendHookEvent(payload, argvEvent, deps = {}) {
+function buildPermissionBody(hookName, payload, options = {}) {
+  if (hookName !== "PreToolUse") return null;
+  const sessionId = normalizeSessionId(payload && payload.conversationId, payload);
+  const cwd = resolveCwd(payload);
+  const body = {
+    agent_id: "antigravity-cli",
+    hook_source: "antigravity-hook",
+    session_id: sessionId,
+    tool_name: resolveToolName(payload),
+    tool_input: resolveToolInput(payload),
+  };
+
+  if (cwd) body.cwd = cwd;
+  if (Number.isInteger(payload && payload.stepIdx)) body.step_idx = payload.stepIdx;
+  if (typeof (payload && payload.transcriptPath) === "string" && payload.transcriptPath) {
+    body.transcript_path = payload.transcriptPath;
+  }
+  if (typeof (payload && payload.artifactDirectoryPath) === "string" && payload.artifactDirectoryPath) {
+    body.artifact_directory_path = payload.artifactDirectoryPath;
+  }
+
+  if (options.remote) {
+    body.host = options.host || readHostPrefix();
+    return body;
+  }
+
+  const pidMeta = options.pidMeta;
+  if (!pidMeta || typeof pidMeta !== "object") return body;
+  if (Number.isFinite(pidMeta.stablePid) && pidMeta.stablePid > 0) body.source_pid = Math.floor(pidMeta.stablePid);
+  if (pidMeta.detectedEditor) body.editor = pidMeta.detectedEditor;
+  if (Number.isFinite(pidMeta.agentPid) && pidMeta.agentPid > 0) body.agent_pid = Math.floor(pidMeta.agentPid);
+  if (Array.isArray(pidMeta.pidChain) && pidMeta.pidChain.length) body.pid_chain = pidMeta.pidChain;
+  return body;
+}
+
+function sanitizeAntigravityPermissionOutput(rawBody, statusCode = 0) {
+  if (statusCode === 204) return buildAntigravityNoDecisionOutput();
+  if (typeof rawBody !== "string" || !rawBody.trim()) return buildAntigravityNoDecisionOutput();
+  let parsed;
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {
+    return buildAntigravityNoDecisionOutput();
+  }
+
+  const directDecision = parsed && typeof parsed.decision === "string" ? parsed.decision : "";
+  const hookDecision = parsed
+    && parsed.hookSpecificOutput
+    && parsed.hookSpecificOutput.decision
+    && typeof parsed.hookSpecificOutput.decision.behavior === "string"
+    ? parsed.hookSpecificOutput.decision.behavior
+    : "";
+  const decision = directDecision || hookDecision;
+  const normalized = decision === "deny" ? "deny" : (decision === "allow" ? "allow" : null);
+  if (!normalized) return buildAntigravityNoDecisionOutput();
+
+  const out = { decision: normalized };
+  const reason = typeof parsed.reason === "string" && parsed.reason
+    ? parsed.reason
+    : (parsed.hookSpecificOutput
+      && parsed.hookSpecificOutput.decision
+      && typeof parsed.hookSpecificOutput.decision.message === "string"
+      ? parsed.hookSpecificOutput.decision.message
+      : "");
+  if (normalized === "deny" && reason) out.reason = reason;
+  return JSON.stringify(out);
+}
+
+function postStateBody(body, deps, env) {
+  if (!body) return Promise.resolve({ posted: false, port: null });
+  const postState = deps.postState || postStateToRunningServer;
+  return new Promise((resolvePost) => {
+    postState(JSON.stringify(body), { timeoutMs: 100, env }, (posted, port) => {
+      resolvePost({ posted: !!posted, port: port || null });
+    });
+  });
+}
+
+function requestAntigravityPermission(body, deps = {}) {
+  const env = deps.env || process.env;
+  const postPermission = deps.postPermission || postPermissionToRunningServer;
+  return new Promise((resolvePermission) => {
+    postPermission(
+      JSON.stringify(body),
+      {
+        timeoutMs: getAntigravityPermissionTimeoutMs(env),
+        probeTimeoutMs: 100,
+        env,
+      },
+      (ok, port, responseBody, statusCode) => {
+        resolvePermission({
+          posted: !!ok,
+          port: port || null,
+          statusCode: statusCode || 0,
+          stdout: ok
+            ? sanitizeAntigravityPermissionOutput(responseBody, statusCode)
+            : buildAntigravityNoDecisionOutput(),
+        });
+      }
+    );
+  });
+}
+
+async function sendHookEvent(payload, argvEvent, deps = {}) {
   const env = deps.env || process.env;
   const hookName = resolveHookName(payload, argvEvent);
   const outLine = stdoutForEvent(hookName);
   const remote = !!env.CLAWD_REMOTE;
+  const pidMeta = shouldResolvePid(hookName, env)
+    ? (deps.resolvePid ? deps.resolvePid() : undefined)
+    : undefined;
   const body = buildStateBody(hookName, payload || {}, {
     remote,
     host: remote && deps.readHostPrefix ? deps.readHostPrefix() : undefined,
-    pidMeta: shouldResolvePid(hookName, env)
-      ? (deps.resolvePid ? deps.resolvePid() : undefined)
-      : undefined,
+    pidMeta,
+  });
+  const permissionBody = buildPermissionBody(hookName, payload || {}, {
+    remote,
+    host: remote && deps.readHostPrefix ? deps.readHostPrefix() : undefined,
+    pidMeta,
   });
 
   if (!body) {
-    return Promise.resolve({ hookName, stdout: outLine, body: null, posted: false, port: null });
+    if (!permissionBody) return { hookName, stdout: outLine, body: null, posted: false, port: null };
   }
 
-  const postState = deps.postState || postStateToRunningServer;
-  return new Promise((resolvePost) => {
-    postState(JSON.stringify(body), { timeoutMs: 100 }, (posted, port) => {
-      resolvePost({ hookName, stdout: outLine, body, posted: !!posted, port: port || null });
-    });
-  });
+  const stateResult = await postStateBody(body, deps, env);
+  if (!permissionBody) {
+    return { hookName, stdout: outLine, body, posted: stateResult.posted, port: stateResult.port };
+  }
+
+  const permissionResult = await requestAntigravityPermission(permissionBody, deps);
+  return {
+    hookName,
+    stdout: permissionResult.stdout,
+    body,
+    permissionBody,
+    posted: stateResult.posted,
+    port: stateResult.port,
+    permissionPosted: permissionResult.posted,
+    permissionPort: permissionResult.port,
+    permissionStatusCode: permissionResult.statusCode,
+  };
 }
 
 async function main(argvEvent = process.argv[2], deps = {}) {
@@ -155,6 +343,7 @@ async function main(argvEvent = process.argv[2], deps = {}) {
   const result = await sendHookEvent(payload, argvEvent, {
     env: deps.env || process.env,
     postState: deps.postState || postStateToRunningServer,
+    postPermission: deps.postPermission || postPermissionToRunningServer,
     readHostPrefix: deps.readHostPrefix || readHostPrefix,
     resolvePid: deps.resolvePid || resolve,
   });
@@ -165,7 +354,7 @@ if (require.main === module) {
   main()
     .catch(() => {
       // Antigravity treats a hook command failure as an agent failure. This
-      // integration is state-only, so every local failure must fall back to
+      // integration must fail open, so every local failure must fall back to
       // Antigravity's native behavior instead of aborting the agent run.
       process.stdout.write(stdoutForEvent(process.argv[2]) + "\n");
     })
@@ -177,8 +366,14 @@ if (require.main === module) {
 module.exports = {
   __test: {
     buildStateBody,
+    buildPermissionBody,
+    sanitizeAntigravityPermissionOutput,
+    buildAntigravityNoDecisionOutput,
+    getAntigravityPermissionTimeoutMs,
     resolveHookName,
     resolveCwd,
+    resolveToolName,
+    resolveToolInput,
     sendHookEvent,
     shouldResolvePid,
     stdoutForEvent,

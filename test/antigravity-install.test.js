@@ -66,6 +66,8 @@ describe("Antigravity hook installer", () => {
     }
     assert.strictEqual(hooks[HOOK_GROUP_ID].PreToolUse[0].matcher, "*");
     assert.strictEqual(hooks[HOOK_GROUP_ID].PostToolUse[0].matcher, "*");
+    assert.strictEqual(hooks[HOOK_GROUP_ID].PreToolUse[0].hooks[0].timeout, 600);
+    assert.strictEqual(hooks[HOOK_GROUP_ID].PostToolUse[0].hooks[0].timeout, 10);
   });
 
   it("is idempotent on second run", () => {

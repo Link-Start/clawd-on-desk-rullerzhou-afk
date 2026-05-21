@@ -58,6 +58,113 @@ describe("Antigravity hook script", () => {
     );
   });
 
+  it("builds a permission body from PreToolUse camelCase payloads", () => {
+    const body = __test.buildPermissionBody("PreToolUse", {
+      conversationId: "c1",
+      workspacePaths: ["/workspace"],
+      transcriptPath: "/workspace/.gemini/jetski/transcript.jsonl",
+      artifactDirectoryPath: "/workspace/.gemini/jetski/artifacts",
+      stepIdx: 19,
+      toolCall: {
+        name: "run_command",
+        args: {
+          CommandLine: "npm test",
+          Cwd: "/workspace/project",
+        },
+      },
+    }, {
+      pidMeta: {
+        stablePid: 123.9,
+        agentPid: 456,
+        detectedEditor: "WindowsTerminal",
+        pidChain: [789, 456],
+      },
+    });
+
+    assert.deepStrictEqual(body, {
+      agent_id: "antigravity-cli",
+      hook_source: "antigravity-hook",
+      session_id: "antigravity:c1",
+      tool_name: "run_command",
+      tool_input: {
+        CommandLine: "npm test",
+        Cwd: "/workspace/project",
+      },
+      cwd: "/workspace/project",
+      step_idx: 19,
+      transcript_path: "/workspace/.gemini/jetski/transcript.jsonl",
+      artifact_directory_path: "/workspace/.gemini/jetski/artifacts",
+      source_pid: 123,
+      editor: "WindowsTerminal",
+      agent_pid: 456,
+      pid_chain: [789, 456],
+    });
+  });
+
+  it("uses Clawd permission allow output for PreToolUse when a bubble resolves", async () => {
+    const postedStates = [];
+    const postedPermissions = [];
+    const result = await __test.sendHookEvent({
+      conversationId: "c1",
+      workspacePaths: ["/workspace"],
+      toolCall: {
+        name: "run_command",
+        args: { CommandLine: "npm test", Cwd: "/workspace" },
+      },
+    }, "PreToolUse", {
+      env: {},
+      postState: (body, _options, callback) => {
+        postedStates.push(JSON.parse(body));
+        callback(true, 23333);
+      },
+      postPermission: (body, _options, callback) => {
+        postedPermissions.push(JSON.parse(body));
+        callback(true, 23333, JSON.stringify({ decision: "allow" }), 200);
+      },
+    });
+
+    assert.deepStrictEqual(JSON.parse(result.stdout), { decision: "allow" });
+    assert.strictEqual(result.permissionPosted, true);
+    assert.strictEqual(postedStates.length, 1);
+    assert.strictEqual(postedStates[0].state, "working");
+    assert.strictEqual(postedPermissions.length, 1);
+    assert.strictEqual(postedPermissions[0].agent_id, "antigravity-cli");
+    assert.strictEqual(postedPermissions[0].tool_name, "run_command");
+  });
+
+  it("falls back to ask when Clawd returns no Antigravity decision", async () => {
+    const result = await __test.sendHookEvent({
+      conversationId: "c1",
+      toolCall: { name: "write_to_file", args: { TargetFile: "/tmp/a.txt" } },
+    }, "PreToolUse", {
+      env: {},
+      postState: (_body, _options, callback) => callback(false, null),
+      postPermission: (_body, _options, callback) => callback(true, 23333, "", 204),
+    });
+
+    assert.deepStrictEqual(JSON.parse(result.stdout), { decision: "ask" });
+    assert.strictEqual(result.permissionStatusCode, 204);
+  });
+
+  it("sanitizes deny decisions into Antigravity stdout shape", () => {
+    assert.deepStrictEqual(
+      JSON.parse(__test.sanitizeAntigravityPermissionOutput(JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: { behavior: "deny", message: "Blocked by user" },
+        },
+      }), 200)),
+      { decision: "deny", reason: "Blocked by user" }
+    );
+    assert.deepStrictEqual(
+      JSON.parse(__test.sanitizeAntigravityPermissionOutput(JSON.stringify({
+        decision: "force_ask",
+        permissionOverrides: ["command(*)"],
+      }), 200)),
+      { decision: "ask" }
+    );
+  });
+
   it("maps PostToolUse errors to PostToolUseFailure", async () => {
     const postedBodies = [];
     await __test.sendHookEvent({

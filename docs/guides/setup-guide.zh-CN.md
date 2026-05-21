@@ -12,6 +12,8 @@
 
 **Gemini CLI** — hooks 配置在 `~/.gemini/settings.json`。如果本机已安装 Gemini，Clawd 启动时会自动注册；也可以手动执行 `npm run install:gemini-hooks`。
 
+**Antigravity CLI (agy)** — hooks 配置在 `~/.gemini/config/hooks.json`。如果 Antigravity 配置已经存在，Clawd 启动时会自动注册；也可以手动执行 `npm run install:antigravity-hooks`。`PreToolUse` 会更新桌宠状态，并可显示实验性的 Allow/Deny 权限气泡。Clawd 不可达、DND 开启、气泡关闭或 Antigravity 子开关关闭时，hook 会返回 `ask`，由 agy 原生权限确认接管。
+
 **Cursor Agent** — hooks 配置在 `~/.cursor/hooks.json`。如果本机已安装 Cursor，Clawd 启动时会自动注册；也可以手动执行 `npm run install:cursor-hooks`。
 
 **CodeBuddy** — 使用与 Claude Code 兼容的 hooks，配置写入 `~/.codebuddy/settings.json`。如果本机已安装 CodeBuddy，Clawd 启动时会自动注册；也可以手动执行 `node hooks/codebuddy-install.js`。

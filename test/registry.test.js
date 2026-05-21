@@ -154,7 +154,8 @@ describe("Agent Registry", () => {
 
     const antigravity = registry.getAgent("antigravity-cli");
     assert.strictEqual(antigravity.capabilities.httpHook, false);
-    assert.strictEqual(antigravity.capabilities.permissionApproval, false);
+    assert.strictEqual(antigravity.capabilities.permissionApproval, true);
+    assert.strictEqual(antigravity.capabilities.interactiveBubble, true);
     assert.strictEqual(antigravity.capabilities.notificationHook, false);
     assert.strictEqual(antigravity.capabilities.sessionEnd, true);
     assert.strictEqual(antigravity.capabilities.subagent, true);

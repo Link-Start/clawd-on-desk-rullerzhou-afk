@@ -41,9 +41,10 @@ Gemini CLI 状态同步（hook-only，stdin JSON + stdout JSON）：
 Antigravity CLI (agy) 状态同步（hook-only，stdin JSON + stdout JSON）：
   agy 触发 PreInvocation / PreToolUse / PostToolUse / PostInvocation / Stop
     → hooks/antigravity-hook.js（camelCase payload + argv 事件名 → agents/antigravity-cli.js 映射）
-    → HTTP POST 127.0.0.1:23333/state
+    → HTTP POST 127.0.0.1:23333/state（状态）
+    → HTTP POST 127.0.0.1:23333/permission（PreToolUse 实验权限气泡）
     → 同上状态机（agent_id: antigravity-cli）
-  Hook 注册到 ~/.gemini/config/hooks.json 的 clawd hook group；PreToolUse stdout 返回 ask，让 agy 保留原生权限确认，Stop stdout 返回允许停止的 JSON。Phase 1 只做状态，不接权限气泡。
+  Hook 注册到 ~/.gemini/config/hooks.json 的 clawd hook group；PreToolUse 在 Clawd 气泡 Allow/Deny 后 stdout 返回 allow/deny。DND、禁用、气泡不可用或 Clawd 不可达时返回 ask，让 agy 保留原生权限确认。Stop stdout 返回允许停止的 JSON。
 
 Kiro CLI 状态同步（per-agent hook，stdin JSON）：
   Kiro CLI 触发事件
@@ -130,7 +131,7 @@ opencode 权限气泡（event hook + 反向 bridge，非阻塞）：
 - `agents/copilot-cli.js` — Copilot CLI camelCase 事件映射
 - `agents/cursor-agent.js` — Cursor Agent（hooks.json）事件映射
 - `agents/gemini-cli.js` — Gemini CLI hook 事件映射
-- `agents/antigravity-cli.js` — Antigravity CLI (agy) hook 事件映射
+- `agents/antigravity-cli.js` — Antigravity CLI (agy) hook 事件映射 + 实验权限气泡
 - `agents/kimi-cli.js` — Kimi Code CLI（Kimi-CLI）hook 事件映射 + permission 分类策略
 - `agents/kiro-cli.js` — Kiro CLI 事件映射（camelCase），无 HTTP hook / 无权限 / 无 subagent
 - `agents/codebuddy.js` — CodeBuddy 事件映射（PascalCase，Claude Code 兼容），支持权限

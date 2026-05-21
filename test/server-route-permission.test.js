@@ -11,6 +11,7 @@ const {
 const {
   MAX_PERMISSION_BODY_BYTES,
   handlePermissionPost,
+  shouldBypassAntigravityBubble,
   shouldBypassCCBubble,
   shouldBypassCodexBubble,
   shouldBypassOpencodeBubble,
@@ -141,6 +142,10 @@ describe("server-route-permission helpers", () => {
     assert.strictEqual(shouldBypassPiBubble({ hideBubbles: true }), true);
     assert.strictEqual(shouldBypassPiBubble({
       isAgentPermissionsEnabled: (agentId) => agentId !== "pi",
+    }), true);
+    assert.strictEqual(shouldBypassAntigravityBubble({ hideBubbles: true }), true);
+    assert.strictEqual(shouldBypassAntigravityBubble({
+      isAgentPermissionsEnabled: (agentId) => agentId !== "antigravity-cli",
     }), true);
   });
 });
@@ -278,6 +283,111 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID);
     assert.deepStrictEqual(res.recorder.map((entry) => entry.outcome).filter(Boolean), ["dnd"]);
     assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+  });
+
+  it("returns no-decision for Antigravity DND fallback", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "antigravity-cli",
+      session_id: "antigravity:sid",
+      tool_name: "run_command",
+      tool_input: { CommandLine: "npm test", Cwd: "/repo" },
+    }), {
+      ctx: { doNotDisturb: true },
+    });
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID);
+    assert.deepStrictEqual(res.recorder.map((entry) => entry.outcome).filter(Boolean), ["dnd"]);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+  });
+
+  it("returns no-decision when Antigravity permission subgate is disabled", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "antigravity-cli",
+      session_id: "antigravity:sid",
+      tool_name: "write_to_file",
+      tool_input: { TargetFile: "out.txt", CodeContent: "x" },
+    }), {
+      ctx: {
+        isAgentPermissionsEnabled: (agentId) => agentId !== "antigravity-cli",
+      },
+    });
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+  });
+
+  it("pushes an Antigravity permission entry and shows the bubble", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "antigravity-cli",
+      session_id: "antigravity:sid",
+      tool_name: "run_command",
+      tool_input: { CommandLine: "npm test", Cwd: "/repo" },
+      tool_use_id: "tool-1",
+      source_pid: 456,
+      agent_pid: 456,
+      pid_chain: [789, 456, -1],
+      cwd: "/repo",
+      host: "devbox",
+      platform: "win32",
+    }));
+
+    assert.strictEqual(res.statusCode, null);
+    assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+    const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.res, res);
+    assert.strictEqual(entry.sessionId, "antigravity:sid");
+    assert.strictEqual(entry.toolName, "run_command");
+    assert.strictEqual(entry.toolUseId, "tool-1");
+    assert.strictEqual(entry.agentId, "antigravity-cli");
+    assert.strictEqual(entry.isAntigravity, true);
+    assert.strictEqual(entry.sourcePid, 456);
+    assert.strictEqual(entry.agentPid, 456);
+    assert.deepStrictEqual(entry.pidChain, [789, 456]);
+    assert.strictEqual(entry.cwd, "/repo");
+    assert.strictEqual(entry.host, "devbox");
+    assert.strictEqual(entry.platform, "win32");
+    assert.deepStrictEqual(res.ctx.calls.updateSession, [[
+      "antigravity:sid",
+      "notification",
+      "PermissionRequest",
+      {
+        agentId: "antigravity-cli",
+        hookSource: "antigravity-hook",
+        sourcePid: 456,
+        agentPid: 456,
+        pidChain: [789, 456],
+        cwd: "/repo",
+        host: "devbox",
+        platform: "win32",
+      },
+    ]]);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, [entry]);
+    assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [entry]);
+    assert.deepStrictEqual(res.ctx.calls.addPendingPermission, [entry]);
+    assert.deepStrictEqual(res.recorder.map((item) => item.outcome).filter(Boolean), ["accepted"]);
+  });
+
+  it("returns no-decision when Antigravity bubble creation fails", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "antigravity-cli",
+      session_id: "antigravity:sid",
+      tool_name: "replace_file_content",
+      tool_input: { TargetFile: "a.txt" },
+    }), {
+      ctx: {
+        showPermissionBubble: () => {
+          throw new Error("no window");
+        },
+      },
+    });
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, []);
+    assert.deepStrictEqual(res.ctx.calls.removePendingPermission.map((item) => item.reason), ["antigravity-bubble-failed"]);
   });
 
   it("returns no-decision when Pi permission subgate is disabled", async () => {

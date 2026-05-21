@@ -76,7 +76,7 @@ describe("prefs.getDefaults", () => {
 
   it("seeds permission-capable agents with permissionsEnabled=true", () => {
     const d = prefs.getDefaults();
-    for (const id of ["claude-code", "codex", "copilot-cli", "cursor-agent", "gemini-cli", "codebuddy", "kiro-cli", "kimi-cli", "opencode", "pi"]) {
+    for (const id of ["claude-code", "codex", "copilot-cli", "cursor-agent", "gemini-cli", "antigravity-cli", "codebuddy", "kiro-cli", "kimi-cli", "opencode", "pi"]) {
       assert.strictEqual(
         d.agents[id].permissionsEnabled,
         true,
@@ -87,11 +87,6 @@ describe("prefs.getDefaults", () => {
       Object.prototype.hasOwnProperty.call(d.agents.hermes, "permissionsEnabled"),
       false,
       "hermes should not expose a dead permissionsEnabled switch"
-    );
-    assert.strictEqual(
-      Object.prototype.hasOwnProperty.call(d.agents["antigravity-cli"], "permissionsEnabled"),
-      false,
-      "antigravity-cli should not expose a dead permissionsEnabled switch"
     );
   });
 
@@ -358,13 +353,13 @@ describe("prefs.validate", () => {
     assert.deepStrictEqual(v.agents.hermes, { enabled: true });
   });
 
-  it("normalizes agents: strips Antigravity permission/notification flags until implemented", () => {
+  it("normalizes agents: preserves Antigravity permission flag but strips notification flag", () => {
     const v = prefs.validate({
       agents: {
-        "antigravity-cli": { enabled: true, permissionsEnabled: true, notificationHookEnabled: true },
+        "antigravity-cli": { enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       },
     });
-    assert.deepStrictEqual(v.agents["antigravity-cli"], { enabled: true });
+    assert.deepStrictEqual(v.agents["antigravity-cli"], { enabled: false, permissionsEnabled: false });
   });
 
   it("normalizes agents: preserves notificationHookEnabled flag", () => {
