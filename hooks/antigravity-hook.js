@@ -162,9 +162,16 @@ async function main(argvEvent = process.argv[2], deps = {}) {
 }
 
 if (require.main === module) {
-  main().then(() => {
-    process.exit(0);
-  });
+  main()
+    .catch(() => {
+      // Antigravity treats a hook command failure as an agent failure. This
+      // integration is state-only, so every local failure must fall back to
+      // Antigravity's native behavior instead of aborting the agent run.
+      process.stdout.write(stdoutForEvent(process.argv[2]) + "\n");
+    })
+    .finally(() => {
+      process.exit(0);
+    });
 }
 
 module.exports = {

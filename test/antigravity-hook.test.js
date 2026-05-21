@@ -1,5 +1,7 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const { __test } = require("../hooks/antigravity-hook");
@@ -115,5 +117,35 @@ describe("Antigravity hook script", () => {
   it("recognizes agy command lines for agent PID tracking", () => {
     assert.strictEqual(__test.isAntigravityAgentCommandLine('"C:/Users/me/AppData/Local/agy/bin/agy.exe"'), true);
     assert.strictEqual(__test.isAntigravityAgentCommandLine('"node" "D:/animation/hooks/antigravity-hook.js" "Stop"'), false);
+  });
+
+  it("fails open when local hook setup throws", () => {
+    const scriptPath = path.resolve(__dirname, "..", "hooks", "antigravity-hook.js");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-antigravity-hook-"));
+    const preloadPath = path.join(tmpDir, "preload.js");
+    const preload = `
+      const Module = require("module");
+      const original = Module._load;
+      Module._load = function(request, parent, isMain) {
+        if (request.endsWith("./shared-process") || request.endsWith("/shared-process")) {
+          return {
+            getPlatformConfig: () => ({}),
+            readStdinJson: () => Promise.reject(new Error("stdin failed")),
+            createPidResolver: () => () => { throw new Error("pid failed"); },
+          };
+        }
+        return original.apply(this, arguments);
+      };
+    `;
+    fs.writeFileSync(preloadPath, preload);
+    const result = spawnSync(process.execPath, ["--require", preloadPath, scriptPath, "PreToolUse"], {
+      input: JSON.stringify({ conversationId: "c1" }),
+      encoding: "utf8",
+      windowsHide: true,
+    });
+
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(result.stderr, "");
+    assert.deepStrictEqual(JSON.parse(result.stdout), { decision: "ask" });
   });
 });

@@ -24,6 +24,11 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
+function decodeEncodedCommand(command) {
+  const encoded = command.split(/\s+/).at(-1);
+  return Buffer.from(encoded, "base64").toString("utf16le");
+}
+
 afterEach(() => {
   while (tempDirs.length) {
     fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
@@ -53,8 +58,11 @@ describe("Antigravity hook installer", () => {
         if (Array.isArray(entry.hooks)) commands.push(...entry.hooks.map((hook) => hook.command));
       }
       assert.strictEqual(commands.length, 1);
-      assert.ok(commands[0].includes(MARKER));
-      assert.ok(commands[0].endsWith(`"${event}"`));
+      const commandText = commands[0].includes("-EncodedCommand ")
+        ? decodeEncodedCommand(commands[0])
+        : commands[0];
+      assert.ok(commandText.includes(MARKER));
+      assert.ok(commandText.includes(event));
     }
     assert.strictEqual(hooks[HOOK_GROUP_ID].PreToolUse[0].matcher, "*");
     assert.strictEqual(hooks[HOOK_GROUP_ID].PostToolUse[0].matcher, "*");
@@ -107,14 +115,48 @@ describe("Antigravity hook installer", () => {
     assert.strictEqual(readJson(configPath)[HOOK_GROUP_ID].enabled, false);
   });
 
-  it("builds Windows PowerShell commands with the event argv", () => {
+  it("builds Windows PowerShell bridge commands with the event argv", () => {
     const command = __test.buildAntigravityHookCommand(
-      "node",
+      "C:\\Program Files\\nodejs\\node.exe",
       "D:/clawd/hooks/antigravity-hook.js",
       "PreToolUse",
-      { platform: "win32" }
+      { platform: "win32", powerShellBin: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" }
     );
 
-    assert.strictEqual(command, '& "node" "D:/clawd/hooks/antigravity-hook.js" "PreToolUse"');
+    assert.ok(command.startsWith("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "));
+    assert.strictEqual(
+      decodeEncodedCommand(command),
+      "& 'C:\\Program Files\\nodejs\\node.exe' 'D:/clawd/hooks/antigravity-hook.js' 'PreToolUse'"
+    );
+  });
+
+  it("uses an absolute node.exe for Windows Antigravity hooks", () => {
+    const homeDir = makeTempHome();
+    const nodeBin = "C:\\Program Files\\nodejs\\node.exe";
+
+    registerAntigravityHooks({
+      silent: true,
+      homeDir,
+      platform: "win32",
+      execPath: nodeBin,
+      powerShellBin: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    });
+
+    const hooks = readJson(path.join(homeDir, ".gemini", "config", "hooks.json"));
+    assert.strictEqual(
+      decodeEncodedCommand(hooks[HOOK_GROUP_ID].PreInvocation[0].command),
+      `& '${nodeBin}' '${path.resolve(__dirname, "..", "hooks", "antigravity-hook.js").replace(/\\/g, "/")}' 'PreInvocation'`
+    );
+  });
+
+  it("finds node.exe with where.exe when the installer runs from Electron", () => {
+    const nodeBin = "C:\\Program Files\\nodejs\\node.exe";
+    const resolved = __test.resolveAntigravityNodeBin({
+      platform: "win32",
+      execPath: "C:\\Program Files\\Clawd\\Clawd.exe",
+      execFileSync: () => `${nodeBin}\r\n`,
+    });
+
+    assert.strictEqual(resolved, nodeBin);
   });
 });

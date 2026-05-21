@@ -4,6 +4,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { execFileSync: defaultExecFileSync } = require("child_process");
 const { resolveNodeBin } = require("./server-config");
 const { writeJsonAtomic, asarUnpackedPath, formatNodeHookCommand } = require("./json-utils");
 
@@ -21,7 +22,76 @@ const ANTIGRAVITY_HOOK_EVENTS = [
 ];
 
 function buildAntigravityHookCommand(nodeBin, hookScript, event, options = {}) {
-  return formatNodeHookCommand(nodeBin, hookScript, { ...options, args: [event] });
+  const platform = options.platform || process.platform;
+  if (platform === "win32") {
+    return buildWindowsAntigravityHookCommand(nodeBin, hookScript, event, options);
+  }
+  return formatNodeHookCommand(nodeBin, hookScript, {
+    ...options,
+    args: [event],
+  });
+}
+
+function quotePowerShellSingleArg(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function windowsPowerShellBin(options = {}) {
+  if (options.powerShellBin) return options.powerShellBin;
+  const root = process.env.SystemRoot || "C:\\Windows";
+  return path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
+function buildWindowsAntigravityHookCommand(nodeBin, hookScript, event, options = {}) {
+  const psCommand = [
+    "&",
+    quotePowerShellSingleArg(nodeBin),
+    quotePowerShellSingleArg(hookScript),
+    quotePowerShellSingleArg(event),
+  ].join(" ");
+  const encodedCommand = Buffer.from(psCommand, "utf16le").toString("base64");
+  return `${windowsPowerShellBin(options)} -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedCommand}`;
+}
+
+function isNodeExecutablePath(value) {
+  return /(?:^|[\\/])node(?:\.exe)?$/i.test(String(value || ""));
+}
+
+function firstNonEmptyLine(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || null;
+}
+
+function resolveWindowsNodeBin(options = {}) {
+  const execPath = options.execPath || process.execPath;
+  if (isNodeExecutablePath(execPath)) return execPath;
+
+  const execFileSync = options.execFileSync || defaultExecFileSync;
+  try {
+    const whereExe = process.env.SystemRoot
+      ? path.join(process.env.SystemRoot, "System32", "where.exe")
+      : "where.exe";
+    const output = execFileSync(whereExe, ["node"], {
+      encoding: "utf8",
+      timeout: 2000,
+      windowsHide: true,
+    });
+    const resolved = firstNonEmptyLine(output);
+    if (resolved) return resolved;
+  } catch {}
+
+  return null;
+}
+
+function resolveAntigravityNodeBin(options = {}) {
+  if (options.nodeBin !== undefined) return options.nodeBin;
+  const platform = options.platform || process.platform;
+  if (platform === "win32") {
+    return resolveWindowsNodeBin(options) || resolveNodeBin(options) || "node";
+  }
+  return resolveNodeBin(options) || "node";
 }
 
 function buildHookHandler(command) {
@@ -74,7 +144,7 @@ function registerAntigravityHooks(options = {}) {
   }
 
   const hookScript = asarUnpackedPath(path.resolve(__dirname, "antigravity-hook.js").replace(/\\/g, "/"));
-  const nodeBin = options.nodeBin !== undefined ? options.nodeBin : (resolveNodeBin() || "node");
+  const nodeBin = resolveAntigravityNodeBin(options);
   const desiredGroup = buildAntigravityHooks((event) => buildAntigravityHookCommand(nodeBin, hookScript, event, options))[HOOK_GROUP_ID];
   const settings = normalizeSettings(readJsonIfExists(configPath));
   const existingGroup = settings[HOOK_GROUP_ID] && typeof settings[HOOK_GROUP_ID] === "object" && !Array.isArray(settings[HOOK_GROUP_ID])
@@ -125,8 +195,11 @@ module.exports = {
   __test: {
     buildAntigravityHookCommand,
     buildAntigravityHooks,
+    buildWindowsAntigravityHookCommand,
     hasAntigravityConfig,
     normalizeSettings,
+    resolveAntigravityNodeBin,
+    resolveWindowsNodeBin,
   },
 };
 
