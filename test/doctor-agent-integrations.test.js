@@ -10,6 +10,7 @@ const {
   findOpencodePluginEntry,
 } = require("../src/doctor-detectors/agent-integrations");
 const { GEMINI_HOOK_EVENTS } = require("../hooks/gemini-install");
+const { ANTIGRAVITY_HOOK_EVENTS } = require("../hooks/antigravity-install");
 
 const tempDirs = [];
 
@@ -63,6 +64,42 @@ function geminiHooksConfig(commandForEvent = (event) => `"/node" "/app/hooks/gem
     }];
   }
   return hooks;
+}
+
+function antigravityDescriptor() {
+  const root = makeTempDir();
+  const parentDir = path.join(root, ".gemini", "config");
+  return baseDescriptor({
+    agentId: "antigravity-cli",
+    agentName: "Antigravity CLI",
+    marker: "antigravity-hook.js",
+    parentDir,
+    configPath: path.join(parentDir, "hooks.json"),
+    configMode: "antigravity-hooks",
+    hookEvents: ANTIGRAVITY_HOOK_EVENTS,
+  });
+}
+
+function antigravityHooksConfig(commandForEvent = (event) => `"/node" "/app/hooks/antigravity-hook.js" ${event}`) {
+  return {
+    clawd: {
+      PreInvocation: [{ type: "command", command: commandForEvent("PreInvocation") }],
+      PreToolUse: [{
+        matcher: "*",
+        hooks: [{ type: "command", command: commandForEvent("PreToolUse") }],
+      }],
+      PostToolUse: [{
+        matcher: "*",
+        hooks: [{ type: "command", command: commandForEvent("PostToolUse") }],
+      }],
+      PostInvocation: [{ type: "command", command: commandForEvent("PostInvocation") }],
+      Stop: [{ type: "command", command: commandForEvent("Stop") }],
+    },
+  };
+}
+
+function writeAntigravityHooks(descriptor, hooks = antigravityHooksConfig()) {
+  writeJson(descriptor.configPath, hooks);
 }
 
 function codexDescriptor() {
@@ -351,6 +388,99 @@ describe("checkAgentIntegrations", () => {
       key: "gemini_hooks",
       value: "enabled",
       detail: "hooksConfig allows Clawd Gemini hooks",
+    });
+    assert.strictEqual(detail.fixAction, undefined);
+  });
+
+  it("reports missing Antigravity hooks as repairable not-connected", () => {
+    const descriptor = antigravityDescriptor();
+    fs.mkdirSync(descriptor.parentDir, { recursive: true });
+
+    const detail = runOne(descriptor);
+
+    assert.strictEqual(detail.status, "not-connected");
+    assert.strictEqual(detail.eventSource, "hook");
+    assert.deepStrictEqual(detail.fixAction, { type: "agent-integration", agentId: "antigravity-cli" });
+  });
+
+  it("validates Antigravity hooks for every required event", () => {
+    const descriptor = antigravityDescriptor();
+    writeAntigravityHooks(descriptor);
+
+    const seen = [];
+    const detail = runOne(descriptor, {
+      validateCommand: (command) => {
+        seen.push(command);
+        return {
+          ok: true,
+          nodeBin: "/node",
+          scriptPath: "/app/hooks/antigravity-hook.js",
+        };
+      },
+    });
+
+    assert.strictEqual(seen.length, ANTIGRAVITY_HOOK_EVENTS.length);
+    assert.strictEqual(detail.status, "ok");
+    assert.strictEqual(detail.commandCount, ANTIGRAVITY_HOOK_EVENTS.length);
+    assert.strictEqual(detail.scriptPath, "/app/hooks/antigravity-hook.js");
+  });
+
+  it("warns when Antigravity hooks are missing any required event", () => {
+    const descriptor = antigravityDescriptor();
+    writeAntigravityHooks(descriptor, {
+      clawd: {
+        PreToolUse: [{
+          matcher: "*",
+          hooks: [{ type: "command", command: '"/node" "/app/hooks/antigravity-hook.js" PreToolUse' }],
+        }],
+      },
+    });
+
+    const detail = runOne(descriptor);
+
+    assert.strictEqual(detail.status, "not-connected");
+    assert.strictEqual(detail.level, "warning");
+    assert.ok(detail.missingAntigravityHookEvents.includes("PreInvocation"));
+    assert.ok(detail.missingAntigravityHookEvents.includes("Stop"));
+    assert.deepStrictEqual(detail.fixAction, { type: "agent-integration", agentId: "antigravity-cli" });
+  });
+
+  it("returns broken-path when Antigravity hook commands fail validation", () => {
+    const descriptor = antigravityDescriptor();
+    writeAntigravityHooks(descriptor);
+
+    const detail = runOne(descriptor, {
+      validateCommand: () => ({
+        ok: false,
+        issue: "scriptPath-missing",
+        nodeBin: "/node",
+        scriptPath: "/missing/antigravity-hook.js",
+      }),
+    });
+
+    assert.strictEqual(detail.status, "broken-path");
+    assert.strictEqual(detail.hookCommandIssue, "scriptPath-missing");
+    assert.strictEqual(detail.brokenAntigravityHookEvent, "PreInvocation");
+    assert.deepStrictEqual(detail.fixAction, { type: "agent-integration", agentId: "antigravity-cli" });
+  });
+
+  it("does not offer automatic repair when Antigravity Clawd hooks are disabled", () => {
+    const descriptor = antigravityDescriptor();
+    writeAntigravityHooks(descriptor, {
+      clawd: {
+        enabled: false,
+        ...antigravityHooksConfig().clawd,
+      },
+    });
+
+    const detail = runOne(descriptor);
+
+    assert.strictEqual(detail.status, "not-connected");
+    assert.strictEqual(detail.detail, "Antigravity Clawd hooks are disabled in hooks.json; Clawd preserves this user setting and will not receive hook events");
+    assert.deepStrictEqual(detail.supplementary, {
+      key: "antigravity_hooks",
+      value: "disabled-clawd",
+      detail: "clawd.enabled is false",
     });
     assert.strictEqual(detail.fixAction, undefined);
   });

@@ -12,6 +12,8 @@
 
 **Gemini CLI** — hooks live in `~/.gemini/settings.json`. Clawd auto-registers them on launch when Gemini is installed, or you can run `npm run install:gemini-hooks` manually.
 
+**Antigravity CLI (agy)** — hooks live in `~/.gemini/config/hooks.json`. Clawd auto-registers them on launch when Antigravity config exists, or you can run `npm run install:antigravity-hooks` manually. Antigravity support is state-only for now: `PreToolUse` updates the pet and returns `ask` so agy keeps its native permission flow; Clawd does not intercept Antigravity permissions into a bubble yet.
+
 **Cursor Agent** — hooks live in `~/.cursor/hooks.json`. Clawd auto-registers them on launch when Cursor is installed, or you can run `npm run install:cursor-hooks` manually.
 
 **CodeBuddy** — uses Claude Code-compatible hooks in `~/.codebuddy/settings.json`. Clawd auto-registers them on launch when CodeBuddy is installed, or you can run `node hooks/codebuddy-install.js` manually.
@@ -145,6 +147,9 @@ node hooks/cursor-install.js
 
 # Gemini CLI
 node hooks/gemini-install.js
+
+# Antigravity CLI (agy)
+node hooks/antigravity-install.js
 
 # CodeBuddy
 node hooks/codebuddy-install.js

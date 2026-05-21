@@ -69,7 +69,7 @@ describe("prefs.getDefaults", () => {
 
   it("seeds all known agents as enabled", () => {
     const d = prefs.getDefaults();
-    for (const id of ["claude-code", "codex", "copilot-cli", "cursor-agent", "gemini-cli", "codebuddy", "kiro-cli", "kimi-cli", "opencode", "pi", "openclaw", "hermes"]) {
+    for (const id of ["claude-code", "codex", "copilot-cli", "cursor-agent", "gemini-cli", "antigravity-cli", "codebuddy", "kiro-cli", "kimi-cli", "opencode", "pi", "openclaw", "hermes"]) {
       assert.strictEqual(d.agents[id].enabled, true, `${id} should default enabled`);
     }
   });
@@ -87,6 +87,11 @@ describe("prefs.getDefaults", () => {
       Object.prototype.hasOwnProperty.call(d.agents.hermes, "permissionsEnabled"),
       false,
       "hermes should not expose a dead permissionsEnabled switch"
+    );
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(d.agents["antigravity-cli"], "permissionsEnabled"),
+      false,
+      "antigravity-cli should not expose a dead permissionsEnabled switch"
     );
   });
 
@@ -353,6 +358,15 @@ describe("prefs.validate", () => {
     assert.deepStrictEqual(v.agents.hermes, { enabled: true });
   });
 
+  it("normalizes agents: strips Antigravity permission/notification flags until implemented", () => {
+    const v = prefs.validate({
+      agents: {
+        "antigravity-cli": { enabled: true, permissionsEnabled: true, notificationHookEnabled: true },
+      },
+    });
+    assert.deepStrictEqual(v.agents["antigravity-cli"], { enabled: true });
+  });
+
   it("normalizes agents: preserves notificationHookEnabled flag", () => {
     const v = prefs.validate({
       agents: {
@@ -407,6 +421,11 @@ describe("prefs.validate", () => {
       Object.prototype.hasOwnProperty.call(d.agents.hermes, "notificationHookEnabled"),
       false,
       "hermes should not expose a dead notificationHookEnabled switch"
+    );
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(d.agents["antigravity-cli"], "notificationHookEnabled"),
+      false,
+      "antigravity-cli should not expose a dead notificationHookEnabled switch"
     );
   });
 

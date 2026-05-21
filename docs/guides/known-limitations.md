@@ -9,6 +9,7 @@
 | **Copilot CLI: manual local hook setup** | Local installs still require manually creating `~/.copilot/hooks/hooks.json`. Remote SSH installs are now configured automatically by `scripts/remote-deploy.sh`. |
 | **Copilot CLI: no permission bubble** | Copilot's `preToolUse` hook only supports deny, not the full allow/deny flow. Permission bubbles currently work with Claude Code, Codex CLI, CodeBuddy, opencode, and Pi. |
 | **Gemini CLI: no permission bubble** | Gemini handles tool approval inside the terminal. Clawd observes Gemini hook events, but does not show permission bubbles unless Gemini adds a compatible blocking approval contract later. |
+| **Antigravity CLI: no permission bubble** | Antigravity hooks expose `PreToolUse`, but Clawd's first integration is state-only and returns `ask` so agy keeps native permission handling. Antigravity permission prompts remain in Antigravity/terminal. |
 | **Cursor Agent: no permission bubble** | Cursor handles permissions via stdout JSON in the hook, not HTTP blocking — Clawd can't intercept the approval flow. |
 | **Cursor Agent: startup recovery** | No process detection on startup (matching the editor PID would false-trigger on any Cursor instance). Clawd stays idle until the first hook event fires. |
 | **Hermes Agent: visible before install** | Hermes is enabled in Settings by default so users can discover it, but Clawd does not write Hermes plugin files until a real Hermes install is detected. Install Hermes, then restart Clawd or run `npm run install:hermes-plugin`. |
