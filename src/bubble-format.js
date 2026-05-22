@@ -85,8 +85,7 @@
 
   if (typeof module === "object" && module.exports) {
     module.exports = api;
-  }
-  if (root && typeof root === "object") {
+  } else if (root && typeof root === "object") {
     root.ClawdBubbleFormat = api;
   }
 })(typeof window !== "undefined" ? window : (typeof self !== "undefined" ? self : globalThis));
