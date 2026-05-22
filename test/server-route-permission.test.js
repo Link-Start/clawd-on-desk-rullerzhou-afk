@@ -319,6 +319,24 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.ctx.pendingPermissions, []);
   });
 
+  it("returns no-decision when the Antigravity agent master switch is off", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "antigravity-cli",
+      session_id: "antigravity:sid",
+      tool_name: "run_command",
+      tool_input: { CommandLine: "npm test", Cwd: "/repo" },
+    }), {
+      ctx: {
+        isAgentEnabled: (agentId) => agentId !== "antigravity-cli",
+      },
+    });
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID);
+    assert.deepStrictEqual(res.recorder.map((entry) => entry.outcome).filter(Boolean), ["disabled"]);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+  });
+
   it("pushes an Antigravity permission entry and shows the bubble", async () => {
     const res = await callPermissionPost(JSON.stringify({
       agent_id: "antigravity-cli",
