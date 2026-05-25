@@ -85,15 +85,27 @@ if (isWin) {
 // console interprets the bytes as GBK on the way out.
 //
 // SetConsoleOutputCP(65001) tells the attached console to interpret
-// stdout/stderr as UTF-8 for the lifetime of this process. Packaged
-// builds run under the Windows GUI subsystem with no console attached,
-// so this call is a no-op there.
+// stdout/stderr as UTF-8 while Clawd is running. Packaged builds run under
+// the Windows GUI subsystem with no console attached, so this call is a
+// no-op there.
+let _restoreConsoleOutputCP = null;
 if (isWin) {
   try {
     const koffi = require("koffi");
     const kernel32 = koffi.load("kernel32.dll");
+    const getConsoleOutputCP = kernel32.func("uint __stdcall GetConsoleOutputCP()");
     const setConsoleOutputCP = kernel32.func("bool __stdcall SetConsoleOutputCP(uint wCodePageID)");
-    setConsoleOutputCP(65001);
+    const previousOutputCP = getConsoleOutputCP();
+    if (setConsoleOutputCP(65001) && previousOutputCP && previousOutputCP !== 65001) {
+      let restored = false;
+      _restoreConsoleOutputCP = () => {
+        if (restored) return;
+        restored = true;
+        try { setConsoleOutputCP(previousOutputCP); } catch {}
+      };
+      app.once("will-quit", _restoreConsoleOutputCP);
+      process.once("exit", _restoreConsoleOutputCP);
+    }
   } catch (err) {
     // Best-effort — mojibake in dev console is annoying but not fatal.
     console.warn("Clawd: SetConsoleOutputCP(65001) failed:", err && err.message);

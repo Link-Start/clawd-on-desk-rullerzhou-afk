@@ -341,6 +341,7 @@ function createRemoteSshRuntime(deps = {}) {
       // call site, so we don't spam the user with the same expected
       // failure every time the tunnel reconnects.
       remoteShell: null,
+      remoteShellTarget: null,
       backoffTimer: null,
       retryAttempt: 0,
       unknownStrikes: 0,
@@ -391,8 +392,12 @@ function createRemoteSshRuntime(deps = {}) {
     if (!profile || !profile.id) throw new Error("connect: profile.id required");
     let state = states.get(profile.id);
     if (state) {
+      const targetChanged = remoteShellCacheKey(state.profile) !== remoteShellCacheKey(profile);
       // Replace profile snapshot — caller may have just edited fields.
       state.profile = profile;
+      if (targetChanged) {
+        clearRemoteShellCache(state);
+      }
       // If already connecting / connected, no-op (idempotent).
       if (state.status === "connecting" || state.status === "connected"
           || state.status === "reconnecting") {
@@ -402,6 +407,7 @@ function createRemoteSshRuntime(deps = {}) {
       state.retryAttempt = 0;
       state.unknownStrikes = 0;
       state.stopped = false;
+      clearRemoteShellCache(state);
     } else {
       state = newState(profile);
       states.set(profile.id, state);
@@ -534,6 +540,25 @@ function createRemoteSshRuntime(deps = {}) {
     };
   }
 
+  function remoteShellCacheKey(profile) {
+    return JSON.stringify({
+      host: profile && profile.host || "",
+      port: Number.isInteger(profile && profile.port) ? profile.port : 22,
+      identityFile: profile && profile.identityFile || "",
+    });
+  }
+
+  function clearRemoteShellCache(state) {
+    if (!state) return;
+    state.remoteShell = null;
+    state.remoteShellTarget = null;
+  }
+
+  function markRemoteShell(state, shell, target) {
+    state.remoteShell = shell;
+    state.remoteShellTarget = target || remoteShellCacheKey(state.profile);
+  }
+
   function startProbeLoopWithRemoteNode(state, child) {
     const cached = getCachedRemoteNodeBin(state.profile);
     if (cached && cached.nodeBin) {
@@ -594,10 +619,14 @@ function createRemoteSshRuntime(deps = {}) {
 
   function resolveRemoteNodeInBackground(state, child) {
     if (state.remoteNodeResolveInFlight) return;
+    const shellTarget = remoteShellCacheKey(state.profile);
     // One-shot negative cache: once we've seen this remote reject `sh`,
     // every later resolver call is guaranteed to fail the same way.
     // Stay on bare-node-probe mode and don't bother (or spam log).
-    if (state.remoteShell === "windows-cmd") return;
+    if (state.remoteShell === "windows-cmd") {
+      if (state.remoteShellTarget === shellTarget) return;
+      clearRemoteShellCache(state);
+    }
     state.remoteNodeResolveInFlight = true;
     const finish = (resolved) => {
       if (state.sshChild !== child) return;
@@ -623,7 +652,7 @@ function createRemoteSshRuntime(deps = {}) {
           // is the Windows-cmd "is not recognized" pattern, flip the
           // one-shot cache so we don't repeat this every reconnect.
           if (looksLikeWindowsCmdStderr(resolved && resolved.stderr)) {
-            state.remoteShell = "windows-cmd";
+            markRemoteShell(state, "windows-cmd", shellTarget);
           } else {
             log("remote-ssh: remote Node resolver failed after probe success:", resolved && resolved.message);
           }
@@ -666,7 +695,7 @@ function createRemoteSshRuntime(deps = {}) {
         // Same one-shot suppression as finish(): if the throw came from
         // a Windows-cmd remote rejecting `sh`, flip the cache silently.
         if (looksLikeWindowsCmdStderr(err && err.stderr)) {
-          state.remoteShell = "windows-cmd";
+          markRemoteShell(state, "windows-cmd", shellTarget);
         } else {
           log("remote-ssh: remote Node resolver threw after probe success:", err && err.message);
         }
@@ -1065,6 +1094,7 @@ function createRemoteSshRuntime(deps = {}) {
     state.retryAttempt = 0;
     state.unknownStrikes = 0;
     state.remoteNodeResolveInFlight = false;
+    clearRemoteShellCache(state);
     setStatus(state, "idle", {
       message: null,
       hint: null,

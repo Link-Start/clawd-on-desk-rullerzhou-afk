@@ -825,6 +825,67 @@ test("connect emits remote-node-detected when background resolver succeeds", asy
   rt.cleanup();
 });
 
+test("windows-cmd shell cache suppresses automatic resolver retries but clears after manual reconnect", async () => {
+  clearRemoteNodeCache();
+  const children = [];
+  let resolverCalls = 0;
+  const spawn = () => {
+    const child = makeMockChild();
+    children.push(child);
+    return child;
+  };
+  const timers = makeFakeTimers();
+  const profile = { id: "p1", host: "user@win", remoteForwardPort: 23333 };
+  const rt = createRemoteSshRuntime({
+    spawn,
+    getHookServerPort: () => 23335,
+    setTimeout: timers.setTimeoutFn,
+    clearTimeout: timers.clearTimeoutFn,
+    resolveRemoteNodeBin: () => {
+      resolverCalls += 1;
+      return {
+        ok: false,
+        stderr: "'sh' is not recognized as an internal or external command",
+        message: "Remote Node.js not found",
+      };
+    },
+  });
+
+  rt.connect(profile);
+  timers.flushWhere((t) => t.ms === 0);
+  children[1]._fakeExit(0);
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(rt.getProfileStatus("p1").status, "connected");
+  assert.equal(resolverCalls, 1, "first bare-node success starts the resolver");
+
+  children[0]._fakeStderr("ssh: connect to host win port 22: Connection timed out");
+  await new Promise((r) => setImmediate(r));
+  children[0]._fakeExit(255);
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(rt.getProfileStatus("p1").status, "reconnecting");
+
+  timers.flushWhere((t) => t.ms === BACKOFF_SCHEDULE_MS[0]);
+  timers.flushWhere((t) => t.ms === 0);
+  children[3]._fakeExit(0);
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(rt.getProfileStatus("p1").status, "connected");
+  assert.equal(resolverCalls, 1,
+    "automatic reconnect keeps the one-shot windows-cmd cache");
+
+  rt.disconnect("p1");
+  rt.connect(profile);
+  timers.flushWhere((t) => t.ms === 0);
+  children[children.length - 1]._fakeExit(0);
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(resolverCalls, 2,
+    "manual reconnect clears the cache so a fixed remote shell can recover");
+  rt.cleanup();
+});
+
 test("connect classifies Permission denied as permanent failed (no retry)", async () => {
   const mainChild = makeMockChild();
   const spawn = () => mainChild;
