@@ -10,6 +10,7 @@ const {
   parseOpenSshVersion,
   isUnsupportedWindowsOpenSsh,
   classifyStderr,
+  looksLikeWindowsCmdStderr,
   classifyProbeExit,
   buildProbeCommand,
   backoffMsForAttempt,
@@ -325,6 +326,31 @@ test("buildProbeCommand returns valid JS that exits with each code under expecte
   const statusIdx = raw.indexOf("statusCode===200");
   assert.ok(headerIdx >= 0 && statusIdx >= 0);
   assert.ok(headerIdx < statusIdx, "header check must precede status check");
+});
+
+// ── looksLikeWindowsCmdStderr ──
+//
+// One-shot suppression of the "remote Node resolver failed after probe
+// success" log on Windows-cmd remotes: every reconnect would otherwise
+// reprobe and re-fail with the same "sh is not recognized" stderr.
+test("looksLikeWindowsCmdStderr matches the English cmd.exe error", () => {
+  assert.ok(looksLikeWindowsCmdStderr("'sh' is not recognized as an internal or external command, operable program or batch file."));
+  assert.ok(looksLikeWindowsCmdStderr("ssh: 'node' is NOT RECOGNIZED AS AN INTERNAL OR EXTERNAL COMMAND"));
+});
+
+test("looksLikeWindowsCmdStderr matches localized cmd.exe error (zh/zh-TW/ja/ko/de)", () => {
+  assert.ok(looksLikeWindowsCmdStderr("'sh' 不是内部或外部命令，也不是可运行的程序或批处理文件。"));
+  assert.ok(looksLikeWindowsCmdStderr("'sh' 不是內部或外部命令，也不是可執行的程式或批次檔。"));
+  assert.ok(looksLikeWindowsCmdStderr("'sh' は、内部コマンドまたは外部コマンド、操作可能なプログラムまたはバッチ ファイルとして認識されていません。"));
+  assert.ok(looksLikeWindowsCmdStderr("'sh'은(는) 내부 명령 또는 외부 명령, 실행할 수 있는 프로그램, 또는 배치 파일이 아닙니다."));
+  assert.ok(looksLikeWindowsCmdStderr("Der Befehl 'sh' ist entweder falsch geschrieben oder konnte nicht als interner oder externer Befehl gefunden werden."));
+});
+
+test("looksLikeWindowsCmdStderr ignores unrelated POSIX errors", () => {
+  assert.equal(looksLikeWindowsCmdStderr(""), false);
+  assert.equal(looksLikeWindowsCmdStderr("bash: sh: command not found"), false);
+  assert.equal(looksLikeWindowsCmdStderr("Permission denied (publickey)."), false);
+  assert.equal(looksLikeWindowsCmdStderr("sh: line 1: syntax error"), false);
 });
 
 // ── backoffMsForAttempt ──

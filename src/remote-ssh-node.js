@@ -10,6 +10,7 @@
 
 const childProcess = require("child_process");
 const { quoteForPosixShellArg } = require("./remote-ssh-quote");
+const { decodeShellBytes } = require("./remote-ssh-decode");
 
 const NODE_PROBE_TIMEOUT_MS = 60000;
 const NODE_PROBE_SENTINEL = "__CLAWD_REMOTE_NODE_PROBE__";
@@ -108,8 +109,8 @@ function spawnAndWait(spawn, command, args, opts = {}) {
       runtime.registerChild(child);
     }
 
-    let stdout = "";
-    let stderr = "";
+    const stdoutChunks = [];
+    const stderrChunks = [];
     let done = false;
     const timer = setTimeout(() => {
       if (done) return;
@@ -126,8 +127,8 @@ function spawnAndWait(spawn, command, args, opts = {}) {
       resolve(payload);
     }
 
-    if (child.stdout) child.stdout.on("data", (d) => { stdout += d.toString(); });
-    if (child.stderr) child.stderr.on("data", (d) => { stderr += d.toString(); });
+    if (child.stdout) child.stdout.on("data", (d) => { stdoutChunks.push(d); });
+    if (child.stderr) child.stderr.on("data", (d) => { stderrChunks.push(d); });
 
     if (stdin != null && child.stdin) {
       try { child.stdin.end(stdin); } catch {}
@@ -136,9 +137,13 @@ function spawnAndWait(spawn, command, args, opts = {}) {
     }
 
     child.on("error", (err) => {
+      const stdout = decodeShellBytes(stdoutChunks);
+      const stderr = decodeShellBytes(stderrChunks);
       finish({ code: -1, signal: null, stdout, stderr: stderr || (err && err.message) || "process error", spawnError: true });
     });
     child.on("exit", (code, signal) => {
+      const stdout = decodeShellBytes(stdoutChunks);
+      const stderr = decodeShellBytes(stderrChunks);
       finish({ code, signal, stdout, stderr });
     });
   });

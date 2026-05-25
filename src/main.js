@@ -76,6 +76,30 @@ if (isWin) {
   }
 }
 
+// ── Windows: switch the dev console to UTF-8 ──
+//
+// `npm start` attaches Clawd to a parent PowerShell/cmd console. That
+// console defaults to the system codepage (CP936 on zh-CN), so any
+// Chinese string we console.log lands as mojibake — the strings are
+// already UTF-8 in memory (after the GBK stderr decode fix), but the
+// console interprets the bytes as GBK on the way out.
+//
+// SetConsoleOutputCP(65001) tells the attached console to interpret
+// stdout/stderr as UTF-8 for the lifetime of this process. Packaged
+// builds run under the Windows GUI subsystem with no console attached,
+// so this call is a no-op there.
+if (isWin) {
+  try {
+    const koffi = require("koffi");
+    const kernel32 = koffi.load("kernel32.dll");
+    const setConsoleOutputCP = kernel32.func("bool __stdcall SetConsoleOutputCP(uint wCodePageID)");
+    setConsoleOutputCP(65001);
+  } catch (err) {
+    // Best-effort — mojibake in dev console is annoying but not fatal.
+    console.warn("Clawd: SetConsoleOutputCP(65001) failed:", err && err.message);
+  }
+}
+
 
 // ── Window size presets ──
 const SIZES = {

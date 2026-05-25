@@ -213,7 +213,13 @@ function registerRemoteSshIpc(options = {}) {
         }
         return { status: "ok" };
       }
-      return { status: "error", message: result.message, step: result.step };
+      return {
+        status: "error",
+        message: result.message,
+        step: result.step,
+        reason: result.reason || null,
+        hint: result.hint || null,
+      };
     } catch (err) {
       return { status: "error", message: (err && err.message) || "deploy threw" };
     }

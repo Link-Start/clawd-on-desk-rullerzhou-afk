@@ -14,8 +14,15 @@
 //
 //   { profileId, step, status: "start"|"ok"|"fail", message? }
 //
-// Steps in order: mkdir → check-node → scp → host-prefix → install-claude
-// → install-codex (last two are best-effort — failures don't abort).
+// Steps in order: verify → remote-shell → mkdir → check-node → scp →
+// host-prefix → install-claude → install-codex → install-copilot
+// (last three are best-effort — failures don't abort).
+//
+// remote-shell aborts the deploy when the remote default shell is cmd.exe:
+// every later step would fail anyway (`mkdir -p`, `~/...` expansion, the
+// POSIX `sh -c` invoked by buildRemoteHookNodeCommand), and the cmd.exe
+// stderr would land in the renderer as CP936/GBK mojibake — so it's both
+// a cheaper failure and a more actionable message to stop here.
 
 const childProcess = require("child_process");
 const fs = require("fs");
@@ -26,6 +33,8 @@ const {
   resolveRemoteNodeBin,
   buildRemoteHookNodeCommand,
 } = require("./remote-ssh-node");
+const { decodeShellBytes } = require("./remote-ssh-decode");
+const { detectRemoteShell } = require("./remote-ssh-shell-detect");
 
 // ── Hook files manifest ──
 //
@@ -79,8 +88,12 @@ function spawnAndWait(spawn, command, args, opts = {}) {
     if (runtime && typeof runtime.registerChild === "function") {
       runtime.registerChild(child);
     }
-    let stdout = "";
-    let stderr = "";
+    // Accumulate raw bytes — decode once at finish via decodeShellBytes so
+    // GBK/CP936 from a Windows or zh-locale remote doesn't become mojibake
+    // (per-chunk toString() also risks splitting multi-byte chars across
+    // boundaries).
+    const stdoutChunks = [];
+    const stderrChunks = [];
     let done = false;
     const timer = setTimeout(() => {
       if (done) return;
@@ -97,8 +110,8 @@ function spawnAndWait(spawn, command, args, opts = {}) {
       resolve(payload);
     }
 
-    if (child.stdout) child.stdout.on("data", (d) => { stdout += d.toString(); });
-    if (child.stderr) child.stderr.on("data", (d) => { stderr += d.toString(); });
+    if (child.stdout) child.stdout.on("data", (d) => { stdoutChunks.push(d); });
+    if (child.stderr) child.stderr.on("data", (d) => { stderrChunks.push(d); });
 
     if (stdin != null && child.stdin) {
       try {
@@ -111,9 +124,13 @@ function spawnAndWait(spawn, command, args, opts = {}) {
     }
 
     child.on("error", (err) => {
+      const stdout = decodeShellBytes(stdoutChunks);
+      const stderr = decodeShellBytes(stderrChunks);
       finish({ code: -1, signal: null, stdout, stderr: stderr || (err && err.message) || "process error", spawnError: true });
     });
     child.on("exit", (code, signal) => {
+      const stdout = decodeShellBytes(stdoutChunks);
+      const stderr = decodeShellBytes(stderrChunks);
       finish({ code, signal, stdout, stderr });
     });
   });
@@ -128,10 +145,17 @@ async function deploy({ profile, runtime, deps = {} }) {
   }
   const spawn = deps.spawn || childProcess.spawn;
   const hooksDir = deps.hooksDir || resolveHooksDir({ isPackaged: deps.isPackaged });
+  const detectShellFn = deps.detectRemoteShell || detectRemoteShell;
   const log = deps.log || (() => {});
 
-  function progress(step, status, message) {
-    runtime.emit("progress", { profileId: profile.id, step, status, message: message || null });
+  function progress(step, status, message, hint) {
+    runtime.emit("progress", {
+      profileId: profile.id,
+      step,
+      status,
+      message: message || null,
+      hint: hint || null,
+    });
   }
 
   // 0. Verify local hook files exist before touching the network.
@@ -145,6 +169,25 @@ async function deploy({ profile, runtime, deps = {} }) {
     return { ok: false, step: "verify", message: `Missing files: ${missing.join(", ")}` };
   }
   progress("verify", "ok");
+
+  // 0.5. Remote shell probe — bail out early on Windows cmd.exe so the
+  // user gets a single actionable error instead of CP936 mojibake from
+  // every subsequent POSIX command. Unknown shells fall through; if the
+  // host is some custom POSIX-ish setup, the existing steps still run.
+  progress("remote-shell", "start");
+  const shell = await detectShellFn({ profile, spawn, buildSshArgs, runtime });
+  if (shell && shell.shell === "windows-cmd") {
+    const msg = "Remote default shell is Windows cmd.exe. Remote SSH needs a POSIX shell — set OpenSSH DefaultShell to Git Bash or WSL bash on the remote, then redeploy.";
+    progress("remote-shell", "fail", msg, "remoteSshErrWindowsCmdShell");
+    return {
+      ok: false,
+      step: "remote-shell",
+      reason: "windows_cmd_shell",
+      hint: "remoteSshErrWindowsCmdShell",
+      message: msg,
+    };
+  }
+  progress("remote-shell", "ok", shell && shell.os ? shell.os : null);
 
   // 1. mkdir -p ~/.claude/hooks
   progress("mkdir", "start");

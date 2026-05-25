@@ -441,7 +441,15 @@
                 { ttl: 8000 });
             }
           } else {
-            ops.showToast((r && r.message) || "deploy failed", { error: true });
+            // Same hint preference as the progress log line — `remote-shell`
+            // failure surfaces the Windows-cmd guidance in zh.
+            let toastMsg = null;
+            if (r && r.hint) {
+              const hintText = t(r.hint);
+              if (hintText && hintText !== r.hint) toastMsg = hintText;
+            }
+            if (!toastMsg) toastMsg = (r && r.message) || "deploy failed";
+            ops.showToast(toastMsg, { error: true, ttl: 10000 });
           }
         })
         .catch((err) => {
@@ -470,7 +478,17 @@
         const line = document.createElement("div");
         line.className = "remote-ssh-progress-line remote-ssh-progress-" + ev.status;
         const stepLabel = t("remoteSshStep_" + ev.step) || ev.step;
-        line.textContent = `[${ev.status}] ${stepLabel}` + (ev.message ? ` — ${ev.message}` : "");
+        // Prefer a localized hint over the raw English message — `remote-shell`
+        // failures carry hint:"remoteSshErrWindowsCmdShell" so zh users see
+        // actionable Chinese guidance instead of an English one-liner.
+        let detail = "";
+        if (ev.hint) {
+          const hintText = t(ev.hint);
+          if (hintText && hintText !== ev.hint) detail = hintText;
+        }
+        if (!detail && ev.message) detail = ev.message;
+        line.textContent = `[${ev.status}] ${stepLabel}` + (detail ? ` — ${detail}` : "");
+        if (ev.message && detail !== ev.message) line.title = ev.message;
         log.appendChild(line);
       }
       section.appendChild(log);
