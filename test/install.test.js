@@ -58,22 +58,26 @@ function getClawdCommands(settings, event) {
 }
 
 function getHttpUrls(settings, event) {
+  return getHttpHookEntries(settings, event).map((hook) => hook.url);
+}
+
+function getHttpHookEntries(settings, event) {
   const entries = settings.hooks?.[event];
   if (!Array.isArray(entries)) return [];
-  const urls = [];
+  const hooks = [];
   for (const entry of entries) {
     if (!entry || typeof entry !== "object") continue;
     if (entry.type === "http" && typeof entry.url === "string") {
-      urls.push(entry.url);
+      hooks.push(entry);
     }
     if (!Array.isArray(entry.hooks)) continue;
     for (const hook of entry.hooks) {
       if (hook && typeof hook === "object" && hook.type === "http" && typeof hook.url === "string") {
-        urls.push(hook.url);
+        hooks.push(hook);
       }
     }
   }
-  return urls;
+  return hooks;
 }
 
 afterEach(() => {
@@ -536,6 +540,8 @@ describe("Hook installer version compatibility", () => {
     const stopHooks = getCommandHookEntries(settings, "Stop", "clawd-hook.js");
     assert.strictEqual(stopHooks.length, 1);
     assert.strictEqual(stopHooks[0].shell, "powershell");
+    assert.strictEqual(stopHooks[0].async, true);
+    assert.strictEqual(stopHooks[0].timeout, 5);
     assert.ok(stopHooks[0].command.startsWith('& "node" "'), stopHooks[0].command);
     assert.ok(stopHooks[0].command.endsWith('" Stop'), stopHooks[0].command);
   });
@@ -552,6 +558,25 @@ describe("Hook installer version compatibility", () => {
     });
   });
 
+  it("registers remote hooks as async with reverse-tunnel headroom", () => {
+    const settingsPath = makeTempSettings({});
+    registerHooks({
+      silent: true,
+      settingsPath,
+      remote: true,
+      nodeBin: "/usr/bin/node",
+      claudeVersionInfo: { version: "2.1.78", source: "test", status: "known" },
+    });
+
+    const settings = readSettings(settingsPath);
+    const stopHooks = getCommandHookEntries(settings, "Stop", "clawd-hook.js");
+    assert.strictEqual(stopHooks.length, 1);
+    assert.ok(stopHooks[0].command.startsWith('CLAWD_REMOTE=1 "/usr/bin/node" "'), stopHooks[0].command);
+    assert.strictEqual(stopHooks[0].async, true);
+    assert.strictEqual(stopHooks[0].timeout, 10);
+    assert.ok(!Object.prototype.hasOwnProperty.call(stopHooks[0], "shell"));
+  });
+
   it("does not add a shell field for non-Windows hook registration", () => {
     const settingsPath = makeTempSettings({});
     registerHooks({
@@ -566,6 +591,8 @@ describe("Hook installer version compatibility", () => {
     const stopHooks = getCommandHookEntries(settings, "Stop", "clawd-hook.js");
     assert.strictEqual(stopHooks.length, 1);
     assert.ok(!Object.prototype.hasOwnProperty.call(stopHooks[0], "shell"));
+    assert.strictEqual(stopHooks[0].async, true);
+    assert.strictEqual(stopHooks[0].timeout, 5);
     assert.ok(stopHooks[0].command.startsWith('"/usr/bin/node" "'), stopHooks[0].command);
   });
 
@@ -883,7 +910,29 @@ describe("Hook installer version compatibility", () => {
     const autoStartHooks = getCommandHookEntries(settings, "SessionStart", "auto-start.js");
     assert.strictEqual(autoStartHooks.length, 1);
     assert.strictEqual(autoStartHooks[0].shell, "powershell");
+    assert.strictEqual(autoStartHooks[0].async, true);
+    assert.strictEqual(autoStartHooks[0].timeout, 15);
     assert.ok(autoStartHooks[0].command.startsWith('& "node" "'), autoStartHooks[0].command);
+  });
+
+  it("uses async auto-start hooks on non-Windows", () => {
+    const settingsPath = makeTempSettings({});
+    registerHooks({
+      silent: true,
+      settingsPath,
+      autoStart: true,
+      platform: "darwin",
+      nodeBin: "/usr/local/bin/node",
+      claudeVersionInfo: { version: "2.1.78", source: "test", status: "known" },
+    });
+
+    const settings = readSettings(settingsPath);
+    const autoStartHooks = getCommandHookEntries(settings, "SessionStart", "auto-start.js");
+    assert.strictEqual(autoStartHooks.length, 1);
+    assert.ok(!Object.prototype.hasOwnProperty.call(autoStartHooks[0], "shell"));
+    assert.strictEqual(autoStartHooks[0].async, true);
+    assert.strictEqual(autoStartHooks[0].timeout, 15);
+    assert.ok(autoStartHooks[0].command.startsWith('"/usr/local/bin/node" "'), autoStartHooks[0].command);
   });
 
   it("updates stale Windows auto-start hooks to PowerShell format", () => {
@@ -912,8 +961,40 @@ describe("Hook installer version compatibility", () => {
     assert.ok(result.updated >= 1);
     assert.strictEqual(autoStartHooks.length, 1);
     assert.strictEqual(autoStartHooks[0].shell, "powershell");
+    assert.strictEqual(autoStartHooks[0].async, true);
+    assert.strictEqual(autoStartHooks[0].timeout, 15);
     assert.ok(autoStartHooks[0].command.startsWith("& "), autoStartHooks[0].command);
     assert.ok(!autoStartHooks[0].command.includes("/old/path/"));
+  });
+
+  it("upgrades existing command hooks with async metadata without losing the Node path", () => {
+    const existingAbsPath = "/Users/tester/.nvm/versions/node/v20.11.0/bin/node";
+    const settingsPath = makeTempSettings({
+      hooks: {
+        Stop: [
+          {
+            matcher: "",
+            hooks: [{ command: `"${existingAbsPath}" "/app/hooks/clawd-hook.js" Stop` }],
+          },
+        ],
+      },
+    });
+
+    const result = registerHooks({
+      silent: true,
+      settingsPath,
+      nodeBin: null,
+      claudeVersionInfo: { version: "2.1.78", source: "test", status: "known" },
+    });
+
+    const settings = readSettings(settingsPath);
+    const stopHooks = getCommandHookEntries(settings, "Stop", "clawd-hook.js");
+    assert.ok(result.updated >= 1);
+    assert.strictEqual(stopHooks.length, 1);
+    assert.strictEqual(stopHooks[0].type, "command");
+    assert.ok(stopHooks[0].command.includes(existingAbsPath), stopHooks[0].command);
+    assert.strictEqual(stopHooks[0].async, true);
+    assert.strictEqual(stopHooks[0].timeout, 5);
   });
 
   it("checks macOS absolute Claude paths before PATH fallback", () => {
@@ -1112,7 +1193,10 @@ describe("Claude permission hook ownership", () => {
 
     const settings = readSettings(settingsPath);
     assert.ok(result.updated >= 1);
-    assert.deepStrictEqual(getHttpUrls(settings, "PermissionRequest"), [expectedUrl]);
+    const permissionHooks = getHttpHookEntries(settings, "PermissionRequest");
+    assert.deepStrictEqual(permissionHooks.map((hook) => hook.url), [expectedUrl]);
+    assert.strictEqual(permissionHooks[0].timeout, 600);
+    assert.ok(!Object.prototype.hasOwnProperty.call(permissionHooks[0], "async"));
   });
 });
 

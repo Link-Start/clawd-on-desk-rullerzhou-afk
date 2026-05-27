@@ -7,7 +7,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const childProcess = require("child_process");
-const { buildPermissionUrl, DEFAULT_SERVER_PORT, PERMISSION_PATH, readRuntimePort, resolveNodeBin, resolveNodeBinAsync, SERVER_PORTS } = require("./server-config");
+const { buildPermissionUrl, DEFAULT_SERVER_PORT, PERMISSION_PATH, readRuntimePort, REMOTE_HOOK_HTTP_TIMEOUT_MS, resolveNodeBin, resolveNodeBinAsync, SERVER_PORTS } = require("./server-config");
 const { writeJsonAtomic, writeJsonAtomicAsync, asarUnpackedPath, extractExistingNodeBin } = require("./json-utils");
 
 const DEFAULT_PARENT_DIR = path.join(os.homedir(), ".claude");
@@ -434,34 +434,46 @@ const MARKER = "clawd-hook.js";
 const AUTO_START_MARKER = "auto-start.js";
 const LEGACY_AUTO_START_MARKER = "auto-start.sh";
 const HTTP_MARKER = PERMISSION_PATH;
+const STATE_HOOK_TIMEOUT_SECONDS = 5;
+const REMOTE_STATE_HOOK_TIMEOUT_SECONDS = Math.ceil(REMOTE_HOOK_HTTP_TIMEOUT_MS / 1000) + 5;
+const AUTO_START_HOOK_TIMEOUT_SECONDS = 15;
 
 function buildCommandHookSpec(nodeBin, scriptPath, args = "", options = {}) {
   const platform = options.platform || process.platform;
   const argSuffix = args ? ` ${args}` : "";
   const quotedCommand = `"${nodeBin}" "${scriptPath}"${argSuffix}`;
+  const withHookOptions = (hook) => {
+    if (Object.prototype.hasOwnProperty.call(options, "async")) {
+      hook.async = options.async === true;
+    }
+    if (Number.isFinite(options.timeout)) {
+      hook.timeout = options.timeout;
+    }
+    return hook;
+  };
 
   // Remote hook deployment targets POSIX shells over SSH and relies on bash-style
   // env-prefix syntax (`CLAWD_REMOTE=1 cmd`). Keep that legacy form even if tests
   // force win32 here; Windows + remote is not a supported deployment target.
   if (options.remote) {
-    return {
+    return withHookOptions({
       type: "command",
       command: `CLAWD_REMOTE=1 ${quotedCommand}`,
-    };
+    });
   }
 
   if (platform === "win32") {
-    return {
+    return withHookOptions({
       type: "command",
       shell: "powershell",
       command: `& ${quotedCommand}`,
-    };
+    });
   }
 
-  return {
+  return withHookOptions({
     type: "command",
     command: quotedCommand,
-  };
+  });
 }
 
 function forEachCommandHook(entries, visitor) {
@@ -483,21 +495,31 @@ function forEachCommandHook(entries, visitor) {
 function syncCommandHook(entries, marker, expectedHook) {
   let found = false;
   let changed = false;
-  const expectedShell = typeof expectedHook.shell === "string" ? expectedHook.shell : undefined;
+  const syncField = (hook, field) => {
+    const hasExpected = Object.prototype.hasOwnProperty.call(expectedHook, field);
+    const hasCurrent = Object.prototype.hasOwnProperty.call(hook, field);
+    if (!hasExpected) {
+      if (!hasCurrent) return;
+      delete hook[field];
+      changed = true;
+      return;
+    }
+    if (hook[field] === expectedHook[field]) return;
+    hook[field] = expectedHook[field];
+    changed = true;
+  };
 
   forEachCommandHook(entries, (hook) => {
     if (!hook.command.includes(marker)) return;
     found = true;
+    syncField(hook, "type");
     if (hook.command !== expectedHook.command) {
       hook.command = expectedHook.command;
       changed = true;
     }
-
-    const currentShell = typeof hook.shell === "string" ? hook.shell : undefined;
-    if (currentShell === expectedShell) return;
-    if (expectedShell === undefined) delete hook.shell;
-    else hook.shell = expectedShell;
-    changed = true;
+    syncField(hook, "shell");
+    syncField(hook, "async");
+    syncField(hook, "timeout");
   });
   return { found, changed };
 }
@@ -809,6 +831,8 @@ function registerHooks(options = {}) {
     const desiredHook = buildCommandHookSpec(nodeBin, hookScript, event, {
       platform,
       remote: options.remote,
+      async: true,
+      timeout: options.remote ? REMOTE_STATE_HOOK_TIMEOUT_SECONDS : STATE_HOOK_TIMEOUT_SECONDS,
     });
     const commandSync = syncCommandHook(settings.hooks[event], MARKER, desiredHook);
     if (commandSync.found) {
@@ -838,10 +862,15 @@ function registerHooks(options = {}) {
       changed = true;
     }
 
-    const autoStartHook = buildCommandHookSpec(nodeBin, autoStartScript, "", { platform });
+    const autoStartHook = buildCommandHookSpec(nodeBin, autoStartScript, "", {
+      platform,
+      async: true,
+      timeout: AUTO_START_HOOK_TIMEOUT_SECONDS,
+    });
     const autoStartSync = syncCommandHook(settings.hooks.SessionStart, AUTO_START_MARKER, autoStartHook);
     if (!autoStartSync.found) {
-      // Insert at index 0 — must run BEFORE clawd-hook.js so the app is starting
+      // Keep auto-start visible before the state hook in settings. Claude Code
+      // runs matching hooks in parallel, so correctness must not depend on order.
       settings.hooks.SessionStart.unshift({
         matcher: "",
         hooks: [autoStartHook],
@@ -1019,6 +1048,8 @@ async function registerHooksAsync(options = {}) {
     const desiredHook = buildCommandHookSpec(nodeBin, hookScript, event, {
       platform,
       remote: options.remote,
+      async: true,
+      timeout: options.remote ? REMOTE_STATE_HOOK_TIMEOUT_SECONDS : STATE_HOOK_TIMEOUT_SECONDS,
     });
     const commandSync = syncCommandHook(settings.hooks[event], MARKER, desiredHook);
     if (commandSync.found) {
@@ -1046,7 +1077,11 @@ async function registerHooksAsync(options = {}) {
       changed = true;
     }
 
-    const autoStartHook = buildCommandHookSpec(nodeBin, autoStartScript, "", { platform });
+    const autoStartHook = buildCommandHookSpec(nodeBin, autoStartScript, "", {
+      platform,
+      async: true,
+      timeout: AUTO_START_HOOK_TIMEOUT_SECONDS,
+    });
     const autoStartSync = syncCommandHook(settings.hooks.SessionStart, AUTO_START_MARKER, autoStartHook);
     if (!autoStartSync.found) {
       settings.hooks.SessionStart.unshift({
