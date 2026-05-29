@@ -26,6 +26,13 @@ import { homedir, platform } from "os";
 import { join } from "path";
 import { randomBytes, timingSafeEqual } from "crypto";
 import { execFileSync, execSync } from "child_process";
+import {
+  DEFAULT_SESSION_ID,
+  getEventSessionId,
+  normalizeOpencodeSessionId,
+  resolveOpencodeSessionId,
+  shouldDropMappedEventWithoutSessionId,
+} from "./session-ids.mjs";
 
 const CLAWD_DIR = join(homedir(), ".clawd");
 const RUNTIME_CONFIG_PATH = join(CLAWD_DIR, "runtime.json");
@@ -334,23 +341,24 @@ function postPermissionToClawd(body) {
 // reusable across agents.
 function sendState(state, eventName, sessionId) {
   if (!state || !eventName) return;
+  const clawdSessionId = normalizeOpencodeSessionId(sessionId) || DEFAULT_SESSION_ID;
 
   if (state === "thinking" && ACTIVE_STATES_BLOCKING_THINKING.has(_lastState)) {
-    debugLog(`GATE busy→thinking blocked (lastState=${_lastState}, session=${sessionId})`);
+    debugLog(`GATE busy→thinking blocked (lastState=${_lastState}, session=${clawdSessionId})`);
     return;
   }
 
-  if (state === _lastState && sessionId === _lastSessionId) {
+  if (state === _lastState && clawdSessionId === _lastSessionId) {
     return;
   }
 
-  debugLog(`SEND ${_lastState || "null"} → ${state} event=${eventName} session=${sessionId}`);
+  debugLog(`SEND ${_lastState || "null"} → ${state} event=${eventName} session=${clawdSessionId}`);
   _lastState = state;
-  _lastSessionId = sessionId;
+  _lastSessionId = clawdSessionId;
 
   postStateToClawd({
     state,
-    session_id: sessionId || "default",
+    session_id: clawdSessionId,
     event: eventName,
     agent_id: AGENT_ID,
     hook_source: HOOK_SOURCE,
@@ -364,6 +372,7 @@ function sendState(state, eventName, sessionId) {
 function translateEvent(event) {
   if (!event || typeof event.type !== "string") return null;
   const props = event.properties || {};
+  const sessionId = getEventSessionId(event);
 
   switch (event.type) {
     case "session.created":
@@ -409,7 +418,7 @@ function translateEvent(event) {
       // SessionEnd so Clawd removes them from its tracking map — no happy
       // flash, no menu pollution. If _rootSessionId is null (no session
       // seen yet, should never happen), fall through to old behavior.
-      if (_rootSessionId && props.sessionID && props.sessionID !== _rootSessionId) {
+      if (_rootSessionId && sessionId && sessionId !== _rootSessionId) {
         return { state: "sleeping", event: "SessionEnd" };
       }
       return { state: "attention", event: "Stop" };
@@ -456,7 +465,7 @@ function handlePermissionAsked(event) {
     tool_input: p.metadata || {},
     patterns: Array.isArray(p.patterns) ? p.patterns : [],
     always: Array.isArray(p.always) ? p.always : [],
-    session_id: _lastSessionId || "default",
+    session_id: resolveOpencodeSessionId(null, _lastSessionId || _rootSessionId),
     request_id: requestId,
     server_url: _serverUrl,         // debug only, not used for replies
     bridge_url: _bridgeUrl,         // ← Clawd POSTs decisions here
@@ -586,7 +595,7 @@ export default async (ctx) => {
         // Phase 3: capture the root session on first sighting. Any later
         // sessionID is a subtask spawned by the parent's `task` tool, and
         // its session.idle will be downgraded to SessionEnd in translateEvent.
-        const sid = event.properties && event.properties.sessionID;
+        const sid = getEventSessionId(event);
         if (sid && !_rootSessionId) {
           _rootSessionId = sid;
           debugLog(`ROOT session captured id=${sid}`);
@@ -612,7 +621,14 @@ export default async (ctx) => {
           }
           return;
         }
-        const sessionId = (event.properties && event.properties.sessionID) || "default";
+        if (shouldDropMappedEventWithoutSessionId(event, mapped)) {
+          debugLog(`DROP ${event.type} event=${mapped.event} reason=no-session-id`);
+          return;
+        }
+        const sessionId = resolveOpencodeSessionId(
+          getEventSessionId(event),
+          _lastSessionId || _rootSessionId
+        );
         debugLog(`MAP ${event.type} → state=${mapped.state} event=${mapped.event}`);
         sendState(mapped.state, mapped.event, sessionId);
       } catch (err) {

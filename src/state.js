@@ -974,9 +974,10 @@ function updateSession(sessionId, state, event, opts = {}) {
   const srcProvider = provider || (existing && existing.provider) || null;
   const srcCodexOriginator = codexOriginator || (existing && existing.codexOriginator) || null;
   const srcCodexSource = codexSource || (existing && existing.codexSource) || null;
+  const incomingSessionTitle = normalizeTitle(sessionTitle);
   // Sticky: empty input does not clear an existing title. A session that has
   // ever been named keeps that name until the user explicitly renames it.
-  const srcSessionTitle = normalizeTitle(sessionTitle) || (existing && existing.sessionTitle) || null;
+  const srcSessionTitle = incomingSessionTitle || (existing && existing.sessionTitle) || null;
   const srcResumeState = (existing && existing.resumeState) || null;
   const isSubagentStart = event === "SubagentStart" || event === "subagentStart";
   const isSubagentStop = event === "SubagentStop" || event === "subagentStop";
@@ -1005,7 +1006,12 @@ function updateSession(sessionId, state, event, opts = {}) {
     return;
   }
 
-  debugSession(`event ${describeSession(sessionId, existing)} -> incoming=${state}/${event || "-"} hint=${displayHint || "-"} source=${hookSource || "-"}`);
+  debugSession(
+    `event ${describeSession(sessionId, existing)} -> incoming=${state}/${event || "-"} ` +
+    `hint=${displayHint || "-"} source=${hookSource || "-"} ` +
+    `incomingAgent=${agentId || "-"} resolvedAgent=${srcAgentId || "-"} ` +
+    `defaulted=${agentIdDefaulted ? "1" : "0"} incomingTitle=${incomingSessionTitle ? "1" : "0"}`
+  );
 
   const pidReachable = resolvePidReachable(existing, srcAgentPid, srcPid);
 

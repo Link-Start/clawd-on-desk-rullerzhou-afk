@@ -833,6 +833,22 @@ describe("updateSession()", () => {
     assert.strictEqual(api.sessions.get("legacy-s1").agentId, "claude-code");
   });
 
+  it("opencode namespaced ids do not collide with bare Claude session ids", () => {
+    api.updateSession("opencode:shared-sid", "thinking", "UserPromptSubmit", {
+      agentId: "opencode",
+      sessionTitle: "hello",
+    });
+    api.updateSession("shared-sid", "attention", "Stop", {
+      agentId: "claude-code",
+      sessionTitle: "hi",
+    });
+
+    assert.strictEqual(api.sessions.get("opencode:shared-sid").agentId, "opencode");
+    assert.strictEqual(api.sessions.get("opencode:shared-sid").sessionTitle, "hello");
+    assert.strictEqual(api.sessions.get("shared-sid").agentId, "claude-code");
+    assert.strictEqual(api.sessions.get("shared-sid").sessionTitle, "hi");
+  });
+
   it("juggling + working (non-SubagentStop) → keeps juggling", () => {
     update(api, { id: "s1", state: "juggling", event: "SubagentStart" });
     assert.strictEqual(api.sessions.get("s1").state, "juggling");
