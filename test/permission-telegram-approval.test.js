@@ -253,6 +253,52 @@ describe("permission telegram remote approval", () => {
     assert.equal(entry.res.captured.ended, false);
   });
 
+  it("ignores stale Telegram decisions after the local permission resolves first", async () => {
+    let resolveApproval;
+    const client = {
+      isEnabled: () => true,
+      requestApproval: () => new Promise((resolve) => { resolveApproval = resolve; }),
+    };
+    const perm = initPermission(makeCtx({ getTelegramApprovalClient: () => client }));
+    const entry = makePermEntry({
+      suggestions: [{ type: "setMode", mode: "acceptEdits", destination: "localSettings" }],
+    });
+    perm.pendingPermissions.push(entry);
+
+    assert.equal(perm.maybeStartRemoteApproval(entry), true);
+    perm.resolvePermissionEntry(entry, "deny");
+    const bodyBeforeRemote = entry.res.captured.body;
+
+    resolveApproval({ action: "suggestion", index: 0 });
+    await flush();
+    await flush();
+
+    assert.equal(perm.pendingPermissions.length, 0);
+    assert.equal(entry.res.captured.body, bodyBeforeRemote);
+    assert.deepEqual(JSON.parse(entry.res.captured.body).hookSpecificOutput.decision, { behavior: "deny" });
+  });
+
+  it("ignores invalid Telegram suggestion indexes for rich agents without resolving locally", async () => {
+    const client = {
+      isEnabled: () => true,
+      requestApproval: () => Promise.resolve({ action: "suggestion", index: 9 }),
+    };
+    const perm = initPermission(makeCtx({ getTelegramApprovalClient: () => client }));
+    const entry = makePermEntry({
+      agentId: "codebuddy",
+      suggestions: [{ type: "setMode", mode: "acceptEdits", destination: "localSettings" }],
+    });
+    perm.pendingPermissions.push(entry);
+
+    assert.equal(perm.maybeStartRemoteApproval(entry), true);
+    await flush();
+    await flush();
+
+    assert.equal(perm.pendingPermissions.length, 1);
+    assert.equal(entry.res.captured.ended, false);
+    assert.equal(entry.resolvedSuggestion, null);
+  });
+
   it("aborts the remote request when the local permission resolves first", async () => {
     let signal;
     const client = {

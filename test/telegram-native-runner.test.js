@@ -230,6 +230,74 @@ test("native runner requestApproval renders suggestions and returns suggestion d
   await runner.stop();
 });
 
+test("native runner rejects forged suggestion callbacks and waits for a valid decision", async () => {
+  const server = createFakeTelegramServer();
+  let releaseFirstPoll;
+  let forgedSuggestionData = "";
+  let validSuggestionData = "";
+
+  server.enqueue("getUpdates", () => new Promise((resolve) => { releaseFirstPoll = resolve; }));
+  server.enqueue("sendMessage", (payload) => {
+    const keyboard = payload.reply_markup.inline_keyboard;
+    forgedSuggestionData = keyboard[0][0].callback_data.replace(/:a$/, ":s99");
+    validSuggestionData = keyboard[1][0].callback_data;
+    return { ok: true, result: { message_id: 102, chat: { id: 123 } } };
+  });
+  server.enqueue("getUpdates", () => ({
+    ok: true,
+    result: [
+      {
+        update_id: 1,
+        callback_query: {
+          id: "cb-forged",
+          from: { id: 777 },
+          message: { message_id: 102, chat: { id: 123 } },
+          data: forgedSuggestionData,
+        },
+      },
+      {
+        update_id: 2,
+        callback_query: {
+          id: "cb-valid",
+          from: { id: 777 },
+          message: { message_id: 102, chat: { id: 123 } },
+          data: validSuggestionData,
+        },
+      },
+    ],
+  }));
+  server.enqueueOk("answerCallbackQuery", true);
+  server.enqueueOk("answerCallbackQuery", true);
+  server.enqueueOk("editMessageReplyMarkup", { message_id: 102 });
+
+  const runner = createTelegramNativeRunner({
+    tokenStore: tokenStore(),
+    transport: server.transport,
+    getDispatch: () => async () => {},
+    getChatId: () => "123",
+    getAllowedUserId: () => "777",
+  });
+
+  await runner.start();
+  await tick();
+  const decisionPromise = runner.requestApproval({
+    title: "claude-code requests Bash",
+    detail: "Summary: Run tests",
+    suggestions: [{ index: 0, label: "Always Bash" }],
+  });
+  await tick();
+
+  releaseFirstPoll({ ok: true, result: [] });
+  const decision = await decisionPromise;
+  assert.deepEqual(decision, { action: "suggestion", index: 0 });
+
+  const callbackAnswers = server.calls.filter((call) => call.method === "answerCallbackQuery");
+  assert.equal(callbackAnswers[0].payload.text, "Unavailable");
+  assert.equal(callbackAnswers[1].payload.text, "Applied");
+  assert.equal(server.calls.filter((call) => call.method === "editMessageReplyMarkup").length, 1);
+  await runner.stop();
+});
+
 test("native runner requestApproval ignores wrong user and resolves later callback", async () => {
   const server = createFakeTelegramServer();
   let releaseFirstPoll;
