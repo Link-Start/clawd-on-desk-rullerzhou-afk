@@ -860,6 +860,9 @@ function ackSessionCompletion(sessionId) {
 
 function resolveIncomingAgentId(existing, incomingAgentId, incomingDefaulted) {
   const remembered = existing && existing.agentId ? existing.agentId : null;
+  // `incomingDefaulted` means the route only fell back to the legacy
+  // Claude attribution. Preserve the remembered owner for that session id;
+  // agents that can share ids with other agents must namespace upstream.
   if (incomingDefaulted && remembered) return remembered;
   return incomingAgentId || remembered || null;
 }

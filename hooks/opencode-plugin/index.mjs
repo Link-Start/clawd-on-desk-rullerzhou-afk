@@ -336,30 +336,36 @@ function postPermissionToClawd(body) {
   postToClawd("/permission", body, `PERM tool=${body.tool_name} req=${body.request_id}`);
 }
 
-// Clawd uses PascalCase event names matching Claude Code's hook vocabulary so
-// state.js transition rules (e.g. SubagentStop → working whitelist) are
-// reusable across agents.
-function sendState(state, eventName, sessionId) {
-  if (!state || !eventName) return;
+function buildStateBody(state, eventName, sessionId) {
+  if (!state || !eventName) return null;
   const clawdSessionId = normalizeOpencodeSessionId(sessionId) || DEFAULT_SESSION_ID;
-
-  const lastState = _lastStatePerSession.get(clawdSessionId) || null;
-
-  // Per-session dedup: skip only if the SAME session repeats the SAME state.
-  if (state === lastState) {
-    return;
-  }
-
-  debugLog(`SEND ${lastState || "null"} → ${state} event=${eventName} session=${clawdSessionId}`);
-  _lastStatePerSession.set(clawdSessionId, state);
-
-  postStateToClawd({
+  return {
     state,
     session_id: clawdSessionId,
     event: eventName,
     agent_id: AGENT_ID,
     hook_source: HOOK_SOURCE,
-  });
+  };
+}
+
+// Clawd uses PascalCase event names matching Claude Code's hook vocabulary so
+// state.js transition rules (e.g. SubagentStop → working whitelist) are
+// reusable across agents.
+function sendState(state, eventName, sessionId) {
+  const body = buildStateBody(state, eventName, sessionId);
+  if (!body) return;
+
+  const lastState = _lastStatePerSession.get(body.session_id) || null;
+
+  // Per-session dedup: skip only if the SAME session repeats the SAME state.
+  if (body.state === lastState) {
+    return;
+  }
+
+  debugLog(`SEND ${lastState || "null"} → ${body.state} event=${body.event} session=${body.session_id}`);
+  _lastStatePerSession.set(body.session_id, body.state);
+
+  postStateToClawd(body);
 }
 
 // Translate an opencode event into a Clawd (state, eventName) pair, or null
@@ -432,6 +438,11 @@ function translateEvent(event) {
       return null;
   }
 }
+
+export const __test = {
+  buildStateBody,
+  translateEvent,
+};
 
 // Normalize ctx.serverUrl into a string with a trailing slash. opencode passes
 // a URL object in practice but we coerce defensively in case future versions

@@ -8,6 +8,11 @@ async function loadSessionIdModule() {
   return import(pathToFileURL(modulePath).href);
 }
 
+async function loadPluginModule() {
+  const modulePath = path.join(__dirname, "..", "hooks", "opencode-plugin", "index.mjs");
+  return import(pathToFileURL(modulePath).href);
+}
+
 describe("opencode plugin session ids", () => {
   it("namespaces raw opencode session ids before sending them to Clawd", async () => {
     const mod = await loadSessionIdModule();
@@ -60,5 +65,21 @@ describe("opencode plugin session ids", () => {
       ),
       false
     );
+  });
+
+  it("wires session start and end events to the same namespaced Clawd session id", async () => {
+    const mod = await loadPluginModule();
+    const start = { type: "session.created", properties: { sessionID: "ses_same" } };
+    const end = { type: "session.deleted", properties: { sessionID: "ses_same" } };
+
+    const startMapped = mod.__test.translateEvent(start);
+    const endMapped = mod.__test.translateEvent(end);
+    const startBody = mod.__test.buildStateBody(startMapped.state, startMapped.event, "ses_same");
+    const endBody = mod.__test.buildStateBody(endMapped.state, endMapped.event, "ses_same");
+
+    assert.strictEqual(startBody.session_id, "opencode:ses_same");
+    assert.strictEqual(endBody.session_id, "opencode:ses_same");
+    assert.strictEqual(startBody.event, "SessionStart");
+    assert.strictEqual(endBody.event, "SessionEnd");
   });
 });

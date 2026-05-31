@@ -824,6 +824,18 @@ describe("updateSession()", () => {
     assert.strictEqual(api.sessions.get("opencode-s1").agentId, "opencode");
   });
 
+  it("explicit attribution can replace a remembered agent id for a reused session id", () => {
+    api.updateSession("shared-s1", "thinking", "UserPromptSubmit", {
+      agentId: "opencode",
+      cwd: "/repo",
+    });
+    api.updateSession("shared-s1", "working", "PreToolUse", {
+      agentId: "claude-code",
+    });
+
+    assert.strictEqual(api.sessions.get("shared-s1").agentId, "claude-code");
+  });
+
   it("defaulted Claude attribution is still used for new legacy sessions", () => {
     api.updateSession("legacy-s1", "working", "PreToolUse", {
       agentId: "claude-code",
