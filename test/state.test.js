@@ -2308,6 +2308,39 @@ describe("requiresCompletionAck lifecycle", () => {
     assert.strictEqual(entry.requiresCompletionAck, true);
   });
 
+  it("#414: unacknowledged remote completion is deleted by the session timeout (no 24h hold)", () => {
+    // End-to-end: completion sets the flag, stale-cleanup keeps the `done`
+    // badge, but once the configured idle timeout elapses the session is
+    // removed like any other unreachable remote session — it is NOT held for
+    // 24h waiting on a manual ack.
+    update(api, { id: "s1", state: "attention", event: "event_msg:task_complete", agentId: "codex", host: "ssh:example.com" });
+    update(api, { id: "s1", state: "sleeping", event: "stale-cleanup", agentId: "codex", host: "ssh:example.com" });
+    const session = api.sessions.get("s1");
+    assert.strictEqual(session.requiresCompletionAck, true);
+    assert.strictEqual(api.buildSessionSnapshot().sessions.find((s) => s.id === "s1").badge, "done");
+
+    // Simulate the default sessionStaleMs (600000ms) elapsing since the last update.
+    session.updatedAt = Date.now() - 700000;
+    api.cleanStaleSessions();
+    assert.strictEqual(api.sessions.has("s1"), false);
+  });
+
+  it("#414: ack resets the idle window via ackedAt; deletion waits for a fresh timeout", () => {
+    update(api, { id: "s1", state: "attention", event: "event_msg:task_complete", agentId: "codex", host: "ssh:example.com" });
+    // Completion is already old, but the user acks now → ackedAt is fresh.
+    api.sessions.get("s1").updatedAt = Date.now() - 700000;
+    assert.strictEqual(api.ackSessionCompletion("s1"), true);
+
+    // referenceTs = max(updatedAt, ackedAt) = the fresh ack → still in window.
+    api.cleanStaleSessions();
+    assert.strictEqual(api.sessions.has("s1"), true);
+
+    // Advance past the window from the ack instant → now it deletes.
+    api.sessions.get("s1").ackedAt = Date.now() - 700000;
+    api.cleanStaleSessions();
+    assert.strictEqual(api.sessions.has("s1"), false);
+  });
+
   it("remote Codex stale-cleanup alone does not create an ack requirement", () => {
     update(api, { id: "s1", state: "sleeping", event: "stale-cleanup", agentId: "codex", host: "ssh:example.com" });
     assert.notStrictEqual(api.sessions.get("s1").requiresCompletionAck, true);
