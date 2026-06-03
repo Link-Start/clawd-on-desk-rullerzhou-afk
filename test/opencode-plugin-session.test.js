@@ -1,6 +1,6 @@
-const { describe, it } = require("node:test");
+const { describe, it, beforeEach } = require("node:test");
 const assert = require("node:assert");
-const path = require("node:path");
+const path = require("path");
 const { pathToFileURL } = require("node:url");
 
 async function loadSessionIdModule() {
@@ -81,5 +81,258 @@ describe("opencode plugin session ids", () => {
     assert.strictEqual(endBody.session_id, "opencode:ses_same");
     assert.strictEqual(startBody.event, "SessionStart");
     assert.strictEqual(endBody.event, "SessionEnd");
+  });
+});
+
+describe("opencode plugin headless (parentID-based child detection)", () => {
+  let pluginMod;
+
+  beforeEach(async () => {
+    pluginMod = await loadPluginModule();
+    pluginMod.__test._sessionParentById.clear();
+    pluginMod.__test._rootSessionId = null;
+  });
+
+  // Use case 1: getEventParentSessionId extracts parentID from event.properties.info
+  it("extracts parentID from event.properties.info.parentID", async () => {
+    const mod = await loadSessionIdModule();
+
+    // Child session with parentID
+    assert.strictEqual(
+      mod.getEventParentSessionId({
+        type: "session.created",
+        properties: { sessionID: "ses_child", info: { parentID: "ses_root" } },
+      }),
+      "ses_root"
+    );
+
+    // Root session — no parentID
+    assert.strictEqual(
+      mod.getEventParentSessionId({
+        type: "session.created",
+        properties: { sessionID: "ses_root", info: {} },
+      }),
+      null
+    );
+
+    // Missing info entirely
+    assert.strictEqual(
+      mod.getEventParentSessionId({
+        type: "session.created",
+        properties: { sessionID: "ses_root" },
+      }),
+      null
+    );
+
+    // Empty string parentID
+    assert.strictEqual(
+      mod.getEventParentSessionId({
+        type: "session.created",
+        properties: { sessionID: "ses_root", info: { parentID: "" } },
+      }),
+      null
+    );
+
+    // Whitespace-only parentID
+    assert.strictEqual(
+      mod.getEventParentSessionId({
+        type: "session.created",
+        properties: { sessionID: "ses_root", info: { parentID: "  " } },
+      }),
+      null
+    );
+
+    // null event
+    assert.strictEqual(mod.getEventParentSessionId(null), null);
+  });
+
+  // Use case 2: isChildSessionId normalizes sessionId before lookup
+  it("isChildSessionId normalizes sessionId before checking the parent map", async () => {
+    const mod = await loadSessionIdModule();
+    // Map stores normalized keys (as the event handler does)
+    const parentMap = new Map();
+    parentMap.set("opencode:ses_child", "opencode:ses_root");
+
+    // Raw id is normalized internally → matches
+    assert.strictEqual(mod.isChildSessionId("ses_child", parentMap), true);
+    // Already-prefixed id is also normalized → matches
+    assert.strictEqual(mod.isChildSessionId("opencode:ses_child", parentMap), true);
+    // Root session is not in the map
+    assert.strictEqual(mod.isChildSessionId("ses_root", parentMap), false);
+    assert.strictEqual(mod.isChildSessionId("opencode:ses_root", parentMap), false);
+    // Unknown session
+    assert.strictEqual(mod.isChildSessionId("ses_other", parentMap), false);
+    // Edge cases
+    assert.strictEqual(mod.isChildSessionId(null, parentMap), false);
+    assert.strictEqual(mod.isChildSessionId("ses_child", null), false);
+    assert.strictEqual(mod.isChildSessionId("ses_child", new Map()), false);
+  });
+
+  // Use case 3: buildStateBody adds headless: true for child sessions
+  // (both raw and prefixed sessionId forms)
+  it("buildStateBody adds headless: true for child sessions (raw and prefixed id)", async () => {
+    // Simulate what the event handler does: store normalized keys
+    pluginMod.__test._sessionParentById.set("opencode:ses_child", "opencode:ses_root");
+
+    // Raw id passed to buildStateBody → isChildSessionId normalizes → match
+    const bodyRaw = pluginMod.__test.buildStateBody("working", "PreToolUse", "ses_child");
+    assert.strictEqual(bodyRaw.headless, true);
+    assert.strictEqual(bodyRaw.session_id, "opencode:ses_child");
+
+    // Prefixed id passed to buildStateBody → isChildSessionId normalizes → match
+    const bodyPrefixed = pluginMod.__test.buildStateBody("working", "PreToolUse", "opencode:ses_child");
+    assert.strictEqual(bodyPrefixed.headless, true);
+    assert.strictEqual(bodyPrefixed.session_id, "opencode:ses_child");
+  });
+
+  // Use case 4: buildStateBody does NOT add headless for root sessions
+  it("buildStateBody does not add headless for root sessions", async () => {
+    const body = pluginMod.__test.buildStateBody("working", "PreToolUse", "ses_root");
+    assert.strictEqual(body.headless, undefined);
+    assert.strictEqual(body.session_id, "opencode:ses_root");
+  });
+
+  // Use case 5: standalone session (not in _sessionParentById, not root)
+  // must NOT be marked headless — no heuristic fallback
+  it("buildStateBody does not add headless for standalone sessions without parentID", async () => {
+    pluginMod.__test._rootSessionId = "opencode:ses_root";
+
+    // ses_other is not in _sessionParentById → NOT headless (no heuristic)
+    const body = pluginMod.__test.buildStateBody("working", "PreToolUse", "ses_other");
+    assert.strictEqual(body.headless, undefined);
+    assert.strictEqual(body.session_id, "opencode:ses_other");
+  });
+
+  // Use case 6: translateEvent maps child session.idle → SessionEnd
+  it("translateEvent maps child session.idle to SessionEnd when in _sessionParentById", async () => {
+    pluginMod.__test._sessionParentById.set("opencode:ses_child", "opencode:ses_root");
+
+    const result = pluginMod.__test.translateEvent({
+      type: "session.idle",
+      properties: { sessionID: "ses_child" },
+    });
+    assert.strictEqual(result.state, "sleeping");
+    assert.strictEqual(result.event, "SessionEnd");
+  });
+
+  // Use case 7: translateEvent maps root session.idle → Stop (attention)
+  it("translateEvent maps root session.idle to Stop (attention)", async () => {
+    const result = pluginMod.__test.translateEvent({
+      type: "session.idle",
+      properties: { sessionID: "ses_root" },
+    });
+    assert.strictEqual(result.state, "attention");
+    assert.strictEqual(result.event, "Stop");
+  });
+
+  // Use case 8: standalone session.idle (not in map) → Stop, NOT SessionEnd
+  it("translateEvent maps standalone session.idle to Stop (no heuristic fallback)", async () => {
+    pluginMod.__test._rootSessionId = "opencode:ses_root";
+
+    // ses_other is not in _sessionParentById → Stop (not SessionEnd)
+    const result = pluginMod.__test.translateEvent({
+      type: "session.idle",
+      properties: { sessionID: "ses_other" },
+    });
+    assert.strictEqual(result.state, "attention");
+    assert.strictEqual(result.event, "Stop");
+  });
+
+  // Use case 9: cleanupSessionParentMap clears entire map on server.instance.disposed
+  // even when the event has no sessionID
+  it("cleanupSessionParentMap clears entire map on server.instance.disposed (no sessionID)", async () => {
+    const mod = await loadSessionIdModule();
+    const parentMap = new Map();
+    parentMap.set("opencode:ses_child1", "opencode:ses_root");
+    parentMap.set("opencode:ses_child2", "opencode:ses_root");
+
+    // server.instance.disposed with no sessionID — must still clear the map
+    mod.cleanupSessionParentMap(
+      { type: "server.instance.disposed", properties: {} },
+      parentMap
+    );
+    assert.strictEqual(parentMap.size, 0);
+  });
+
+  // Use case 10: cleanupSessionParentMap removes single entry on session.deleted
+  it("cleanupSessionParentMap removes single entry on session.deleted", async () => {
+    const mod = await loadSessionIdModule();
+    const parentMap = new Map();
+    parentMap.set("opencode:ses_child1", "opencode:ses_root");
+    parentMap.set("opencode:ses_child2", "opencode:ses_root");
+
+    mod.cleanupSessionParentMap(
+      { type: "session.deleted", properties: { sessionID: "ses_child1" } },
+      parentMap
+    );
+    assert.strictEqual(parentMap.has("opencode:ses_child1"), false);
+    assert.strictEqual(parentMap.has("opencode:ses_child2"), true);
+    assert.strictEqual(parentMap.size, 1);
+  });
+
+  // Use case 11: cleanupSessionParentMap is a no-op for non-cleanup events
+  it("cleanupSessionParentMap is a no-op for non-cleanup events", async () => {
+    const mod = await loadSessionIdModule();
+    const parentMap = new Map();
+    parentMap.set("opencode:ses_child", "opencode:ses_root");
+
+    mod.cleanupSessionParentMap(
+      { type: "session.created", properties: { sessionID: "ses_child" } },
+      parentMap
+    );
+    assert.strictEqual(parentMap.size, 1);
+
+    mod.cleanupSessionParentMap(
+      { type: "message.part.updated", properties: {} },
+      parentMap
+    );
+    assert.strictEqual(parentMap.size, 1);
+  });
+
+  // Use case 12: cleanupSessionParentMap handles null/missing inputs gracefully
+  it("cleanupSessionParentMap handles null/missing inputs gracefully", async () => {
+    const mod = await loadSessionIdModule();
+    const parentMap = new Map();
+    parentMap.set("opencode:ses_child", "opencode:ses_root");
+
+    // null event
+    mod.cleanupSessionParentMap(null, parentMap);
+    assert.strictEqual(parentMap.size, 1);
+
+    // null map
+    mod.cleanupSessionParentMap(
+      { type: "server.instance.disposed", properties: {} },
+      null
+    );
+
+    // event without type
+    mod.cleanupSessionParentMap({}, parentMap);
+    assert.strictEqual(parentMap.size, 1);
+  });
+
+  // Use case 13: full flow — session.created with parentID → headless body + SessionEnd idle
+  it("full flow: session.created with parentID produces headless body and SessionEnd idle", async () => {
+    pluginMod.__test._sessionParentById.set("opencode:ses_child", "opencode:ses_root");
+
+    // buildStateBody for child → headless
+    const body = pluginMod.__test.buildStateBody("working", "PreToolUse", "ses_child");
+    assert.strictEqual(body.headless, true);
+    assert.strictEqual(body.session_id, "opencode:ses_child");
+
+    // translateEvent for child session.idle → SessionEnd
+    const idleResult = pluginMod.__test.translateEvent({
+      type: "session.idle",
+      properties: { sessionID: "ses_child" },
+    });
+    assert.strictEqual(idleResult.state, "sleeping");
+    assert.strictEqual(idleResult.event, "SessionEnd");
+
+    // translateEvent for root session.idle → Stop
+    const rootIdleResult = pluginMod.__test.translateEvent({
+      type: "session.idle",
+      properties: { sessionID: "ses_root" },
+    });
+    assert.strictEqual(rootIdleResult.state, "attention");
+    assert.strictEqual(rootIdleResult.event, "Stop");
   });
 });
