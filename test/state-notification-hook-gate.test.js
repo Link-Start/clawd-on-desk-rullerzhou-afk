@@ -213,6 +213,39 @@ describe("updateSession: Notification hook gate", () => {
     assert.deepStrictEqual(ctx._soundsPlayed, ["confirm"], "Gemini notification must play confirm sound");
   });
 
+  it("mutes Qoder state-only permission notifications when the per-agent flag is off", () => {
+    // Qoder is state-only: hooks/qoder-hook.js maps its PermissionRequest /
+    // PermissionDenied events to a Clawd Notification event, so they ride this
+    // per-agent mute gate like any passive notification. This is the opposite
+    // of a real permission agent (next test), whose PermissionRequest keeps its
+    // bell because Clawd actually answers that decision.
+    mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    ctx = makeCtx({ notificationHookEnabled: false });
+    api = require("../src/state")(ctx);
+
+    api.updateSession("qoder-1", "notification", "Notification", { agentId: "qoder" });
+
+    assert.strictEqual(api.sessions.has("qoder-1"), true, "Qoder session must still be registered (bookkeeping runs)");
+    assert.strictEqual(api.sessions.get("qoder-1").state, "idle", "Qoder Notification resolves bookkeeping to idle");
+    const stateChanges = ctx._rendererEvents.filter(([ch]) => ch === "state-change");
+    assert.ok(stateChanges.length >= 1, "pet must still get a state-change broadcast");
+    assert.notStrictEqual(stateChanges[0][1], "notification", "muted: must not enter notification state");
+    assert.deepStrictEqual(ctx._soundsPlayed, [], "muted: confirm sound must not play");
+  });
+
+  it("lets Qoder state-only notifications through when the per-agent flag is on", () => {
+    mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    ctx = makeCtx({ notificationHookEnabled: true });
+    api = require("../src/state")(ctx);
+
+    api.updateSession("qoder-1", "notification", "Notification", { agentId: "qoder" });
+
+    const stateChanges = ctx._rendererEvents.filter(([ch]) => ch === "state-change");
+    assert.ok(stateChanges.length >= 1, "Qoder notification must broadcast");
+    assert.strictEqual(stateChanges[0][1], "notification");
+    assert.deepStrictEqual(ctx._soundsPlayed, ["confirm"], "Qoder notification must play confirm");
+  });
+
   it("never drops PermissionRequest events even when the flag is off", () => {
     // Permission bubbles must keep their bell regardless of idle-alert prefs.
     // PermissionRequest is handled by the branch before the gate and never

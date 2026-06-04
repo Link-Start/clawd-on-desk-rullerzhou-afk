@@ -141,6 +141,7 @@ const MANAGED_CLEANUP_AGENT_IDS = Object.freeze([
   "pi",
   "openclaw",
   "hermes",
+  "qoder",
 ]);
 
 // ── updateRegistry ──
