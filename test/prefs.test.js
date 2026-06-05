@@ -48,6 +48,7 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.autoStartWithClaude, false);
     assert.strictEqual(d.lowPowerIdleMode, false);
     assert.strictEqual(d.allowEdgePinning, false);
+    assert.strictEqual(d.disableMiniMode, false);
     assert.strictEqual(d.keepSizeAcrossDisplays, false);
     assert.strictEqual(d.sessionHudEnabled, true);
     assert.strictEqual(d.sessionHudShowStateLabels, true);
@@ -155,6 +156,7 @@ describe("prefs.validate", () => {
       notificationBubbleAutoCloseSeconds: -1,
       updateBubbleAutoCloseSeconds: 3601,
       allowEdgePinning: "yes",
+      disableMiniMode: "yes",
       savedPixelWidth: -1,
       savedPixelHeight: "286",
     });
@@ -174,6 +176,7 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.notificationBubbleAutoCloseSeconds, 6);
     assert.strictEqual(v.updateBubbleAutoCloseSeconds, 9);
     assert.strictEqual(v.allowEdgePinning, false);
+    assert.strictEqual(v.disableMiniMode, false);
     assert.strictEqual(v.savedPixelWidth, 0);
     assert.strictEqual(v.savedPixelHeight, 0);
   });
@@ -284,6 +287,7 @@ describe("prefs.validate", () => {
       sessionHudShowElapsed: false,
       sessionHudCleanupDetached: true,
       allowEdgePinning: true,
+      disableMiniMode: true,
       keepSizeAcrossDisplays: true,
       savedPixelWidth: 286,
       savedPixelHeight: 286,
@@ -303,6 +307,7 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.sessionHudShowElapsed, false);
     assert.strictEqual(v.sessionHudCleanupDetached, true);
     assert.strictEqual(v.allowEdgePinning, true);
+    assert.strictEqual(v.disableMiniMode, true);
     assert.strictEqual(v.keepSizeAcrossDisplays, true);
     assert.strictEqual(v.savedPixelWidth, 286);
     assert.strictEqual(v.savedPixelHeight, 286);

@@ -604,6 +604,7 @@ function makeGeneralSnapshot(overrides = {}) {
     soundVolume: 0.5,
     lowPowerIdleMode: false,
     allowEdgePinning: true,
+    disableMiniMode: false,
     keepSizeAcrossDisplays: true,
     manageClaudeHooksAutomatically: true,
     openAtLogin: false,
