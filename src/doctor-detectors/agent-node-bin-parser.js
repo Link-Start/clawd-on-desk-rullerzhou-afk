@@ -91,6 +91,61 @@ function tokenizeCommand(command) {
   return tokens;
 }
 
+function looksLikeNodeCandidate(value) {
+  const text = String(value || "");
+  const base = path.basename(text.replace(/\\/g, "/")).toLowerCase();
+  return base === "node" || base === "node.exe";
+}
+
+function looksLikeHookScriptToken(value) {
+  return typeof value === "string" && /\.js$/i.test(value);
+}
+
+function looksLikePrimaryHookScriptToken(value) {
+  return typeof value === "string" && /(?:^|[\\/])[^\\/]*hook\.js$/i.test(value);
+}
+
+function extractQuotedTokens(command) {
+  const tokens = [];
+  const quotedRe = /'((?:''|[^'])*)'|"((?:\\"|[^"])*)"/g;
+  let match;
+  while ((match = quotedRe.exec(String(command || "")))) {
+    if (match[1] !== undefined) tokens.push(match[1].replace(/''/g, "'"));
+    else tokens.push(match[2].replace(/\\"/g, "\"").replace(/\\\\/g, "\\"));
+  }
+  return tokens;
+}
+
+function parseNodeScriptPairFromTokens(tokens) {
+  if (!Array.isArray(tokens)) return null;
+  const skip = new Set(["&", "=", "try", "{", "}", ";"]);
+  const scriptIndexes = tokens
+    .map((token, index) => ({ token, index }))
+    .filter(({ token }) => looksLikePrimaryHookScriptToken(token));
+  if (!scriptIndexes.length) {
+    scriptIndexes.push(...tokens
+      .map((token, index) => ({ token, index }))
+      .filter(({ token }) => looksLikeHookScriptToken(token)));
+  }
+  for (const { index: i } of scriptIndexes) {
+    for (let j = i - 1; j >= 0; j--) {
+      const candidate = tokens[j];
+      if (!candidate || skip.has(candidate) || candidate.startsWith("$")) continue;
+      if (!looksLikeNodeCandidate(candidate)) continue;
+      return {
+        ok: true,
+        nodeBin: candidate,
+        scriptPath: tokens[i],
+      };
+    }
+  }
+  return null;
+}
+
+function parseNodeScriptPairFromQuotedText(command) {
+  return parseNodeScriptPairFromTokens(extractQuotedTokens(command));
+}
+
 function decodePowerShellEncodedCommand(command) {
   const withoutCmd = stripCmdWrapper(command);
   const withoutPsEnv = stripPowerShellEnvPrefix(withoutCmd);
@@ -117,6 +172,7 @@ function commandContainsFragment(command, fragment) {
 function parseHookCommand(command, depth = 0) {
   const withoutCmd = stripCmdWrapper(command);
   const withoutPsEnv = stripPowerShellEnvPrefix(withoutCmd);
+  const quotedSource = stripPowerShellCallOperator(withoutPsEnv).trim();
   const withoutPosixEnv = stripPosixEnvPrefix(withoutPsEnv);
   const normalized = stripPowerShellCallOperator(withoutPosixEnv).trim();
   const tokens = tokenizeCommand(normalized);
@@ -125,6 +181,21 @@ function parseHookCommand(command, depth = 0) {
       ok: false,
       issue: "parse-failed",
       fragment: String(command || "").slice(0, HOOK_COMMAND_FRAGMENT_MAX),
+    };
+  }
+
+  const quotedPair = parseNodeScriptPairFromQuotedText(quotedSource);
+  if (quotedPair) {
+    return {
+      ...quotedPair,
+      normalizedCommand: normalized,
+    };
+  }
+  const parsedPair = parseNodeScriptPairFromTokens(tokens);
+  if (parsedPair) {
+    return {
+      ...parsedPair,
+      normalizedCommand: normalized,
     };
   }
 

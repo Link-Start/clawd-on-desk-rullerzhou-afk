@@ -82,6 +82,39 @@ describe("doctor hook command parser", () => {
     );
   });
 
+  it("validates POSIX Antigravity fail-open capture commands", () => {
+    const nodeBin = "/usr/local/bin/node";
+    const scriptPath = "/opt/clawd/hooks/antigravity-hook.js";
+    const command = antigravityInstallTest.buildAntigravityHookCommand(
+      nodeBin,
+      scriptPath,
+      "PreInvocation",
+      { platform: "linux" }
+    );
+
+    assert.deepStrictEqual(
+      validateHookCommand(command, {
+        platform: "linux",
+        fs: fakeFs([nodeBin, scriptPath]),
+      }),
+      { ok: true, nodeBin, scriptPath }
+    );
+  });
+
+  it("does not mistake preload scripts for the hook script", () => {
+    const nodeBin = "/usr/local/bin/node";
+    const scriptPath = "/opt/clawd/hooks/antigravity-hook.js";
+    const command = `"${nodeBin}" "--require" "./pre.js" "${scriptPath}"`;
+
+    assert.deepStrictEqual(
+      validateHookCommand(command, {
+        platform: "linux",
+        fs: fakeFs([nodeBin, scriptPath]),
+      }),
+      { ok: true, nodeBin, scriptPath }
+    );
+  });
+
   it("unwraps Windows cmd /d /s /c commands", () => {
     const nodeBin = "C:\\Program Files\\nodejs\\node.exe";
     const scriptPath = "D:/animation/hooks/codex-debug-hook.js";

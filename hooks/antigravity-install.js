@@ -5,13 +5,13 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { resolveNodeBin } = require("./server-config");
+const { stdoutForAntigravityEvent } = require("./antigravity-stdout");
 const {
   readJsonFile,
   writeJsonAtomic,
   writeJsonAtomicWithBackup,
   asarUnpackedPath,
   formatNodeHookCommand,
-  buildWindowsEncodedNodeHookCommand,
   decodeWindowsEncodedCommand,
   extractFirstQuotedToken,
   windowsPowerShellBin,
@@ -36,24 +36,82 @@ const ANTIGRAVITY_HOOK_EVENTS = [
 ];
 const DEFAULT_HOOK_TIMEOUT_SECONDS = 10;
 
+function fallbackStdoutForEvent(event) {
+  return stdoutForAntigravityEvent(event);
+}
+
+function quoteShellSingleArg(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function quotePowerShellSingleArg(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function withFailOpenShellFallback(command, event) {
+  const fallback = quoteShellSingleArg(fallbackStdoutForEvent(event));
+  return `out=$(${command} 2>/dev/null); status=$?; if [ "$status" -eq 0 ] && [ -n "$out" ]; then printf '%s\\n' "$out"; else printf '%s\\n' ${fallback}; fi; exit 0`;
+}
+
+function buildWindowsEncodedFailOpenNodeHookCommand(nodeBin, hookScript, event, options = {}) {
+  const fallback = fallbackStdoutForEvent(event);
+  const psCommand = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    ";",
+    "$text=''",
+    ";",
+    "try {",
+    "$out = &",
+    quotePowerShellSingleArg(nodeBin),
+    quotePowerShellSingleArg(hookScript),
+    quotePowerShellSingleArg(event),
+    "2>$null",
+    ";",
+    "if (($LASTEXITCODE -eq 0) -and ($null -ne $out)) { $text=($out -join [Environment]::NewLine) }",
+    "} catch { $text='' }",
+    ";",
+    "if ($text.Length -gt 0) { [Console]::Out.WriteLine($text) } else { [Console]::Out.WriteLine(",
+    quotePowerShellSingleArg(fallback),
+    ") }",
+    ";",
+    "exit 0",
+  ].join(" ");
+  const encodedCommand = Buffer.from(psCommand, "utf16le").toString("base64");
+  return `${windowsPowerShellBin(options)} -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedCommand}`;
+}
+
 function buildAntigravityHookCommand(nodeBin, hookScript, event, options = {}) {
   const platform = options.platform || process.platform;
   if (platform === "win32") {
     return buildWindowsAntigravityHookCommand(nodeBin, hookScript, event, options);
   }
-  return formatNodeHookCommand(nodeBin, hookScript, {
+  const command = formatNodeHookCommand(nodeBin, hookScript, {
     ...options,
     args: [event],
   });
+  return withFailOpenShellFallback(command, event);
 }
 
 function buildWindowsAntigravityHookCommand(nodeBin, hookScript, event, options = {}) {
-  return buildWindowsEncodedNodeHookCommand(nodeBin, hookScript, [event], options);
+  return buildWindowsEncodedFailOpenNodeHookCommand(nodeBin, hookScript, event, options);
 }
 
 function extractNodeBinFromCommand(command) {
   const decoded = decodeWindowsEncodedCommand(command);
-  const token = extractFirstQuotedToken(decoded || command);
+  const text = decoded || command;
+  const quotedTokens = [];
+  const quotedRe = /'((?:''|[^'])*)'|"((?:\\"|[^"])*)"/g;
+  let match;
+  while ((match = quotedRe.exec(text))) {
+    if (match[1] !== undefined) quotedTokens.push(match[1].replace(/''/g, "'"));
+    else quotedTokens.push(match[2].replace(/\\"/g, "\"").replace(/\\\\/g, "\\"));
+  }
+  for (let i = 1; i < quotedTokens.length; i++) {
+    if (quotedTokens[i].includes(MARKER) && !quotedTokens[i - 1].includes(MARKER)) {
+      return quotedTokens[i - 1];
+    }
+  }
+  const token = extractFirstQuotedToken(text);
   if (!token || token.includes(MARKER)) return null;
   return token;
 }
@@ -222,14 +280,17 @@ module.exports = {
   __test: {
     buildAntigravityHookCommand,
     buildAntigravityHooks,
+    buildWindowsEncodedFailOpenNodeHookCommand,
     buildWindowsAntigravityHookCommand,
     decodeWindowsEncodedCommand,
     extractExistingAntigravityNodeBin,
     extractNodeBinFromCommand,
+    fallbackStdoutForEvent,
     groupHasClawdMarker,
     hasAntigravityConfig,
     normalizeSettings,
     resolveAntigravityNodeBin,
+    withFailOpenShellFallback,
   },
 };
 

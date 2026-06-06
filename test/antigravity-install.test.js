@@ -3,6 +3,7 @@ const assert = require("node:assert");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { spawnSync } = require("child_process");
 const {
   HOOK_GROUP_ID,
   MARKER,
@@ -70,6 +71,7 @@ describe("Antigravity hook installer", () => {
         : commands[0];
       assert.ok(commandText.includes(MARKER));
       assert.ok(commandText.includes(event));
+      assert.ok(commandText.includes("printf") || commandText.includes("[Console]::Out.WriteLine"));
     }
     // D2: PreToolUse intentionally NOT registered.
     assert.strictEqual(hooks[HOOK_GROUP_ID].PreToolUse, undefined);
@@ -197,7 +199,113 @@ describe("Antigravity hook installer", () => {
     assert.ok(Array.isArray(group.Stop));
   });
 
-  it("builds Windows PowerShell bridge commands with the event argv", () => {
+  it("fail-opens POSIX hook commands when Node cannot start", () => {
+    const command = __test.buildAntigravityHookCommand(
+      "/definitely/missing/node",
+      "/definitely/missing/antigravity-hook.js",
+      "PreInvocation",
+      { platform: "linux" }
+    );
+
+    const result = spawnSync("/bin/sh", ["-c", command], {
+      input: JSON.stringify({ conversationId: "c1" }),
+      encoding: "utf8",
+    });
+
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(result.stdout.trim(), "{}");
+    assert.strictEqual(result.stderr, "");
+  });
+
+  it("fail-opens POSIX Stop hooks with an allow-shaped fallback", () => {
+    const command = __test.buildAntigravityHookCommand(
+      "/definitely/missing/node",
+      "/definitely/missing/antigravity-hook.js",
+      "Stop",
+      { platform: "linux" }
+    );
+
+    const result = spawnSync("/bin/sh", ["-c", command], {
+      input: JSON.stringify({ conversationId: "c1", fullyIdle: true }),
+      encoding: "utf8",
+    });
+
+    assert.strictEqual(result.status, 0);
+    assert.deepStrictEqual(JSON.parse(result.stdout), { decision: "allow" });
+    assert.strictEqual(result.stderr, "");
+  });
+
+  it("overrides partial POSIX hook stdout when Node exits nonzero", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-antigravity-partial-"));
+    tempDirs.push(tmpDir);
+    const scriptPath = path.join(tmpDir, "partial-hook.js");
+    fs.writeFileSync(scriptPath, "process.stdout.write('{}\\n'); process.exit(1);\n", "utf8");
+    const command = __test.buildAntigravityHookCommand(
+      process.execPath,
+      scriptPath,
+      "PreInvocation",
+      { platform: "linux" }
+    );
+
+    const result = spawnSync("/bin/sh", ["-c", command], {
+      input: JSON.stringify({ conversationId: "c1" }),
+      encoding: "utf8",
+    });
+
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(result.stdout, "{}\n");
+    assert.strictEqual(result.stderr, "");
+  });
+
+  it("falls back when a POSIX hook exits successfully with empty stdout", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-antigravity-empty-"));
+    tempDirs.push(tmpDir);
+    const scriptPath = path.join(tmpDir, "empty-hook.js");
+    fs.writeFileSync(scriptPath, "process.exit(0);\n", "utf8");
+    const command = __test.buildAntigravityHookCommand(
+      process.execPath,
+      scriptPath,
+      "PreInvocation",
+      { platform: "linux" }
+    );
+
+    const result = spawnSync("/bin/sh", ["-c", command], {
+      input: JSON.stringify({ conversationId: "c1" }),
+      encoding: "utf8",
+    });
+
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(result.stdout, "{}\n");
+    assert.strictEqual(result.stderr, "");
+  });
+
+  it("preserves successful POSIX multiline stdout and suppresses stderr", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-antigravity-multiline-"));
+    tempDirs.push(tmpDir);
+    const scriptPath = path.join(tmpDir, "multiline-hook.js");
+    fs.writeFileSync(
+      scriptPath,
+      "process.stderr.write('noise\\n'); process.stdout.write('{\\n  \"ok\": true\\n}\\n');\n",
+      "utf8"
+    );
+    const command = __test.buildAntigravityHookCommand(
+      process.execPath,
+      scriptPath,
+      "PreInvocation",
+      { platform: "linux" }
+    );
+
+    const result = spawnSync("/bin/sh", ["-c", command], {
+      input: JSON.stringify({ conversationId: "c1" }),
+      encoding: "utf8",
+    });
+
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(result.stdout, "{\n  \"ok\": true\n}\n");
+    assert.strictEqual(result.stderr, "");
+  });
+
+  it("builds Windows PowerShell bridge commands with fail-open fallback", () => {
     const command = __test.buildAntigravityHookCommand(
       "C:\\Program Files\\nodejs\\node.exe",
       "D:/clawd/hooks/antigravity-hook.js",
@@ -206,10 +314,12 @@ describe("Antigravity hook installer", () => {
     );
 
     assert.ok(command.startsWith("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "));
-    assert.strictEqual(
-      decodeEncodedCommand(command),
-      "& 'C:\\Program Files\\nodejs\\node.exe' 'D:/clawd/hooks/antigravity-hook.js' 'PreToolUse'"
-    );
+    const decoded = decodeEncodedCommand(command);
+    assert.ok(decoded.includes("$ErrorActionPreference='SilentlyContinue'"));
+    assert.ok(decoded.includes("$out = & 'C:\\Program Files\\nodejs\\node.exe' 'D:/clawd/hooks/antigravity-hook.js' 'PreToolUse' 2>$null"));
+    assert.ok(decoded.includes("if (($LASTEXITCODE -eq 0) -and ($null -ne $out))"));
+    assert.ok(decoded.includes("[Console]::Out.WriteLine( '{\"decision\":\"ask\"}' )"));
+    assert.ok(decoded.endsWith("exit 0"));
   });
 
   it("uses an absolute node.exe for Windows Antigravity hooks", () => {
@@ -228,10 +338,9 @@ describe("Antigravity hook installer", () => {
     });
 
     const hooks = readJson(path.join(homeDir, ".gemini", "config", "hooks.json"));
-    assert.strictEqual(
-      decodeEncodedCommand(hooks[HOOK_GROUP_ID].PreInvocation[0].command),
-      `& '${nodeBin}' '${path.resolve(__dirname, "..", "hooks", "antigravity-hook.js").replace(/\\/g, "/")}' 'PreInvocation'`
-    );
+    const decoded = decodeEncodedCommand(hooks[HOOK_GROUP_ID].PreInvocation[0].command);
+    assert.ok(decoded.includes(`$out = & '${nodeBin}' '${path.resolve(__dirname, "..", "hooks", "antigravity-hook.js").replace(/\\/g, "/")}' 'PreInvocation' 2>$null`));
+    assert.ok(decoded.includes("[Console]::Out.WriteLine( '{}' )"));
   });
 
   it("finds node.exe with where.exe when the installer runs from Electron", () => {
