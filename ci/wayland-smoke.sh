@@ -17,12 +17,13 @@
 # What it can NOT prove: behavior on the reporter's exact Fedora/KDE box
 # (KWin vs weston, their session env). That residual still needs a field test.
 #
-# Note: the Linux relauncher pipes the second process's stdout/stderr to
-# /dev/null, so child-side assertions go through /proc, X, and HTTP. Two
-# extra eyes for debugging: ELECTRON_ENABLE_LOGGING=file (env is inherited,
-# so even the silenced child writes Chromium logs to ELECTRON_LOG_FILE) and
-# a 10 Hz /proc sampler that records every Clawd/relauncher process's
-# appearance and disappearance.
+# Child-side assertions go through /proc, X, and HTTP rather than logs, so
+# they hold for any relaunch mechanism (v3's app.relaunch silenced the child
+# entirely; v4's spawn inherits stdio — asserted separately). Two extra eyes
+# for debugging: ELECTRON_ENABLE_LOGGING=file (env is inherited, so even a
+# silenced child writes Chromium logs to ELECTRON_LOG_FILE) and a /proc
+# sampler that records every Clawd/relauncher process's appearance and
+# disappearance.
 
 set -u
 
@@ -214,6 +215,12 @@ ok "relaunched browser process up with --ozone-platform=x11 (pid(s): $X11_PIDS)"
 
 poll 90 state_ok || fail "state server $STATE_URL never answered after relaunch"
 ok "GET /state answers — relaunched app is healthy"
+
+# v4 spawns with stdio "inherit", so unlike app.relaunch (which piped the
+# child to /dev/null) the replacement's logs must reach the original terminal.
+poll 30 grep -q "state server listening" first.log ||
+  fail "child logs missing from the launching terminal (stdio inherit broken?)"
+ok "child logs flow back to the launching terminal (stdio inherit)"
 
 poll 60 x_has_clawd ||
   fail "no Clawd client/window on the X server — not running as an XWayland client?"

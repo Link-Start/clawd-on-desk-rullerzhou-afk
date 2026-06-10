@@ -1,10 +1,16 @@
 # Headless-Wayland smoke test for the XWayland auto-relaunch (issue #441, PR #443).
 #
-# We have no Linux/Wayland hardware to verify on — this job stands in: it boots
-# a REAL Wayland compositor (weston headless) + Xwayland on the runner and runs
-# the EXACT AppImage artifact that was handed to the reporter on #441
-# (run 27110582080, head 2d8b540), asserting the app relaunches itself onto
-# XWayland and comes up healthy. See ci/wayland-smoke.sh for the assertions.
+# We have no Linux/Wayland hardware to verify on — this job stands in: it
+# builds the AppImage from the branch source, boots a REAL Wayland compositor
+# (weston headless) + Xwayland on the runner, and asserts the app relaunches
+# itself onto XWayland and comes up healthy. See ci/wayland-smoke.sh for the
+# exact assertions.
+#
+# History: the first revision of this job ran the v3 (app.relaunch) build that
+# was posted to the reporter — run 27110582080 — and caught it red: Electron's
+# relauncher helper runs from the AppImage FUSE mount, which dies with the
+# first process, so the helper never launches the replacement (run
+# 27248005113). The spawn()-based fix is what this job verifies now.
 name: Wayland smoke (issue 441)
 
 on:
@@ -13,22 +19,29 @@ on:
 
 permissions:
   contents: read
-  actions: read # gh run download of the pinned artifact
 
 concurrency:
   group: wayland-smoke
   cancel-in-progress: true
 
-env:
-  # The build posted to the reporter on #441 — same binary, byte for byte.
-  ARTIFACT_RUN_ID: "27110582080"
-
 jobs:
   xwayland-relaunch:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build the AppImage from this branch
+        run: |
+          npm install
+          node --test test/linux-ozone.test.js
+          npm run fetch:sidecars -- --target linux-x64
+          node scripts/verify-sidecar-binaries.js prebuild:linux
+          npx electron-builder --linux AppImage --publish never
+          ls -l dist/*.AppImage
 
       - name: Install headless Wayland stack
         run: |
@@ -43,13 +56,15 @@ jobs:
       - name: Allow Chromium userns sandbox
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      - name: Download the reporter's AppImage
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh run download "$ARTIFACT_RUN_ID" -R "$GITHUB_REPOSITORY" \
-            -n linux-installer -D dist-artifact
-          ls -l dist-artifact
-
       - name: Smoke test
-        run: bash ci/wayland-smoke.sh dist-artifact/*.AppImage
+        run: bash ci/wayland-smoke.sh dist/*.AppImage
+
+      # The smoke-tested binary, ready to hand to the #441 reporter.
+      - name: Upload tested AppImage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wayland-smoke-appimage
+          path: dist/*.AppImage
+          retention-days: 14
+          if-no-files-found: ignore

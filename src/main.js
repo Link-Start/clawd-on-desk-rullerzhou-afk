@@ -25,17 +25,38 @@ if (_xwaylandRelaunch) {
     "(issue #441; override with CLAWD_OZONE_PLATFORM=wayland|x11|auto)"
   );
   process.env.CLAWD_OZONE_RELAUNCHED = "1";
-  const _relaunched = app.relaunch({
-    args: _xwaylandRelaunch.args,
-    execPath: process.env.APPIMAGE || process.execPath,
-  });
-  if (_relaunched) {
+  // Spawn the replacement ourselves instead of app.relaunch(). Electron's
+  // relauncher helper is a process run from the binary INSIDE the AppImage's
+  // FUSE mount, and it deliberately waits for this process to die before it
+  // execs the replacement — but our exit also kills the AppImage runtime,
+  // which IS the FUSE daemon, so the mount vanishes and the helper loses its
+  // own code pages and dies without ever launching anything (reproduced on a
+  // real Wayland compositor in CI: the helper outlives us by <1s, no child).
+  // spawn() avoids both traps: the exec happens NOW, while this process and
+  // its mount are still alive, and the exec target is the on-disk .AppImage
+  // (process.env.APPIMAGE) or real binary — never the doomed mount path.
+  // detached gives the child its own process group so it survives us;
+  // stdio "inherit" keeps its logs on the user's terminal (the relauncher
+  // piped them to /dev/null, which made field reports needlessly blind).
+  let _xwaylandChild = null;
+  try {
+    _xwaylandChild = require("child_process").spawn(
+      process.env.APPIMAGE || process.execPath,
+      _xwaylandRelaunch.args,
+      { detached: true, stdio: "inherit" },
+    );
+  } catch {
+    _xwaylandChild = null;
+  }
+  if (_xwaylandChild && typeof _xwaylandChild.pid === "number") {
+    _xwaylandChild.unref();
     app.exit(0);
     return; // throwaway first process — stop before loading the rest of main.js
   }
-  // app.relaunch() returns false when the relauncher helper can't start. Do NOT
-  // app.exit() into nothing — clear the sentinel and fall through to a normal
-  // (native Wayland) startup so the app still runs, just without drag (issue #441).
+  // No pid ⇒ the spawn failed at the syscall level (libuv reports exec errors
+  // like ENOENT synchronously). Do NOT exit into nothing — clear the sentinel
+  // and fall through to a normal (native Wayland) startup so the app still
+  // runs, just without drag (issue #441).
   delete process.env.CLAWD_OZONE_RELAUNCHED;
   console.error("Clawd: XWayland relaunch failed; continuing under native Wayland (issue #441).");
 }

@@ -114,12 +114,16 @@ function parseOzonePlatformFromArgv(argv) {
 // the command line, so a second process launched with --ozone-platform=x11 on
 // its real argv boots straight into XWayland.
 //
-// Returns null when no relaunch is needed/safe, or { args } — the argv (without
-// argv[0]) to hand app.relaunch, carrying --ozone-platform=x11. Three loop
-// guards: (a) an --ozone-platform already on argv — the PRIMARY guard, since the
+// Returns null when no relaunch is needed/safe, or { args } — the replacement's
+// argv after argv[0], carrying --ozone-platform=x11. The caller hands it to
+// child_process.spawn, NOT app.relaunch: under AppImage the relauncher helper
+// runs from the FUSE mount and waits for this process to die, but our death
+// also takes down the AppImage runtime (the FUSE daemon), so the helper loses
+// its code pages and dies before launching anything. Three loop guards:
+// (a) an --ozone-platform already on argv — the PRIMARY guard, since the
 // relaunched process always carries the flag, and it is checked before resolve()
 // so even CLAWD_OZONE_PLATFORM=x11 can't spin; (b) the CLAWD_OZONE_RELAUNCHED
-// sentinel — a backstop for the rare case where app.relaunch's args fail to
+// sentinel — a backstop for the rare case where the spawn args fail to
 // round-trip; (c) the resolved target (only x11 relaunches; Wayland is default).
 function planXWaylandRelaunch(options = {}) {
   const platform = options.platform || process.platform;
