@@ -3,7 +3,7 @@
 const { BrowserWindow, screen } = require("electron");
 const path = require("path");
 const { keepOutOfTaskbar } = require("./taskbar");
-const { clampTextScale, scaleWidth, scaleHeight, applyZoomToWindow } = require("./text-scale");
+const { clampTextScale, scaleHeight, applyZoomToWindow } = require("./text-scale");
 
 const isLinux = process.platform === "linux";
 const isMac = process.platform === "darwin";
@@ -15,6 +15,7 @@ const HUD_WIDTH_COMPACT = 190;
 const HUD_WIDTH_LABELS = 320;
 const HUD_WIDTH_LABELS_COMPACT = 260;
 const HUD_CONTEXT_USAGE_WIDTH_BUMP = 36;
+const HUD_LABELS_ONLY_WIDTH_TRIM = 36;
 const HUD_ROW_HEIGHT = 28;
 const HUD_MAX_EXPANDED_ROWS = 3;
 const HUD_MAX_EXPANDED_ROWS_LABELS = 5;
@@ -34,6 +35,7 @@ const MAC_FLOATING_TOPMOST_DELAY_MS = 120;
 const HOT_ZONE_PAD = 24;
 const AUTO_HIDE_POLL_MS = 200;
 const HIDE_GRACE_MS = 500;
+const HUD_WIDTH_GROWTH_RATIO = 0.4;
 
 function clampToWorkArea(value, min, max) {
   if (max < min) return min;
@@ -176,7 +178,21 @@ function computeHudReservedOffset(cardHeight) {
   return HUD_PET_GAP + h + HUD_WINDOW_SHELL.bottom + BUBBLE_GAP;
 }
 
-function computeSessionHudBounds({ hitRect, anchorRect, workArea, width = HUD_WIDTH, height = HUD_HEIGHT, scale = 1 }) {
+function getHudWidthScale(scale) {
+  const s = clampTextScale(scale);
+  if (s <= 1) return s;
+  return 1 + (s - 1) * HUD_WIDTH_GROWTH_RATIO;
+}
+
+function computeHudOuterWidth(width, scale, widthScale = scale) {
+  const s = clampTextScale(scale);
+  const ws = clampTextScale(widthScale);
+  return Math.round(width * ws)
+    + Math.round(HUD_WINDOW_SHELL.left * s)
+    + Math.round(HUD_WINDOW_SHELL.right * s);
+}
+
+function computeSessionHudBounds({ hitRect, anchorRect, workArea, width = HUD_WIDTH, height = HUD_HEIGHT, scale = 1, widthScale = scale }) {
   const followRect = isScreenRect(anchorRect) ? anchorRect : hitRect;
   if (!isScreenRect(followRect) || !workArea) return null;
   const followTop = Math.round(followRect.top);
@@ -184,10 +200,12 @@ function computeSessionHudBounds({ hitRect, anchorRect, workArea, width = HUD_WI
   const followCx = Math.round((followRect.left + followRect.right) / 2);
 
   // width/height arrive in CSS px (HUD constants); rects are DIP. Convert
-  // everything page-rendered — including the shell, which the renderer draws
-  // as CSS shadow padding — before mixing the two coordinate spaces.
+  // everything page-rendered before mixing coordinate spaces. Height, shell and
+  // gaps keep full textScale, while width can grow more gently so a large-text
+  // HUD stays compact instead of turning into a banner.
   const s = clampTextScale(scale);
-  const dipWidth = Math.round(width * s);
+  const ws = clampTextScale(widthScale);
+  const dipWidth = Math.round(width * ws);
   const dipHeight = Math.ceil(height * s);
   const shell = {
     top: Math.round(HUD_WINDOW_SHELL.top * s),
@@ -245,6 +263,9 @@ function getHudWidth(showElapsed = true, showStateLabels = true, showContextUsag
   const base = showStateLabels === false
     ? (showElapsed === false ? HUD_WIDTH_COMPACT : HUD_WIDTH)
     : (showElapsed === false ? HUD_WIDTH_LABELS_COMPACT : HUD_WIDTH_LABELS);
+  if (showStateLabels !== false && showContextUsage !== true) {
+    return Math.max(HUD_WIDTH_COMPACT, base - HUD_LABELS_ONLY_WIDTH_TRIM);
+  }
   return showContextUsage === true ? base + HUD_CONTEXT_USAGE_WIDTH_BUMP : base;
 }
 
@@ -334,11 +355,12 @@ module.exports = function initSessionHud(ctx) {
       ctx.sessionHudShowStateLabels !== false,
       ctx.sessionHudShowContextUsage !== false
     );
+    const widthScale = getHudWidthScale(scale);
     // Must carry the SAME scale the visible HUD was laid out with — an
     // unscaled expectation makes the auto-hide hot zone smaller than the
     // real window, so the cursor "leaves" while still visually over the HUD
     // (unreachable pin at 150%).
-    const computed = computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale });
+    const computed = computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale, widthScale });
     return { hitRect, contentBounds: computed && computed.contentBounds };
   }
 
@@ -516,9 +538,10 @@ module.exports = function initSessionHud(ctx) {
     // Provisional CSS px → DIP size; syncSessionHud() replaces it with the
     // precise computeSessionHudBounds() result before the window is shown.
     const scale = getTextScale();
+    const widthScale = getHudWidthScale(scale);
     hudWindow = new BrowserWindow({
       parent: ctx.win,
-      width: scaleWidth(hudWidth + HUD_WINDOW_SHELL.left + HUD_WINDOW_SHELL.right, scale),
+      width: computeHudOuterWidth(hudWidth, scale, widthScale),
       height: scaleHeight(HUD_HEIGHT + HUD_WINDOW_SHELL.top + HUD_WINDOW_SHELL.bottom, scale),
       show: false,
       frame: false,
@@ -592,8 +615,9 @@ module.exports = function initSessionHud(ctx) {
       ctx.sessionHudShowStateLabels !== false,
       ctx.sessionHudShowContextUsage !== false
     );
+    const widthScale = getHudWidthScale(scale);
     lastHudHeight = height;
-    return computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale });
+    return computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale, widthScale });
   }
 
   function showSessionHud(win) {
@@ -702,6 +726,8 @@ module.exports.__test = {
   computeHudReservedOffset,
   isHudSession,
   getHudWidth,
+  getHudWidthScale,
+  computeHudOuterWidth,
   evaluateBaseEligible,
   evaluateShouldShow,
   pointInExpandedRect,
@@ -713,6 +739,7 @@ module.exports.__test = {
     HUD_WIDTH_LABELS,
     HUD_WIDTH_LABELS_COMPACT,
     HUD_CONTEXT_USAGE_WIDTH_BUMP,
+    HUD_LABELS_ONLY_WIDTH_TRIM,
     HUD_HEIGHT,
     HUD_ROW_HEIGHT,
     HUD_MAX_EXPANDED_ROWS,
@@ -725,5 +752,6 @@ module.exports.__test = {
     HOT_ZONE_PAD,
     AUTO_HIDE_POLL_MS,
     HIDE_GRACE_MS,
+    HUD_WIDTH_GROWTH_RATIO,
   },
 };

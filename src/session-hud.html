@@ -183,7 +183,7 @@ body { padding: 2px 3px 8px; }
 }
 
 .right {
-  flex: 0 1 58%;
+  flex: 0 1 auto;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -192,6 +192,7 @@ body { padding: 2px 3px 8px; }
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   max-width: 58%;
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
 }

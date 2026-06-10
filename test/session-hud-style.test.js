@@ -66,7 +66,9 @@ describe("session HUD visual shell", () => {
   });
 
   it("keeps context usage chips visible before truncating elapsed text", () => {
-    assert.match(sessionHudHtml, /\.right\s*\{[\s\S]*flex:\s*0 1 58%;[\s\S]*max-width:\s*58%;[\s\S]*overflow:\s*hidden;[\s\S]*\}/);
+    // .right shrinks to content (auto basis, min-width 0) so the dampened
+    // large-text HUD width squeezes the elapsed text first; chips stay fixed.
+    assert.match(sessionHudHtml, /\.right\s*\{[\s\S]*?flex:\s*0 1 auto;[\s\S]*?max-width:\s*58%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*hidden;[\s\S]*?\}/);
     assert.match(sessionHudHtml, /\.elapsed\s*\{[\s\S]*min-width:\s*0;[\s\S]*text-overflow:\s*ellipsis;[\s\S]*\}/);
     assert.match(sessionHudHtml, /\.usage-chip\s*\{[\s\S]*flex:\s*0 0 auto;[\s\S]*white-space:\s*nowrap;[\s\S]*\}/);
   });

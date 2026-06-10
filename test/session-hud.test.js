@@ -9,6 +9,8 @@ const {
   computeHudLayout,
   computeHudHeight,
   getHudWidth,
+  getHudWidthScale,
+  computeHudOuterWidth,
   evaluateBaseEligible,
   evaluateShouldShow,
   pointInExpandedRect,
@@ -29,8 +31,14 @@ function mkSession(id, overrides = {}) {
 
 describe("session HUD geometry", () => {
   it("uses wider HUD widths when state labels are enabled", () => {
-    assert.strictEqual(getHudWidth(true, true), constants.HUD_WIDTH_LABELS);
-    assert.strictEqual(getHudWidth(false, true), constants.HUD_WIDTH_LABELS_COMPACT);
+    assert.strictEqual(
+      getHudWidth(true, true),
+      constants.HUD_WIDTH_LABELS - constants.HUD_LABELS_ONLY_WIDTH_TRIM
+    );
+    assert.strictEqual(
+      getHudWidth(false, true),
+      constants.HUD_WIDTH_LABELS_COMPACT - constants.HUD_LABELS_ONLY_WIDTH_TRIM
+    );
     assert.strictEqual(getHudWidth(true, false), constants.HUD_WIDTH);
     assert.strictEqual(getHudWidth(false, false), constants.HUD_WIDTH_COMPACT);
     assert.strictEqual(
@@ -153,6 +161,29 @@ describe("session HUD geometry", () => {
     assert.strictEqual(result.flippedAbove, false);
   });
 
+  it("dampens large-text HUD width while keeping height and gaps at full scale", () => {
+    const scale = 1.5;
+    const widthScale = getHudWidthScale(scale);
+    const width = constants.HUD_WIDTH_LABELS + constants.HUD_CONTEXT_USAGE_WIDTH_BUMP;
+    const result = computeSessionHudBounds({
+      hitRect: { left: 10, top: 80, right: 90, bottom: 160 },
+      workArea: { x: 0, y: 0, width: 1200, height: 900 },
+      width,
+      scale,
+      widthScale,
+    });
+
+    assert.strictEqual(widthScale, 1 + (scale - 1) * constants.HUD_WIDTH_GROWTH_RATIO);
+    assert.strictEqual(result.contentBounds.width, Math.round(width * 1.2));
+    assert.strictEqual(result.contentBounds.height, Math.ceil(constants.HUD_HEIGHT * scale));
+    assert.strictEqual(result.contentBounds.y, 160 + Math.round(constants.HUD_PET_GAP * scale));
+    assert.strictEqual(
+      result.bounds.width,
+      computeHudOuterWidth(width, scale, widthScale)
+    );
+    assert.ok(result.bounds.width < computeHudOuterWidth(width, scale, scale));
+  });
+
   it("treats scale 1 (and an omitted scale) as the identity", () => {
     const args = {
       hitRect: { left: 10, top: 80, right: 90, bottom: 160 },
@@ -178,11 +209,12 @@ describe("session HUD geometry", () => {
     // bounds, so at 150% the cursor "left" the zone while still visually over
     // the HUD — making the pin unreachable (HUD hid before you could click).
     const scale = 1.5;
+    const widthScale = getHudWidthScale(scale);
     const hitRect = { left: 100, top: 80, right: 260, bottom: 240 };
     const workArea = { x: 0, y: 0, width: 2000, height: 1200 };
     const width = constants.HUD_WIDTH_LABELS + constants.HUD_CONTEXT_USAGE_WIDTH_BUMP; // 356
 
-    const scaled = computeSessionHudBounds({ hitRect, workArea, width, scale });
+    const scaled = computeSessionHudBounds({ hitRect, workArea, width, scale, widthScale });
     const pad = Math.round(constants.HOT_ZONE_PAD * scale);
     const hotZone = computeAutoHideHotZone({
       petHitRect: hitRect,

@@ -52,9 +52,9 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.keepSizeAcrossDisplays, false);
     assert.strictEqual(d.sessionHudEnabled, true);
     assert.strictEqual(d.sessionHudShowStateLabels, true);
-    assert.strictEqual(d.sessionHudShowElapsed, true);
+    assert.strictEqual(d.sessionHudShowElapsed, false);
     assert.strictEqual(d.sessionHudShowContextUsage, true);
-    assert.strictEqual(d.sessionHudCleanupDetached, false);
+    assert.strictEqual(d.sessionHudCleanupDetached, true);
     assert.strictEqual("sessionHudAutoHide" in d, false);
     assert.strictEqual(d.sessionHudPinned, false);
     assert.strictEqual(d.savedPixelWidth, 0);
@@ -186,9 +186,9 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.bubbleFollowPet, true);
     assert.strictEqual(v.sessionHudEnabled, true);
     assert.strictEqual(v.sessionHudShowStateLabels, true);
-    assert.strictEqual(v.sessionHudShowElapsed, true);
+    assert.strictEqual(v.sessionHudShowElapsed, false);
     assert.strictEqual(v.sessionHudShowContextUsage, true);
-    assert.strictEqual(v.sessionHudCleanupDetached, false);
+    assert.strictEqual(v.sessionHudCleanupDetached, true);
     assert.strictEqual(v.hideBubbles, false);
     assert.strictEqual(v.permissionBubblesEnabled, true);
     assert.strictEqual(v.notificationBubbleAutoCloseSeconds, 6);
