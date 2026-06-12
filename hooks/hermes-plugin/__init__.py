@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -611,6 +612,13 @@ def _resolve_process_metadata(start_pid: Optional[int] = None) -> Dict[str, Any]
         meta["pid_chain"] = pid_chain
     if detected_editor:
         meta["editor"] = detected_editor
+    tmux_env = os.environ.get("TMUX")
+    if tmux_env:
+        socket_path = tmux_env.split(",")[0]
+        if socket_path:
+            name = os.path.basename(socket_path)
+            if name and name != "default" and re.fullmatch(r"[\w.-]{1,64}", name):
+                meta["tmux_socket"] = name
     return meta
 
 
@@ -663,6 +671,9 @@ def _add_process_meta(payload: Dict[str, Any]) -> None:
     editor = meta.get("editor")
     if editor in ("code", "cursor"):
         payload["editor"] = editor
+    tmux_socket = meta.get("tmux_socket")
+    if isinstance(tmux_socket, str) and tmux_socket:
+        payload["tmux_socket"] = tmux_socket
 
 
 def _first_string(*values: Any) -> str:

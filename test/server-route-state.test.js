@@ -135,6 +135,7 @@ describe("server-route-state POST", () => {
         cwd: "D:\\repo",
         editor: "cursor",
         pidChain: [1, 3],
+        tmuxSocket: null,
         agentPid: 99,
         agentId: "codex",
         host: "remote-host",

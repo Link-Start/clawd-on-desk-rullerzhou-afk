@@ -127,30 +127,143 @@ describe("createPidResolver()", () => {
 // createPidResolver() — tmux resolution
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe("createPidResolver() — tmux resolution", { skip: !process.env.TMUX }, () => {
-  it("resolves GUI terminal through tmux client when inside tmux", () => {
-    const cfg = getPlatformConfig();
-    const resolve = createPidResolver({ platformConfig: cfg, startPid: process.ppid });
-    const { stablePid, pidChain } = resolve();
-    // stablePid should be a GUI terminal, not the tmux server
-    const { execFileSync } = require("child_process");
-    const comm = require("path").basename(
-      execFileSync("ps", ["-o", "comm=", "-p", String(stablePid)], { encoding: "utf8" }).trim()
-    ).toLowerCase();
-    assert.ok(cfg.terminalNames.has(comm), `stablePid comm "${comm}" should be a known terminal`);
-    // The tmux server PID (from $TMUX) should be in the chain but not be the stablePid
-    const tmuxServerPid = parseInt(process.env.TMUX.split(",")[1], 10);
-    assert.ok(pidChain.includes(tmuxServerPid), "pidChain should include tmux server PID");
-    assert.notStrictEqual(stablePid, tmuxServerPid, "stablePid should not be tmux server");
+// Mocked tmux bridge tests. The previous { skip: !process.env.TMUX } block
+// required a running tmux server with a GUI terminal in the client's ancestry,
+// so it never ran in CI and failed silently for tmux users in ssh / IDE
+// terminals. These mocked variants always run.
+describe("createPidResolver() — tmux bridge (mocked)", () => {
+  const { loadSharedProcessWithMock } = require("./helpers/load-shared-process-with-mock");
+
+  function makeMock(routes) {
+    return function execFileSync(cmd, args /*, opts */) {
+      const key = cmd + " " + args.join(" ");
+      for (const [pattern, value] of routes) {
+        const match = pattern instanceof RegExp ? pattern.test(key) : pattern === key;
+        if (!match) continue;
+        if (typeof value === "function") return value();
+        return value;
+      }
+      const err = new Error("ENOENT: no route for " + key);
+      err.code = "ENOENT";
+      throw err;
+    };
+  }
+
+  it("(a) walk reaches tmux server; list-clients yields client pid → stablePid is terminal", () => {
+    const routes = [
+      ["ps -o ppid= -p 100", "200\n"],
+      ["ps -o comm= -p 100", "zsh\n"],
+      ["ps -o ppid= -p 200", "1\n"],
+      ["ps -o comm= -p 200", "tmux\n"],
+      ["tmux list-clients -t %1 -F #{client_pid}", "300\n"],
+      ["ps -o comm= -p 300", "alacritty\n"],
+      ["ps -o ppid= -p 300", "1\n"],
+    ];
+    const { mod, cleanup } = loadSharedProcessWithMock({
+      execFileSyncMock: makeMock(routes),
+      env: { TMUX: "/tmp/tmux-1000/default,200,5", TMUX_PANE: "%1" },
+      platform: "linux",
+    });
+    try {
+      const cfg = mod.getPlatformConfig();
+      const resolve = mod.createPidResolver({ platformConfig: cfg, startPid: 100 });
+      const { stablePid, pidChain } = resolve();
+      assert.strictEqual(stablePid, 300, "stablePid should be the terminal pid");
+      assert.ok(pidChain.includes(200), "pidChain should include tmux server pid");
+      assert.ok(pidChain.includes(300), "pidChain should include terminal pid");
+    } finally {
+      cleanup();
+    }
   });
 
-  it("skips tmux resolution when walk does not reach tmux server", () => {
-    const cfg = getPlatformConfig();
-    // startPid=1 means the walk ends immediately (PID 1 has no parent)
-    const resolve = createPidResolver({ platformConfig: cfg, startPid: 1, maxDepth: 1 });
-    const { pidChain } = resolve();
-    // Should not have tmux client PIDs appended
-    assert.ok(pidChain.length <= 1);
+  it("(b) walk does not reach tmux server → bridge skipped", () => {
+    const routes = [
+      ["ps -o ppid= -p 100", "1\n"],
+      ["ps -o comm= -p 100", "zsh\n"],
+    ];
+    const { mod, cleanup } = loadSharedProcessWithMock({
+      execFileSyncMock: makeMock(routes),
+      env: { TMUX: "/tmp/tmux-1000/default,200,5", TMUX_PANE: "%1" },
+      platform: "linux",
+    });
+    try {
+      const cfg = mod.getPlatformConfig();
+      const { stablePid, pidChain } = mod.createPidResolver({
+        platformConfig: cfg, startPid: 100, maxDepth: 1,
+      })();
+      assert.strictEqual(stablePid, 100);
+      assert.strictEqual(pidChain.length, 1, "no extra hops appended");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("(c) list-clients empty (detached) → bridge skipped, stablePid falls back", () => {
+    const routes = [
+      ["ps -o ppid= -p 100", "200\n"],
+      ["ps -o comm= -p 100", "zsh\n"],
+      ["ps -o ppid= -p 200", "1\n"],
+      ["ps -o comm= -p 200", "tmux\n"],
+      ["tmux list-clients -t %1 -F #{client_pid}", "\n"],
+    ];
+    const { mod, cleanup } = loadSharedProcessWithMock({
+      execFileSyncMock: makeMock(routes),
+      env: { TMUX: "/tmp/tmux-1000/default,200,5", TMUX_PANE: "%1" },
+      platform: "linux",
+    });
+    try {
+      const cfg = mod.getPlatformConfig();
+      const { stablePid, pidChain } = mod.createPidResolver({
+        platformConfig: cfg, startPid: 100,
+      })();
+      assert.ok(!pidChain.some(p => p > 200), "no client pids appended past tmux server");
+      assert.strictEqual(stablePid, 200, "falls back to lastGoodPid (tmux server)");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("(d) tmuxSocket parsed from $TMUX exposed on resolver result", () => {
+    const routes = [
+      ["ps -o ppid= -p 100", "200\n"],
+      ["ps -o comm= -p 100", "zsh\n"],
+      ["ps -o ppid= -p 200", "1\n"],
+      ["ps -o comm= -p 200", "tmux\n"],
+      ["tmux list-clients -t %1 -F #{client_pid}", "\n"],
+    ];
+    const { mod, cleanup } = loadSharedProcessWithMock({
+      execFileSyncMock: makeMock(routes),
+      env: { TMUX: "/tmp/tmux-1000/work,200,5", TMUX_PANE: "%1" },
+      platform: "linux",
+    });
+    try {
+      const cfg = mod.getPlatformConfig();
+      const result = mod.createPidResolver({ platformConfig: cfg, startPid: 100 })();
+      assert.strictEqual(result.tmuxSocket, "work");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("(e) default socket → tmuxSocket is null", () => {
+    const routes = [
+      ["ps -o ppid= -p 100", "1\n"],
+      ["ps -o comm= -p 100", "zsh\n"],
+    ];
+    const { mod, cleanup } = loadSharedProcessWithMock({
+      execFileSyncMock: makeMock(routes),
+      env: { TMUX: "/tmp/tmux-1000/default,200,5", TMUX_PANE: "%1" },
+      platform: "linux",
+    });
+    try {
+      const cfg = mod.getPlatformConfig();
+      const result = mod.createPidResolver({
+        platformConfig: cfg, startPid: 100, maxDepth: 1,
+      })();
+      assert.strictEqual(result.tmuxSocket, null);
+    } finally {
+      cleanup();
+    }
   });
 });
 

@@ -108,6 +108,10 @@ function buildPayload(options = {}) {
     : [];
   if (pidChain.length > 0) payload.pid_chain = pidChain;
 
+  const tmuxSocket = typeof metadata.tmuxSocket === "string" && /^[\w.-]{1,64}$/.test(metadata.tmuxSocket)
+    ? metadata.tmuxSocket : null;
+  if (tmuxSocket) payload.tmux_socket = tmuxSocket;
+
   if (metadata.editor === "code" || metadata.editor === "cursor") {
     payload.editor = metadata.editor;
   }

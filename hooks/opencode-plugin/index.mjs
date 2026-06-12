@@ -23,7 +23,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync, promises as fsp } from "fs";
 import { homedir, platform } from "os";
-import { join } from "path";
+import { join, basename } from "path";
 import { randomBytes, timingSafeEqual } from "crypto";
 import { execFileSync, execSync } from "child_process";
 import {
@@ -109,6 +109,7 @@ const _sessionParentById = new Map();
 let _stablePid = null;
 let _pidChain = [];
 let _detectedEditor = null;
+let _tmuxSocket = null;
 // Project directory — captured from ctx.directory at init, sent with every
 // POST so state.js can display path.basename(cwd) as the session menu label
 // (otherwise it falls back to the session_id prefix, e.g. "ses 2a..").
@@ -273,6 +274,16 @@ function getStablePid() {
   }
 
   _stablePid = terminalPid || lastGoodPid;
+
+  _tmuxSocket = null;
+  if (process.env.TMUX) {
+    const socketPath = process.env.TMUX.split(",")[0];
+    if (socketPath) {
+      const name = basename(socketPath);
+      if (name && name !== "default" && /^[\w.-]{1,64}$/.test(name)) _tmuxSocket = name;
+    }
+  }
+
   debugLog(`PID resolved stable=${_stablePid} editor=${_detectedEditor || "none"} chain=[${_pidChain.join(",")}]`);
   return _stablePid;
 }
@@ -288,6 +299,7 @@ function postToClawd(urlPath, body, logTag) {
     body.source_pid = _stablePid;
     if (_pidChain.length) body.pid_chain = _pidChain;
     if (_detectedEditor) body.editor = _detectedEditor;
+    if (_tmuxSocket) body.tmux_socket = _tmuxSocket;
   }
   if (_cwd) body.cwd = _cwd;
   body.agent_pid = process.pid;

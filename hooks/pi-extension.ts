@@ -22,6 +22,7 @@ type ProcessMetadata = {
   sourcePid?: number;
   pidChain?: number[];
   editor?: "code" | "cursor";
+  tmuxSocket?: string;
 };
 
 type ProcessInfo = {
@@ -281,11 +282,21 @@ function getProcessMetadata(): ProcessMetadata {
     pid = info.ppid;
   }
 
+  let tmuxSocket: string | undefined;
+  if (process.env.TMUX) {
+    const socketPath = process.env.TMUX.split(",")[0];
+    if (socketPath) {
+      const name = require("path").basename(socketPath);
+      if (name && name !== "default" && /^[\w.-]{1,64}$/.test(name)) tmuxSocket = name;
+    }
+  }
+
   const value: ProcessMetadata = {
     cwd: process.cwd(),
     sourcePid: sourcePid || undefined,
     pidChain: pidChain.length > 0 ? pidChain : [process.pid],
     editor,
+    tmuxSocket,
   };
   processMetadataCache = { at: now, value };
   return value;

@@ -107,6 +107,8 @@ function handleStatePost(req, res, options) {
       const cwd = typeof data.cwd === "string" ? data.cwd : "";
       const editor = (data.editor === "code" || data.editor === "cursor") ? data.editor : null;
       const pidChain = Array.isArray(data.pid_chain) ? data.pid_chain.filter(n => Number.isFinite(n) && n > 0) : null;
+      const tmuxSocket = (typeof data.tmux_socket === "string" && /^[\w.-]{1,64}$/.test(data.tmux_socket.trim()))
+        ? data.tmux_socket.trim() : null;
       const rawAgentPid = data.agent_pid ?? data.claude_pid ?? data.cursor_pid;
       const agentPid = Number.isFinite(rawAgentPid) && rawAgentPid > 0 ? Math.floor(rawAgentPid) : null;
       const agentIdentity = resolveHookAgentId(data);
@@ -244,6 +246,7 @@ function handleStatePost(req, res, options) {
             cwd,
             editor,
             pidChain,
+            tmuxSocket,
             agentPid,
             agentId,
             host,

@@ -271,42 +271,56 @@ function createPidResolver(options) {
       pid = parentPid;
     }
 
-    if (!isWin && !terminalPid && process.env.TMUX) {
+    if (!isWin && !terminalPid && process.env.TMUX && process.env.TMUX_PANE) {
       const tmuxParts = process.env.TMUX.split(",");
       const tmuxServerPid = tmuxParts.length >= 2 ? parseInt(tmuxParts[1], 10) : 0;
       const walkReachedTmux = tmuxServerPid > 1 && pidChain.includes(tmuxServerPid);
-      if (walkReachedTmux) try {
-        const clientPidStr = execFileSync(
-          "tmux", ["display-message", "-p", "#{client_pid}"],
-          { encoding: "utf8", timeout: 500 }
-        ).trim();
-        const clientPid = parseInt(clientPidStr, 10);
-        if (clientPid > 1) {
-          let walkPid = clientPid;
-          for (let t = 0; t < 4; t++) {
-            let tName, tParent;
-            try {
-              const tComm = execFileSync("ps", ["-o", "comm=", "-p", String(walkPid)],
-                { encoding: "utf8", timeout: 500 }).trim();
-              tName = require("path").basename(tComm).toLowerCase();
-              tParent = parseInt(
-                execFileSync("ps", ["-o", "ppid=", "-p", String(walkPid)],
-                  { encoding: "utf8", timeout: 500 }).trim(), 10);
-            } catch { break; }
-            if (terminalNames.has(tName)) {
-              terminalPid = walkPid;
-              pidChain.push(walkPid);
-              break;
+      if (walkReachedTmux) {
+        try {
+          const raw = execFileSync(
+            "tmux", ["list-clients", "-t", process.env.TMUX_PANE, "-F", "#{client_pid}"],
+            { encoding: "utf8", timeout: 500 }
+          );
+          const clientPids = raw.split("\n")
+            .map(s => parseInt(s.trim(), 10))
+            .filter(p => Number.isFinite(p) && p > 1);
+          outer: for (const clientPid of clientPids) {
+            let walkPid = clientPid;
+            const localAdds = [];
+            for (let t = 0; t < 4; t++) {
+              let tName, tParent;
+              try {
+                const tComm = execFileSync("ps", ["-o", "comm=", "-p", String(walkPid)],
+                  { encoding: "utf8", timeout: 500 }).trim();
+                tName = require("path").basename(tComm).toLowerCase();
+                tParent = parseInt(
+                  execFileSync("ps", ["-o", "ppid=", "-p", String(walkPid)],
+                    { encoding: "utf8", timeout: 500 }).trim(), 10);
+              } catch { break; }
+              if (terminalNames.has(tName)) {
+                terminalPid = walkPid;
+                pidChain.push(...localAdds, walkPid);
+                break outer;
+              }
+              if (!tParent || tParent <= 1 || tParent === walkPid) break;
+              localAdds.push(walkPid);
+              walkPid = tParent;
             }
-            if (!tParent || tParent <= 1 || tParent === walkPid) break;
-            pidChain.push(walkPid);
-            walkPid = tParent;
           }
-        }
-      } catch {}
+        } catch {}
+      }
     }
 
-    _cached = { stablePid: terminalPid || lastGoodPid, agentPid, agentCommandLine, detectedEditor, pidChain, foregroundWtHwnd };
+    let tmuxSocket = null;
+    if (process.env.TMUX) {
+      const socketPath = process.env.TMUX.split(",")[0];
+      if (socketPath) {
+        const name = require("path").basename(socketPath);
+        if (name && name !== "default") tmuxSocket = name;
+      }
+    }
+
+    _cached = { stablePid: terminalPid || lastGoodPid, agentPid, agentCommandLine, detectedEditor, pidChain, foregroundWtHwnd, tmuxSocket };
     return _cached;
   };
 }
