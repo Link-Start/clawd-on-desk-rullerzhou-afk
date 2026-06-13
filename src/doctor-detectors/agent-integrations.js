@@ -3,7 +3,11 @@
 const fs = require("fs");
 const path = require("path");
 
-const { isAgentEnabled, isAgentPermissionsEnabled } = require("../agent-gate");
+const {
+  isAgentEnabled,
+  isAgentIntegrationInstalled,
+  isAgentPermissionsEnabled,
+} = require("../agent-gate");
 const { getAgent } = require("../../agents/registry");
 const { findHookCommands } = require("../../hooks/json-utils");
 const { GEMINI_HOOK_EVENTS } = require("../../hooks/gemini-install");
@@ -27,6 +31,7 @@ const INFO_ONLY_STATUSES = new Set([
   "disabled",
   "manual-managed",
   "manual-only",
+  "not-managed",
   "not-installed",
 ]);
 const REPAIRABLE_AGENT_STATUSES = new Set(["not-connected", "broken-path"]);
@@ -80,6 +85,33 @@ function withAgentBubbleNote(detail, prefs, agentId) {
     };
   }
   return detail;
+}
+
+function getClaudeHookGuardStatus(options) {
+  const server = options && options.server;
+  if (!server || typeof server.getClaudeHookGuardStatus !== "function") return null;
+  try {
+    return server.getClaudeHookGuardStatus();
+  } catch {
+    return null;
+  }
+}
+
+function withClaudeHookGuardNotice(detail, descriptor, options) {
+  if (descriptor.agentId !== "claude-code") return detail;
+  if (!detail || detail.status !== "not-connected") return detail;
+  const guard = getClaudeHookGuardStatus(options);
+  if (!guard || guard.type !== "suspicious-shrink") return detail;
+  return {
+    ...detail,
+    detail: "Clawd paused automatic Claude hook repair after settings.json shrank during an external rewrite. Use Fix or restart Clawd to reinstall Clawd hooks.",
+    claudeHookGuard: {
+      type: guard.type,
+      at: guard.at || null,
+      before: guard.before || null,
+      after: guard.after || null,
+    },
+  };
 }
 
 function withAgentFixAction(detail, descriptor) {
@@ -1397,6 +1429,25 @@ function findOpenClawPluginEntry(pluginPaths, marker) {
   return null;
 }
 
+function describeOpencodeEntryIssue(reason) {
+  switch (reason) {
+    case "not-absolute":
+      return "the plugin path is not absolute";
+    case "directory-missing":
+      return "the plugin directory does not exist";
+    case "not-a-directory":
+      return "the plugin entry is not a directory";
+    case "index-mjs-missing":
+      return "the plugin directory has no index.mjs";
+    case "index-mjs-unreadable":
+      return "the plugin index.mjs could not be read";
+    case "extra-module-exports":
+      return "the module exports more than the default function, so opencode rejects it and loads nothing (#413)";
+    default:
+      return reason;
+  }
+}
+
 function checkOpencodeSettings(descriptor, settings, options) {
   const entry = findOpencodePluginEntry(settings && settings.plugin, descriptor.marker);
   if (!entry) {
@@ -1416,7 +1467,7 @@ function checkOpencodeSettings(descriptor, settings, options) {
       parentDirExists: true,
       configFileExists: true,
       configPath: descriptor.configPath,
-      detail: `opencode plugin entry is invalid: ${validation.reason}`,
+      detail: `opencode plugin entry is invalid: ${describeOpencodeEntryIssue(validation.reason)}`,
       opencodeEntryIssue: validation.reason,
       opencodeEntry: entry,
     });
@@ -1601,6 +1652,13 @@ function checkPiExtensionMode(descriptor, options) {
 
 function checkAgent(descriptor, options) {
   const prefs = options.prefs || {};
+  if (!isAgentIntegrationInstalled(prefs, descriptor.agentId)) {
+    return makeDetail(descriptor, "not-managed", {
+      level: "info",
+      detail: "This integration is not installed in Settings",
+    });
+  }
+
   if (!isAgentEnabled(prefs, descriptor.agentId)) {
     return makeDetail(descriptor, "disabled", {
       level: "info",
@@ -1660,6 +1718,7 @@ function checkAgent(descriptor, options) {
     });
   }
 
+  detail = withClaudeHookGuardNotice(detail, descriptor, options);
   return withAgentFixAction(withAgentBubbleNote(detail, prefs, descriptor.agentId), descriptor);
 }
 
@@ -1687,6 +1746,7 @@ function checkAgentIntegrations(options = {}) {
     fs: options.fs || fs,
     platform: options.platform || process.platform,
     prefs: options.prefs || {},
+    server: options.server || null,
     validateCommand: options.validateCommand || validateHookCommand,
   };
   const descriptors = options.descriptors || getAgentDescriptors();

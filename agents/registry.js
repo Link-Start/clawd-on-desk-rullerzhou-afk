@@ -1,4 +1,4 @@
-// Agent registry - loads all agent configs, provides lookup API
+// Agent registry — loads all agent configs, provides lookup API
 // Used by main.js for process detection and session tracking
 
 const claudeCode = require("./claude-code");
@@ -13,9 +13,9 @@ const kimiCli = require("./kimi-cli");
 const qwenCode = require("./qwen-code");
 const opencode = require("./opencode");
 const pi = require("./pi");
-const codewhale = require("./codewhale");
 const openclaw = require("./openclaw");
 const hermes = require("./hermes");
+const qoder = require("./qoder");
 
 const AGENTS = [
   claudeCode,
@@ -28,11 +28,11 @@ const AGENTS = [
   kiroCli,
   kimiCli,
   qwenCode,
-  codewhale,
   opencode,
   pi,
   openclaw,
   hermes,
+  qoder,
 ];
 const AGENT_MAP = new Map(AGENTS.map((a) => [a.id, a]));
 
