@@ -147,6 +147,7 @@
       "assets/svg/**/*",
       "hooks/**/*",
       "extensions/**/*",
+      "agents/**/*",
       "themes/**/*"
     ],
     "extraResources": [
