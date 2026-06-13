@@ -39,10 +39,13 @@ const DEFAULT_POLL_RETRY_MAX_MS = 30000;
 // Status lines appended to an approval card whose decision landed somewhere
 // other than this Telegram chat, so the chat history shows the outcome
 // (issue #457). Keyed by the reason finishApproval received a null decision.
+// `elsewhere` is deliberately neutral: a signal abort covers more than a
+// desktop answer — the settings approval test arms a 60s abort, and DND /
+// dismissed interactive bubbles also abort without anything being "resolved".
 const APPROVAL_RESOLVED_ELSEWHERE_STATUS = Object.freeze({
-  desktop: "\u2705 Resolved on desktop",
+  elsewhere: "\u2705 Resolved outside Telegram",
   timeout: "\u23F3 Timed out",
-  stopped: "\u23F9 Session ended",
+  stopped: "\u23F9\uFE0F Session ended",
 });
 
 function randomId() {
@@ -546,7 +549,10 @@ function createTelegramNativeRunner({
     }).catch(() => clearApprovalKeyboard(entry));
   }
 
-  function finishApproval(id, decision, reason = "desktop") {
+  // `reason` has no default on purpose: a caller that forgets to pass one
+  // falls into the `!status` branch below and degrades to stripping just the
+  // keyboard (the #446 behavior), rather than mislabeling the outcome.
+  function finishApproval(id, decision, reason) {
     const entry = pendingApprovals.get(id);
     if (!entry) return;
     pendingApprovals.delete(id);
@@ -613,7 +619,7 @@ function createTelegramNativeRunner({
       if (entry.timer && typeof entry.timer.unref === "function") entry.timer.unref();
 
       if (signal) {
-        entry.onAbort = () => finishApproval(id, null, "desktop");
+        entry.onAbort = () => finishApproval(id, null, "elsewhere");
         signal.addEventListener("abort", entry.onAbort, { once: true });
       }
 

@@ -463,7 +463,7 @@ test("native runner aborts an in-flight approval send before a late Telegram suc
   await runner.stop();
 });
 
-test("native runner rewrites approval card with status when resolved on desktop (abort)", async () => {
+test("native runner rewrites approval card with status when resolved outside Telegram (abort)", async () => {
   const server = createFakeTelegramServer();
   let releaseFirstPoll;
 
@@ -491,7 +491,8 @@ test("native runner rewrites approval card with status when resolved on desktop 
   await tick();
   assert.equal(server.calls.filter((call) => call.method === "sendMessage").length, 1);
 
-  // Desktop answered the permission: the caller aborts the in-flight request.
+  // The permission was resolved outside Telegram (desktop answer, DND, or a
+  // dismissed bubble): the caller aborts the in-flight request.
   controller.abort();
   assert.equal(await decisionPromise, null);
   await tick();
@@ -502,7 +503,7 @@ test("native runner rewrites approval card with status when resolved on desktop 
   assert.equal(editCalls[0].payload.message_id, 99);
   assert.equal(
     editCalls[0].payload.text,
-    "claude-code requests Bash\n\nSummary: Run tests\n\n\u2705 Resolved on desktop",
+    "claude-code requests Bash\n\nSummary: Run tests\n\n\u2705 Resolved outside Telegram",
   );
   assert.equal(
     editCalls[0].payload.reply_markup,
@@ -587,7 +588,7 @@ test("native runner appends session-ended status when polling stops with a pendi
   assert.equal(editCalls[0].payload.message_id, 55);
   assert.equal(
     editCalls[0].payload.text,
-    "claude-code requests Bash\n\nSummary: Run tests\n\n\u23F9 Session ended",
+    "claude-code requests Bash\n\nSummary: Run tests\n\n\u23F9\uFE0F Session ended",
   );
 });
 
