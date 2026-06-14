@@ -568,11 +568,7 @@ const MAC_FOCUS_TIMEOUT_MS = 1500;
 // can answer (#465), so that one script gets a human-scale timeout.
 const MAC_FOCUS_CONSENT_TIMEOUT_MS = 15000;
 const MAC_OPEN_TIMEOUT_MS = 3000;
-// After the stepping-stone focus switches Spaces, wait this long for the Space
-// switch to settle before focusing the real target (the tab swap). Shorter than
-// the old 450+400ms double-wait: the target focus runs directly here, with no
-// extra runGhosttyScript pre-delay stacked on top.
-const GHOSTTY_STEP_SETTLE_MS = 300;
+
 const WINDOWS_FOCUS_DEDUP_MS = 400;
 const WINDOWS_FOCUS_RESULT_TIMEOUT_MS = 3000;
 const WINDOWS_FOCUS_POSITIVE_REASONS = new Set([
@@ -988,8 +984,9 @@ function buildGhosttyCwdProbeScript(cwdCandidates) {
               try
                 set matches to (every terminal of t whose working directory is (contents of cwdLiteral))
                 if (count of matches) > 0 then
-                  if selected of t is true then return "direct"
-                  return "via:" & ((id of (focused terminal of (selected tab of w))) as text)
+                  set targetTerm to item 1 of matches
+                  if selected of t is true then return "direct:" & ((id of targetTerm) as text)
+                  return "via:" & ((id of (focused terminal of (selected tab of w))) as text) & "|" & ((id of targetTerm) as text)
                 end if
               end try
             end repeat
@@ -1010,13 +1007,92 @@ function buildGhosttyIdProbeScript(terminalId) {
             try
               set matches to (every terminal of t whose id is targetId)
               if (count of matches) > 0 then
-                if selected of t is true then return "direct"
-                return "via:" & ((id of (focused terminal of (selected tab of w))) as text)
+                if selected of t is true then return "direct:" & targetId
+                return "via:" & ((id of (focused terminal of (selected tab of w))) as text) & "|" & targetId
               end if
             end try
           end repeat
         end repeat
         return "miss"
+      end tell`;
+}
+
+// Probe + stone in one script: finds the target terminal, and if its tab is
+// not selected, immediately focuses the stone terminal (blocks for the Space
+// animation) before returning. Node.js receives the callback only after the
+// animation completes, so the target focus can fire without any extra wait.
+// Saves one IPC round-trip vs. separate probe → stone calls.
+function buildGhosttyIdProbeAndStoneScript(terminalId) {
+  const id = normalizeGhosttyTerminalId(terminalId);
+  if (!id) return null;
+  return `
+      tell application "Ghostty"
+        set targetId to "${escapeAppleScriptString(id)}"
+        repeat with w in windows
+          repeat with t in tabs of w
+            try
+              set matches to (every terminal of t whose id is targetId)
+              if (count of matches) > 0 then
+                if selected of t is true then return "direct:" & targetId
+                set stoneTerminal to (focused terminal of (selected tab of w))
+                focus stoneTerminal
+                return "via:" & ((id of stoneTerminal) as text) & "|" & targetId
+              end if
+            end try
+          end repeat
+        end repeat
+        return "miss"
+      end tell`;
+}
+
+function buildGhosttyCwdProbeAndStoneScript(cwdCandidates) {
+  const literalList = buildAppleScriptStringList(cwdCandidates);
+  return `
+      tell application "Ghostty"
+        set targetCwds to {${literalList}}
+        repeat with cwdLiteral in targetCwds
+          repeat with w in windows
+            repeat with t in tabs of w
+              try
+                set matches to (every terminal of t whose working directory is (contents of cwdLiteral))
+                if (count of matches) > 0 then
+                  set targetTerm to item 1 of matches
+                  if selected of t is true then return "direct:" & ((id of targetTerm) as text)
+                  set stoneTerminal to (focused terminal of (selected tab of w))
+                  focus stoneTerminal
+                  return "via:" & ((id of stoneTerminal) as text) & "|" & ((id of targetTerm) as text)
+                end if
+              end try
+            end repeat
+          end repeat
+        end repeat
+        return "miss"
+      end tell`;
+}
+
+// Combines stone focus and target focus in a single AppleScript call.
+// AppleScript commands execute synchronously, so by the time the stone's
+// `focus` returns, the WindowServer has committed the Space switch — no
+// setTimeout needed. The target focus then runs in the already-active Space.
+function buildGhosttyStoneAndFocusScript(stoneId, targetId) {
+  const sid = normalizeGhosttyTerminalId(stoneId);
+  const tid = normalizeGhosttyTerminalId(targetId);
+  if (!sid || !tid) return null;
+  return `
+      tell application "Ghostty"
+        repeat with t in terminals
+          if id of t is "${escapeAppleScriptString(sid)}" then
+            focus t
+            exit repeat
+          end if
+        end repeat
+        repeat with t in terminals
+          if id of t is "${escapeAppleScriptString(tid)}" then
+            focus t
+            return "ok-id-via"
+          end if
+        end repeat
+        return "miss-id-via"
       end tell`;
 }
 
@@ -1559,45 +1635,39 @@ function scheduleGhosttyFocus(sourcePid, cwd, pidChain, ghosttyTerminalId = null
         });
       }, 400);
     };
-    // Cross-Space fix: probe (read-only) how to reach the target. "via:<id>"
-    // means its tab is not selected, so focus the selected tab's terminal
-    // first — the only operation verified to switch Spaces instead of
-    // yanking the window — wait for the Space switch, then focus the target
-    // (the tab swap now happens within the active Space). "direct"/"miss"
-    // fall through to the legacy focus script unchanged.
-    const runWithSteppingStone = (probeScript, finalScript, finalLabel, thenFn) => {
-      if (!probeScript) {
+    // Cross-Space fix: probe+stone in one script finds the target and, if its
+    // tab is not selected, immediately focuses the stepping-stone terminal
+    // (blocking for the Space animation). The callback fires only after the
+    // Space switch is done, so the target focus runs without any extra wait.
+    const runWithSteppingStone = (probeAndStoneScript, finalScript, finalLabel, thenFn) => {
+      if (!probeAndStoneScript) {
         thenFn();
         return;
       }
       const t0 = Date.now();
-      execFile("osascript", ["-e", probeScript], { timeout: MAC_FOCUS_TIMEOUT_MS }, (probeErr, probeOut) => {
-        const status = probeErr ? "error" : (String(probeOut || "").trim() || "empty");
+      execFile("osascript", ["-e", probeAndStoneScript], { timeout: MAC_FOCUS_TIMEOUT_MS * 2 }, (err, out) => {
+        const status = err ? "error" : (String(out || "").trim() || "empty");
         if (!status.startsWith("via:")) {
           logGhosttyFocusResult(`probe-${status} t=${Date.now() - t0}ms`);
           thenFn();
           return;
         }
-        const stoneScript = buildGhosttyIdFocusScript(status.slice(4));
-        if (!stoneScript || !finalScript) {
+        // via:<stone-id>|<target-id> — stone already focused, Space is active
+        const viaPayload = status.slice(4);
+        const sepIdx = viaPayload.indexOf("|");
+        const targetId = sepIdx >= 0 ? viaPayload.slice(sepIdx + 1) : null;
+        const effectiveFinal = (targetId && buildGhosttyIdFocusScript(targetId)) || finalScript;
+        if (!effectiveFinal) {
           logGhosttyFocusResult("probe-via no-final");
           thenFn();
           return;
         }
         logGhosttyFocusResult(`probe-via t=${Date.now() - t0}ms`);
-        // Focus the stepping-stone terminal (the window's already-selected tab)
-        // to switch Spaces, wait for the switch to settle, then focus the real
-        // target directly — no runGhosttyScript pre-delay, since the Space is
-        // already active and the tab swap no longer yanks the window.
-        const tStone = Date.now();
-        execFile("osascript", ["-e", stoneScript], { timeout: MAC_FOCUS_TIMEOUT_MS }, () => {
-          setTimeout(() => {
-            const tFinal = Date.now();
-            execFile("osascript", ["-e", finalScript], { timeout: MAC_FOCUS_TIMEOUT_MS }, (finalErr, finalOut) => {
-              const finalStatus = normalizeGhosttyScriptStatus(finalLabel, finalErr, finalOut);
-              logGhosttyFocusResult(`${finalStatus} via-stone stone=${tFinal - tStone}ms final=${Date.now() - tFinal}ms`);
-            });
-          }, GHOSTTY_STEP_SETTLE_MS);
+        const tFinal = Date.now();
+        execFile("osascript", ["-e", effectiveFinal], { timeout: MAC_FOCUS_TIMEOUT_MS }, (finalErr, finalOut) => {
+          const finalStatus = normalizeGhosttyScriptStatus(finalLabel, finalErr, finalOut);
+          logGhosttyFocusResult(`${finalStatus} via-stone t=${Date.now() - tFinal}ms`);
+          if (!String(finalStatus || "").startsWith("ok-")) thenFn();
         });
       });
     };
@@ -1609,7 +1679,7 @@ function scheduleGhosttyFocus(sourcePid, cwd, pidChain, ghosttyTerminalId = null
       }
       const script = buildGhosttyCwdFocusScript(cwdCandidates);
       logGhosttyFocusResult("cwd-fallback");
-      runWithSteppingStone(buildGhosttyCwdProbeScript(cwdCandidates), script, "cwd", () => {
+      runWithSteppingStone(buildGhosttyCwdProbeAndStoneScript(cwdCandidates), script, "cwd", () => {
         runGhosttyScript(script, "cwd", null);
       });
     };
@@ -1648,7 +1718,7 @@ function scheduleGhosttyFocus(sourcePid, cwd, pidChain, ghosttyTerminalId = null
         runPrecisePath();
         return;
       }
-      runWithSteppingStone(buildGhosttyIdProbeScript(ghosttyTerminalId), idScript, "id", () => {
+      runWithSteppingStone(buildGhosttyIdProbeAndStoneScript(ghosttyTerminalId), idScript, "id", () => {
         runGhosttyScript(idScript, "id", runPrecisePath);
       });
     };
@@ -1948,6 +2018,9 @@ return {
     resolveTmuxBin,
     buildGhosttyIdProbeScript,
     buildGhosttyCwdProbeScript,
+    buildGhosttyIdProbeAndStoneScript,
+    buildGhosttyCwdProbeAndStoneScript,
+    buildGhosttyStoneAndFocusScript,
   },
 };
 

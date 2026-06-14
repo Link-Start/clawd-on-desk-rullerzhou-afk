@@ -22,7 +22,7 @@ const { __test } = require("../src/focus")({});
 function assertReadOnlyProbe(script, label) {
   assert.ok(!/\bfocus \w+/.test(script), `${label}: probe must not focus\n${script}`);
   assert.ok(!/select tab/.test(script), `${label}: probe must not select tabs\n${script}`);
-  assert.ok(/return "direct"/.test(script), `${label}: should report direct when tab is selected\n${script}`);
+  assert.ok(/return "direct:"/.test(script), `${label}: should report direct:<id> when tab is selected\n${script}`);
   assert.ok(/"via:" &/.test(script), `${label}: should report the stepping-stone terminal id\n${script}`);
   assert.ok(/selected tab of \w+/.test(script), `${label}: stepping stone comes from the window's selected tab\n${script}`);
 }
