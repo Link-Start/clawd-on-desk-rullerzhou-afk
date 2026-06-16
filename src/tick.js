@@ -21,6 +21,16 @@ let mainTickTimer = null;
 let mainTickActive = false;
 let nextMainTickAt = 0;
 
+// ── Spin detection: tracks cursor circling to trigger dizzy animation ──
+let lastCursorAngle = null;             // last cursor angle (radians) relative to pet center
+let accumulatedSpin = 0;                // accumulated absolute angular displacement
+let dizzyCooldownUntil = 0;             // timestamp until which dizzy cannot re-trigger
+let lastSpinTickAt = 0;                 // timestamp of last spin tick
+
+const SPIN_THRESHOLD = Math.PI * 4;     // 2 full circles to trigger dizzy
+const SPIN_DECAY_HALF_LIFE_MS = 800;    // spin memory decays with this half-life
+const DIZZY_COOLDOWN_MS = 12000;        // can't re-trigger dizzy for 12s
+
 const FAST_TICK_MS = 50;
 const BOOST_TICK_MS = 100;
 const IDLE_TICK_MS = 250;
@@ -169,6 +179,9 @@ function runMainTickOnce() {
       mouseStillSince = Date.now();
       lastEyeDx = 0;
       lastEyeDy = 0;
+      lastCursorAngle = null;
+      accumulatedSpin = 0;
+      lastSpinTickAt = 0;
       if (idleLookReturnTimer) { clearTimeout(idleLookReturnTimer); idleLookReturnTimer = null; }
       if (yawnDelayTimer) { clearTimeout(yawnDelayTimer); yawnDelayTimer = null; }
     }
@@ -349,6 +362,43 @@ function runMainTickOnce() {
       ctx.sendToRenderer("eye-move", eyeDx, eyeDy);
     }
 
+    // --- Spin detection: track angular displacement to detect dizzy-inducing circles ---
+    // Only active during normal idle eye-follow (not mini-idle, not idle-look).
+    if (idleNow && !miniIdleNow && !isMouseIdle && moved) {
+      const angle = Math.atan2(relY, relX);
+      const now = Date.now();
+
+      // Decay accumulated spin over time (fast circles accumulate, slow decays)
+      if (lastSpinTickAt > 0) {
+        const dtMs = now - lastSpinTickAt;
+        if (dtMs > 0 && accumulatedSpin > 0.001) {
+          const decay = Math.pow(0.5, dtMs / SPIN_DECAY_HALF_LIFE_MS);
+          accumulatedSpin *= decay;
+        }
+      }
+      lastSpinTickAt = now;
+
+      // Accumulate angular displacement, handling -PI / +PI wrap
+      if (lastCursorAngle !== null) {
+        let delta = angle - lastCursorAngle;
+        if (delta > Math.PI) delta -= 2 * Math.PI;
+        if (delta < -Math.PI) delta += 2 * Math.PI;
+        accumulatedSpin += Math.abs(delta);
+
+        // Check if we've spun enough to trigger dizzy
+        if (accumulatedSpin >= SPIN_THRESHOLD && now > dizzyCooldownUntil) {
+          accumulatedSpin = 0;
+          lastCursorAngle = null;
+          dizzyCooldownUntil = now + DIZZY_COOLDOWN_MS;
+          ctx.setState("dizzy");
+          lastEyeDx = 0;
+          lastEyeDy = 0;
+          return nextDelay();
+        }
+      }
+      lastCursorAngle = angle;
+    }
+
     return nextDelay();
 }
 
@@ -372,6 +422,10 @@ function cleanup() {
   lastEyeDy = 0;
   lastPointerBridgeKey = null;
   lastPointerBridgePayload = null;
+  lastCursorAngle = null;
+  accumulatedSpin = 0;
+  dizzyCooldownUntil = 0;
+  lastSpinTickAt = 0;
 }
 
 // Expose mouseStillSince for wake poll (state.js deep sleep timeout)

@@ -92,6 +92,9 @@
     ],
     "waking": [
       "clawd-wake.svg"
+    ],
+    "dizzy": [
+      "clawd-dizzy.svg"
     ]
   },
   "workingTiers": [
@@ -154,14 +157,16 @@
       "notification": 5000,
       "carrying": 3000,
       "working": 1000,
-      "thinking": 1000
+      "thinking": 1000,
+      "dizzy": 6000
     },
     "autoReturn": {
       "attention": 4000,
       "error": 5000,
       "sweeping": 300000,
       "notification": 5000,
-      "carrying": 3000
+      "carrying": 3000,
+      "dizzy": 6000
     },
     "yawnDuration": 3000,
     "wakeDuration": 1500,
