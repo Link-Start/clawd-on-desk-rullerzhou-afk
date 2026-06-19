@@ -364,6 +364,9 @@ function runMainTickOnce() {
 
     // --- Spin detection: track angular displacement to detect dizzy-inducing circles ---
     // Only active during normal idle eye-follow (not mini-idle, not idle-look).
+    // Gate on theme support: only trigger dizzy if the active theme defines a real
+    // states.dizzy binding AND a positive timings.autoReturn.dizzy. Otherwise
+    // unsupported themes (Calico, Cloudling) keep normal idle behavior.
     if (idleNow && !miniIdleNow && !isMouseIdle && moved) {
       const angle = Math.atan2(relY, relX);
       const now = Date.now();
@@ -386,7 +389,11 @@ function runMainTickOnce() {
         accumulatedSpin += Math.abs(delta);
 
         // Check if we've spun enough to trigger dizzy
-        if (accumulatedSpin >= SPIN_THRESHOLD && now > dizzyCooldownUntil) {
+        // Only fire when the active theme supports it (states.dizzy + autoReturn.dizzy).
+        const themeDizzyReady = theme &&
+          theme.states && Array.isArray(theme.states.dizzy) && theme.states.dizzy.length > 0 &&
+          theme.timings && theme.timings.autoReturn && Number.isFinite(theme.timings.autoReturn.dizzy) && theme.timings.autoReturn.dizzy > 0;
+        if (accumulatedSpin >= SPIN_THRESHOLD && now > dizzyCooldownUntil && themeDizzyReady) {
           accumulatedSpin = 0;
           lastCursorAngle = null;
           dizzyCooldownUntil = now + DIZZY_COOLDOWN_MS;
