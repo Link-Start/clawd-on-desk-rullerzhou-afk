@@ -526,4 +526,3 @@ module.exports = function initMenu(ctx) {
     requestAppQuit,
   };
 };
-

@@ -1571,3 +1571,78 @@ describe("prefs.save", () => {
     });
   });
 });
+
+describe("prefs.tutorialSeen (first-run tutorial gate)", () => {
+  it("defaults to false on fresh defaults", () => {
+    assert.strictEqual(prefs.getDefaults().tutorialSeen, false);
+  });
+
+  it("persists true across a save/load round-trip", () => {
+    const p = makeTempPath();
+    prefs.save(p, { ...prefs.getDefaults(), tutorialSeen: true });
+    assert.strictEqual(prefs.load(p).snapshot.tutorialSeen, true);
+  });
+
+  it("resolves to false for an existing-user file lacking the key (they see it once too)", () => {
+    const p = makeTempPath();
+    // Pre-tutorial prefs file: current version, no tutorialSeen key at all.
+    fs.writeFileSync(p, JSON.stringify({ version: prefs.CURRENT_VERSION, showTray: true }));
+    assert.strictEqual(prefs.load(p).snapshot.tutorialSeen, false);
+  });
+
+  it("is NOT backfilled to true by migrate (unlike showDock)", () => {
+    const migrated = prefs.migrate({ version: 1 });
+    assert.notStrictEqual(migrated.tutorialSeen, true);
+    // migrate never adds it; validate fills the false default so the user is unseen.
+    assert.strictEqual(prefs.validate(migrated).tutorialSeen, false);
+  });
+});
+
+describe("prefs.load fresh flag (brand-new install detection)", () => {
+  it("flags fresh: true when there is no prefs file", () => {
+    const p = makeTempPath();          // temp dir exists, prefs file does not
+    assert.strictEqual(prefs.load(p).fresh, true);
+  });
+
+  it("does NOT flag fresh once a file exists", () => {
+    const p = makeTempPath();
+    prefs.save(p, prefs.getDefaults());
+    assert.notStrictEqual(prefs.load(p).fresh, true);
+  });
+
+  it("does NOT flag fresh for a corrupt file (returning user — keep their language)", () => {
+    const p = makeTempPath();
+    fs.writeFileSync(p, "{ this is not valid json ");
+    assert.notStrictEqual(prefs.load(p).fresh, true);
+  });
+});
+
+describe("prefs.mapLocaleToLang (device locale → UI language)", () => {
+  const cases = [
+    ["en-US", "en"], ["en", "en"],
+    ["zh-CN", "zh"], ["zh-Hans", "zh"], ["zh", "zh"],
+    ["zh-TW", "zh-TW"], ["zh-Hant", "zh-TW"], ["zh-HK", "zh-TW"], ["zh-Hant-TW", "zh-TW"],
+    ["ko-KR", "ko"], ["ko", "ko"],
+    ["ja-JP", "ja"], ["ja", "ja"],
+    ["fr-FR", "en"], ["de", "en"],
+  ];
+  for (const [input, expected] of cases) {
+    it(`maps ${input} -> ${expected}`, () => {
+      assert.strictEqual(prefs.mapLocaleToLang(input), expected);
+    });
+  }
+
+  it("falls back to en for empty / non-string input", () => {
+    assert.strictEqual(prefs.mapLocaleToLang(""), "en");
+    assert.strictEqual(prefs.mapLocaleToLang(undefined), "en");
+    assert.strictEqual(prefs.mapLocaleToLang(null), "en");
+    assert.strictEqual(prefs.mapLocaleToLang(123), "en");
+  });
+
+  it("only ever returns a value inside the lang enum", () => {
+    const enumVals = new Set(["en", "zh", "zh-TW", "ko", "ja"]);
+    for (const probe of ["xx", "ZH-tw", "JA", "en-GB", "pt-BR", ""]) {
+      assert.ok(enumVals.has(prefs.mapLocaleToLang(probe)), `${probe} mapped outside enum`);
+    }
+  });
+});

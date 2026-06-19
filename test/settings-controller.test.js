@@ -241,6 +241,15 @@ describe("applyUpdate", () => {
     assert.match(r.message, /unknown settings key/);
   });
 
+  it("persists tutorialSeen through the normal update path", async () => {
+    const p = makeTempPath();
+    const ctrl = createSettingsController({ prefsPath: p });
+    const r = await ctrl.applyUpdate("tutorialSeen", true);
+    assert.strictEqual(r.status, "ok");
+    assert.strictEqual(ctrl.get("tutorialSeen"), true);
+    assert.strictEqual(prefs.load(p).snapshot.tutorialSeen, true);
+  });
+
   it("enforces cross-field constraints (showTray/showDock)", async () => {
     const ctrl = createSettingsController({
       prefsPath: makeTempPath(),
