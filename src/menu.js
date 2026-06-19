@@ -246,12 +246,6 @@ module.exports = function initMenu(ctx) {
         click: () => ctx.openSettingsWindow(),
       },
     ];
-    if (typeof ctx.showTutorial === "function") {
-      appGroup.push({
-        label: t("tutorialReplayMenuLabel"),
-        click: () => ctx.showTutorial(),
-      });
-    }
     // #329: surface the update item alongside the app actions. The label
     // switches to "Update available · vX" / "Update Ready" when applicable.
     if (typeof ctx.getUpdateMenuItem === "function") {
@@ -464,12 +458,6 @@ module.exports = function initMenu(ctx) {
         click: () => ctx.openSettingsWindow(),
       },
     ];
-    if (typeof ctx.showTutorial === "function") {
-      appGroup.push({
-        label: t("tutorialReplayMenuLabel"),
-        click: () => ctx.showTutorial(),
-      });
-    }
     // #329: surface the update item alongside the other app actions when one is
     // available.
     if (typeof ctx.getUpdateMenuItem === "function") {
@@ -538,4 +526,3 @@ module.exports = function initMenu(ctx) {
     requestAppQuit,
   };
 };
-
