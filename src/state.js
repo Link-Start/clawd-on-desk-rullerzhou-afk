@@ -100,6 +100,11 @@ const COMPLETION_CANCEL_EVENTS = new Set([
 // UserPromptSubmit lands within hook-spawn latency (~0.3s) of the Stop, so a
 // 2s quiet window absorbs it; a genuinely final Stop just celebrates 2s late.
 const HEADLESS_COMPLETION_DEBOUNCE_MS = 2000;
+// Claude Desktop can leave a background_tasks entry attached to a user-visible
+// final Stop even after the assistant reply is complete. Treat that bg-only
+// Stop as tentative, not permanently working, when the hook also extracted the
+// assistant's final text.
+const BACKGROUND_TASKS_COMPLETION_DEBOUNCE_MS = 2000;
 function getCompletionDebounceMs(headless) {
   const raw = process.env.CLAWD_COMPLETION_DEBOUNCE_MS;
   const n = Number.parseInt(raw, 10);
@@ -111,6 +116,12 @@ function getCompletionDebounceMs(headless) {
   // user otherwise wants the celebration the instant the turn ends. Headless
   // sessions default to the #449 window above.
   return headless ? HEADLESS_COMPLETION_DEBOUNCE_MS : 0;
+}
+function getBackgroundTasksCompletionDebounceMs(headless) {
+  const raw = process.env.CLAWD_COMPLETION_DEBOUNCE_MS;
+  const n = Number.parseInt(raw, 10);
+  if (Number.isFinite(n) && n >= 0 && n <= 10000) return n;
+  return Math.max(getCompletionDebounceMs(headless), BACKGROUND_TASKS_COMPLETION_DEBOUNCE_MS);
 }
 let lastSessionSnapshotSignature = null;
 let lastSessionSnapshot = null;
@@ -1040,12 +1051,12 @@ function updateSessionFocusMetadata(sessionId, opts = {}) {
 
 // ── #406 Stop completion gate ──
 // A Claude "Stop" maps to "attention" (celebrate + complete sound), but a Stop
-// is not always a real turn completion. Decidable-now signals (live
-// background_tasks/session_crons, or a stop_hook_active continuation) are held
-// as "working" by updateSession directly. For a plain Stop we debounce: hold
-// "working" and only celebrate if no forward-progress event for the session
-// arrives within the window — this catches a third-party Stop hook that vetoes
-// the stop (Claude keeps going) without us ever seeing the veto.
+// is not always a real turn completion. Decidable-now signals (live crons,
+// background tasks with no final assistant text, or a stop_hook_active
+// continuation) are held as "working" by updateSession directly. Plain Stops
+// and bg-only Stops with final assistant text can be debounced: hold "working"
+// and only celebrate if no forward-progress event for the session arrives
+// within the window.
 function scheduleCompletionDebounce(sessionId, debounceMs) {
   const existing = pendingCompletionTimers.get(sessionId);
   if (existing) clearTimeout(existing);
@@ -1270,9 +1281,9 @@ function updateSession(sessionId, state, event, opts = {}) {
   //   · live background_tasks / session_crons → work continues in the bg
   //   · stop_hook_active → a Stop hook vetoed the stop; Claude will continue
   //   · a third-party Stop hook can veto THIS stop, invisibly to us → debounce
-  // The first two are decidable now: hold "working" (badge stays "running", no
-  // celebrate, no "done"). A plain Stop is debounced — held "working" until a
-  // quiet window with no forward-progress event confirms the turn really ended.
+  // Hard gates hold "working" (badge stays "running", no celebrate, no
+  // "done"). A plain Stop, and a bg-only Stop that already has final assistant
+  // text, can be debounced until a quiet window confirms the turn really ended.
   if (
     !duplicateCompletionVisualAtEntry
     && event === "Stop"
@@ -1280,10 +1291,16 @@ function updateSession(sessionId, state, event, opts = {}) {
     && srcAgentId === "claude-code"
   ) {
     cancelCompletionDebounce(sessionId, "stop-superseded");
-    const liveWork =
-      backgroundTasksCount > 0 || sessionCronsCount > 0 || stopHookActive === true;
-    const debounceMs = getCompletionDebounceMs(srcHeadless);
-    if (liveWork || debounceMs > 0) {
+    const hasFinalAssistantText = !!srcAssistantLastOutput;
+    const hardLiveWork =
+      sessionCronsCount > 0 ||
+      stopHookActive === true ||
+      (backgroundTasksCount > 0 && !hasFinalAssistantText);
+    const backgroundDebounceMs = backgroundTasksCount > 0 && hasFinalAssistantText
+      ? getBackgroundTasksCompletionDebounceMs(srcHeadless)
+      : 0;
+    const debounceMs = Math.max(getCompletionDebounceMs(srcHeadless), backgroundDebounceMs);
+    if (hardLiveWork || debounceMs > 0) {
       // Hold the Stop as "working" and DROP the event to null so recentEvents
       // keeps NO "Stop" tail while held. Why null and not "Stop": deriveSessionBadge
       // only inspects the latest event, so a withheld Stop tail would (a) be
@@ -1294,16 +1311,22 @@ function updateSession(sessionId, state, event, opts = {}) {
       // the quiet window confirms the turn actually ended.
       state = "working";
       event = null;
-      if (liveWork) {
+      if (hardLiveWork) {
         debugSession(
           `stop-gate sid=${sessionId} bg=${backgroundTasksCount} crons=${sessionCronsCount} active=${stopHookActive} action=hold-working`
         );
-        // liveWork never auto-promotes; a later plain Stop (no bg work) will.
+        // Hard live work never auto-promotes; a later plain Stop (no hard
+        // blockers) will.
       } else {
+        if (backgroundTasksCount > 0) {
+          debugSession(
+            `stop-gate sid=${sessionId} bg=${backgroundTasksCount} crons=${sessionCronsCount} active=${stopHookActive} action=debounce-working`
+          );
+        }
         scheduleCompletionDebounce(sessionId, debounceMs);
       }
     }
-    // debounceMs <= 0 && !liveWork → keep "attention" (immediate celebration).
+    // debounceMs <= 0 && !hardLiveWork → keep "attention" (immediate celebration).
   }
 
   // Qwen Code 0.16.1 self-submit guard. qwen's agentic loop fires a synthetic
