@@ -411,6 +411,29 @@ describe("renderer low-power idle mode", () => {
     assert.equal(harness.api.activeSwapToken, firstSwapToken + 1);
   });
 
+  it("settles an in-flight wake when a state change supersedes its object reload", () => {
+    const harness = createRendererHarness();
+    attachFakeSvgDocument(harness.clawd, { withEyes: true });
+    harness.api.setCurrentState("idle");
+    harness.api.setLowPowerIdleMode(true);
+
+    harness.electronHandlers.onSystemWake({ id: "wake-state-1", trigger: "resume", attempt: 0 });
+    const wakeObject = harness.api.pendingNext;
+    harness.electronHandlers.onStateChange("working", "working.svg");
+
+    assert.equal(wakeObject.isConnected, false);
+    const firstReport = harness.electronCalls.find((call) => (
+      call.name === "reportSystemWakeStatus" && call.args[0].id === "wake-state-1"
+    ));
+    assert.ok(firstReport, "superseded wake must report instead of timing out");
+
+    harness.electronHandlers.onSystemWake({ id: "wake-state-2", trigger: "resume", attempt: 0 });
+    const secondReport = harness.electronCalls.find((call) => (
+      call.name === "reportSystemWakeStatus" && call.args[0].id === "wake-state-2"
+    ));
+    assert.ok(secondReport, "a superseded wake must not block later wake ids");
+  });
+
   it("rebuilds a stale eye-tracking object whose old document still looks alive", () => {
     const harness = createRendererHarness();
     const originalSvg = attachFakeSvgDocument(harness.clawd, { withEyes: true });

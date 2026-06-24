@@ -795,18 +795,26 @@ function forceImageChannelReload(file, state, allowImageFallback = true) {
   return true;
 }
 
+function cancelPendingSwap(reason = "superseded") {
+  const next = pendingNext;
+  if (!next) return false;
+  if (typeof next.__clawdSwapCancelled === "function") {
+    next.__clawdSwapCancelled(reason);
+  }
+  if (next.tagName === "OBJECT") releaseObject(next);
+  else releaseImg(next);
+  if (pendingNext === next) {
+    pendingNext = null;
+    pendingSvgFile = null;
+    pendingAssetUrl = null;
+  }
+  return true;
+}
+
 function swapToFile(file, state, useObjectChannel, options = {}) {
   const swapToken = ++activeSwapToken;
   const allowImageFallback = options.allowImageFallback !== false;
-  if (pendingNext) {
-    if (typeof pendingNext.__clawdSwapCancelled === "function") {
-      pendingNext.__clawdSwapCancelled("superseded");
-    }
-    if (pendingNext.tagName === "OBJECT") releaseObject(pendingNext);
-    else releaseImg(pendingNext);
-    pendingNext = null;
-    pendingAssetUrl = null;
-  }
+  cancelPendingSwap();
 
   pendingSvgFile = file; // track what's loading for dedup
   const useObj = useObjectChannel !== undefined ? useObjectChannel : needsObjectChannel(state, file);
@@ -1019,13 +1027,7 @@ function renderStateFile(state, svg) {
   }
 
   // Different file — cancel pending, detach, and swap
-  if (pendingNext) {
-    if (pendingNext.tagName === "OBJECT") releaseObject(pendingNext);
-    else releaseImg(pendingNext);
-    pendingNext = null;
-    pendingSvgFile = null;
-    pendingAssetUrl = null;
-  }
+  cancelPendingSwap();
   detachEyeTracking();
 
   swapToFile(effectiveSvg, state, lowPowerStaticImageOverride ? false : undefined);
