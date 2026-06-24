@@ -424,6 +424,28 @@ describe("tick adaptive polling", () => {
     assert.equal(eyeMoves.length, 1);
   });
 
+  it("keeps eye-position dedup active before low-power pause engages", () => {
+    const theme = cloneTheme(_defaultTheme);
+    const eyeMoves = [];
+
+    ctx = makeCtx(theme, statesSeen);
+    ctx.lowPowerIdleMode = true;
+    ctx.lowPowerIdlePaused = false;
+    ctx.sendToRenderer = (channel, ...args) => {
+      if (channel === "eye-move") eyeMoves.push(args);
+    };
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+
+    mock.timers.tick(1);
+    cursor = { x: 1000, y: 1000 };
+    mock.timers.tick(100);
+    cursor = { x: 1001, y: 1001 };
+    mock.timers.tick(100);
+
+    assert.equal(eyeMoves.length, 1);
+  });
+
   it("keeps eye-move IPC suppressed while the mouse remains still in low-power pause", () => {
     const theme = cloneTheme(_defaultTheme);
     const eyeMoves = [];

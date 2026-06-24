@@ -322,7 +322,7 @@ function runMainTickOnce() {
     if (!moved && !ctx.forceEyeResend) return nextDelay();
 
     // ── Eye position calculation (shared by idle and mini-idle) ──
-    const skipDedup = ctx.forceEyeResend || (ctx.lowPowerIdleMode && moved);
+    const skipDedup = ctx.forceEyeResend || (ctx.lowPowerIdlePaused && moved);
     ctx.forceEyeResend = false;
 
     if (!bounds) {
