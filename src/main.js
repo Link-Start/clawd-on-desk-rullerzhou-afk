@@ -1479,6 +1479,7 @@ const _tickCtx = {
   get dragLocked() { return petWindowRuntime.isDragLocked(); },
   get menuOpen() { return menuOpen; },
   get idlePaused() { return idlePaused; },
+  get lowPowerIdleMode() { return lowPowerIdleMode; },
   get lowPowerIdlePaused() { return lowPowerIdlePaused; },
   get isAnimating() { return _mini.getIsAnimating(); },
   get miniSleepPeeked() { return _mini.getMiniSleepPeeked(); },
@@ -1500,6 +1501,9 @@ const _tickCtx = {
   getObjRect,
   getHitRectScreen,
   getAssetPointerPayload,
+  onSystemWakeGap: (gapMs) => {
+    if (systemWakeRecovery) systemWakeRecovery.trigger("tick-gap", { gapMs });
+  },
   get roam() { return _roam; },
 };
 const _tick = require("./tick")(_tickCtx);

@@ -547,3 +547,51 @@ describe("tick adaptive polling", () => {
     assert.equal(cursorCalls, callsAfterEyeMove + 1);
   });
 });
+
+describe("tick system wake gap fallback", () => {
+  let loader;
+  let tickApi;
+
+  beforeEach(() => {
+    mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    loader = loadTickWithScreen(() => ({ x: 40, y: 40 }));
+  });
+
+  afterEach(() => {
+    if (tickApi) tickApi.cleanup();
+    if (loader) loader.restore();
+    mock.timers.reset();
+    tickApi = null;
+  });
+
+  it("reports a large overdue tick while low power idle mode is active", () => {
+    const gaps = [];
+    const ctx = makeCtx(cloneTheme(_defaultTheme), []);
+    ctx.lowPowerIdleMode = true;
+    ctx.onSystemWakeGap = (gapMs) => gaps.push(gapMs);
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+    mock.timers.tick(1);
+
+    // Move wall time without executing timers, like an OS suspend. The next
+    // timer turn must detect that its scheduled deadline is far overdue.
+    mock.timers.setTime(Date.now() + 5000);
+    mock.timers.tick(1);
+
+    assert.equal(gaps.length, 1);
+    assert.ok(gaps[0] >= 3000);
+  });
+
+  it("does not report the same overdue tick when low power idle mode is disabled", () => {
+    const gaps = [];
+    const ctx = makeCtx(cloneTheme(_defaultTheme), []);
+    ctx.lowPowerIdleMode = false;
+    ctx.onSystemWakeGap = (gapMs) => gaps.push(gapMs);
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+    mock.timers.tick(1);
+
+    assert.equal(tickApi.detectSystemWakeGap(Date.now() + 5000), null);
+    assert.deepEqual(gaps, []);
+  });
+});

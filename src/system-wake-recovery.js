@@ -3,7 +3,7 @@
 const RETRY_DELAYS_MS = Object.freeze([0, 250, 1000, 2500]);
 const WAKE_DEDUPE_MS = 500;
 const WAKE_TIMEOUT_MS = 3500;
-const VALID_TRIGGERS = new Set(["resume", "unlock-screen"]);
+const VALID_TRIGGERS = new Set(["resume", "unlock-screen", "tick-gap"]);
 const VALID_RESULTS = new Set(["resumed", "no-svg", "error"]);
 
 function requiredDependency(value, name) {
@@ -70,13 +70,18 @@ function createSystemWakeRecovery(options = {}) {
     activeWake = null;
     log(
       `system-wake id=${wake.id} trigger=${wake.trigger} result=timeout ` +
-      "receiptMs=- lowPowerWasPaused=- pauseStyleRemoved=- eyeTrackingReady=-"
+      `receiptMs=- gapMs=${wake.gapMs == null ? "-" : wake.gapMs} ` +
+      "lowPowerWasPaused=- pauseStyleRemoved=- eyeTrackingReady=-"
     );
   }
 
-  function trigger(trigger) {
+  function trigger(trigger, metadata = {}) {
     if (!VALID_TRIGGERS.has(trigger)) return null;
     const startedAt = Number(now());
+    const rawGapMs = Number(metadata.gapMs);
+    const gapMs = Number.isFinite(rawGapMs)
+      ? Math.max(0, Math.min(Math.round(rawGapMs), 24 * 60 * 60 * 1000))
+      : null;
 
     // Windows commonly emits resume and unlock-screen as one burst. Keep one
     // wake id even if the renderer acknowledges before the second event lands.
@@ -87,6 +92,7 @@ function createSystemWakeRecovery(options = {}) {
       id: `wake-${Math.max(0, startedAt).toString(36)}-${++wakeSequence}`,
       trigger,
       startedAt,
+      gapMs,
       timers: [],
       timeoutTimer: null,
     };
@@ -121,7 +127,8 @@ function createSystemWakeRecovery(options = {}) {
     }
     log(
       `system-wake id=${wake.id} trigger=${wake.trigger} result=${status.result} ` +
-      `receiptMs=${receiptMs} lowPowerWasPaused=${status.lowPowerWasPaused ? 1 : 0} ` +
+      `receiptMs=${receiptMs} gapMs=${wake.gapMs == null ? "-" : wake.gapMs} ` +
+      `lowPowerWasPaused=${status.lowPowerWasPaused ? 1 : 0} ` +
       `pauseStyleRemoved=${status.pauseStyleRemoved ? 1 : 0} ` +
       `eyeTrackingReady=${status.eyeTrackingReady ? 1 : 0}`
     );

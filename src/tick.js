@@ -26,6 +26,7 @@ const BOOST_TICK_MS = 100;
 const IDLE_TICK_MS = 250;
 const LOW_POWER_IDLE_TICK_MS = 5000;
 const LOW_POWER_MINI_IDLE_TICK_MS = 2000;
+const SYSTEM_WAKE_TICK_OVERDUE_MS = 3000;
 const REACTION_TICK_MS = 500;
 const BACKGROUND_TICK_MS = 750;
 const RECENT_MOUSE_MS = 2000;
@@ -145,7 +146,17 @@ function shouldSuppressPassiveIpc() {
   return !!ctx.lowPowerIdlePaused && LOW_POWER_PAUSE_STATES.has(ctx.currentState);
 }
 
+function detectSystemWakeGap(nowMs = Date.now()) {
+  if (!ctx.lowPowerIdleMode || !LOW_POWER_PAUSE_STATES.has(ctx.currentState)) return null;
+  if (!nextMainTickAt) return null;
+  const overdueMs = Math.max(0, Number(nowMs) - nextMainTickAt);
+  if (overdueMs < SYSTEM_WAKE_TICK_OVERDUE_MS) return null;
+  if (typeof ctx.onSystemWakeGap === "function") ctx.onSystemWakeGap(overdueMs);
+  return overdueMs;
+}
+
 function runMainTick() {
+  detectSystemWakeGap();
   mainTickTimer = null;
   nextMainTickAt = 0;
   const delay = runMainTickOnce();
@@ -389,6 +400,14 @@ Object.defineProperty(startMainTick, '_mouseStillSince', {
   get() { return mouseStillSince; },
 });
 
-return { startMainTick, resetIdleTimer, cleanup, refreshTheme, scheduleSoon, get _mouseStillSince() { return mouseStillSince; } };
+return {
+  startMainTick,
+  resetIdleTimer,
+  cleanup,
+  refreshTheme,
+  scheduleSoon,
+  detectSystemWakeGap,
+  get _mouseStillSince() { return mouseStillSince; },
+};
 
 };

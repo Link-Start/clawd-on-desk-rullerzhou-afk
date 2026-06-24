@@ -137,6 +137,25 @@ describe("system wake recovery", () => {
     assert.equal(harness.clock.pendingCount(), 0);
   });
 
+  it("accepts a tick-gap fallback and records its bounded gap", () => {
+    const harness = createHarness();
+    harness.runtime.trigger("tick-gap", { gapMs: 4321.4 });
+    const id = harness.sent[0].payload.id;
+
+    assert.equal(harness.sent[0].payload.trigger, "tick-gap");
+    harness.ipcMain.emit("system-wake-status", {}, {
+      id,
+      result: "resumed",
+      lowPowerWasPaused: true,
+      pauseStyleRemoved: true,
+      eyeTrackingReady: true,
+    });
+
+    assert.equal(harness.logs.length, 1);
+    assert.match(harness.logs[0], /trigger=tick-gap/);
+    assert.match(harness.logs[0], /gapMs=4321/);
+  });
+
   it("ignores malformed and stale receipts", () => {
     const harness = createHarness();
     harness.powerMonitor.emit("resume");
