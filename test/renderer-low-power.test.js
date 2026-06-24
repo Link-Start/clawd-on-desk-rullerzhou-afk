@@ -244,21 +244,26 @@ describe("renderer low-power idle mode", () => {
     assert.ok(source.includes("if (!lowPowerIdleMode && !lowPowerSvgPaused) return;"));
   });
 
-  it("does not treat passive eye or pointer tracking as low-power activity", () => {
-    const source = readNormalized(RENDERER);
-    const eyeHandler = matchSource(
-      source,
-      /window\.electronAPI\.onEyeMove\(\(dx, dy\) => \{([\s\S]*?)\n\}\);/,
-      "missing eye-move handler"
-    )[1];
-    const pointerHandler = matchSource(
-      source,
-      /window\.electronAPI\.onCloudlingPointer\(\(payload\) => \{([\s\S]*?)\n\s+\}\);/,
-      "missing Cloudling pointer handler"
-    )[1];
+  it("resumes a low-power-paused eye target when the mouse moves", () => {
+    const harness = createRendererHarness();
+    attachFakeSvgDocument(harness.clawd, { withEyes: true });
+    harness.api.setCurrentState("idle");
+    harness.api.setLowPowerIdleMode(true);
+    harness.api.attachEyeTracking(harness.clawd);
+    harness.api.pauseCurrentSvgForLowPower();
+    assert.equal(harness.api.lowPowerSvgPaused, true);
 
-    assert.ok(!eyeHandler.includes("noteLowPowerActivity()"));
-    assert.ok(!pointerHandler.includes("noteLowPowerActivity()"));
+    harness.electronHandlers.onEyeMove(2, -1);
+
+    assert.equal(harness.api.lowPowerSvgPaused, false);
+    assert.equal(harness.api.eyeTarget.getAttribute("transform"), "translate(2, -1)");
+    const firstActivityTimer = harness.activeTimers().find((timer) => timer.ms === 5000 && !timer.cleared);
+    assert.ok(firstActivityTimer);
+
+    harness.electronHandlers.onEyeMove(3, -1);
+
+    assert.equal(firstActivityTimer.cleared, true);
+    assert.ok(harness.activeTimers().some((timer) => timer.ms === 5000 && !timer.cleared));
   });
 
   it("suppresses passive tracking while low-power paused and cancels layered RAF", () => {

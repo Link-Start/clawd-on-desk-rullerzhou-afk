@@ -1452,6 +1452,8 @@ window.electronAPI.onEyeMove((dx, dy) => {
   lastEyeDx = effectiveDx;
   lastEyeDy = dy;
 
+  if (lowPowerIdleMode) noteLowPowerActivity();
+
   if (shouldSuppressPassiveTrackingForLowPower()) {
     _cancelLayerAnimLoop();
     return;
