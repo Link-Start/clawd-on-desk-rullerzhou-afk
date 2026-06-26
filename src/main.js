@@ -1211,6 +1211,20 @@ function beginDragSnapshot() { return petWindowRuntime.beginDragSnapshot(); }
 function clearDragSnapshot() { return petWindowRuntime.clearDragSnapshot(); }
 function moveWindowForDrag() { return petWindowRuntime.moveWindowForDrag(); }
 
+// Windows-only (#538 drag focus-steal): the topmost watchdog calls this each
+// tick with the inverse of the fullscreen state. While a fullscreen app owns
+// the foreground we drop the hit window's activation so a click on the pet
+// can't steal focus from an exclusive-fullscreen game and minimize it; we
+// restore it when fullscreen ends because dragging needs activation (#545).
+// Idempotent via isFocusable() so the per-tick call is a no-op when unchanged.
+function setHitWinFocusable(focusable) {
+  if (!isWin) return;
+  if (!hitWin || hitWin.isDestroyed() || typeof hitWin.setFocusable !== "function") return;
+  const next = !!focusable;
+  if (typeof hitWin.isFocusable === "function" && hitWin.isFocusable() === next) return;
+  hitWin.setFocusable(next);
+}
+
 // ── Mini Mode — delegated to src/mini.js ──
 // Initialized after state module (needs applyState, resolveDisplayState, etc.)
 // See _mini initialization below
@@ -1232,6 +1246,7 @@ const topmostRuntime = createTopmostRuntime({
   isMiniAnimating: () => _mini.getIsAnimating(),
   isMiniTransitioning: () => _mini.getMiniTransitioning(),
   isForegroundFullscreen: () => _isForegroundFullscreen(),
+  setHitWinFocusable,
   keepOutOfTaskbar,
   setForceEyeResend,
   applyPetWindowPosition,

@@ -72,6 +72,25 @@ describe("topmost runtime Windows recovery", () => {
     assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL]]);
   });
 
+  it("reassertWinTopmost stands down while a fullscreen app is foreground (#538)", () => {
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      isForegroundFullscreen: () => true,
+    });
+
+    runtime.reassertWinTopmost();
+
+    // Drag-move (near a work-area edge), drag-end, and HWND recovery all funnel
+    // through reassertWinTopmost; under a fullscreen foreground none of them may
+    // claw the pet/hit windows back over the game (#538 drag regression).
+    assert.deepStrictEqual(win.calls, []);
+    assert.deepStrictEqual(hitWin.calls, []);
+  });
+
   it("guards main-window topmost loss by nudging input routing and scheduling recovery", () => {
     const timers = makeTimers();
     const win = new FakeWindow();
@@ -435,6 +454,35 @@ describe("topmost runtime Windows recovery", () => {
     assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL]]);
   });
 
+  it("watchdog drops hit-window activation under fullscreen and restores it otherwise (#538)", () => {
+    const timers = makeTimers();
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    const focusableCalls = [];
+    let fullscreen = true;
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      isForegroundFullscreen: () => fullscreen,
+      setHitWinFocusable: (focusable) => focusableCalls.push(focusable),
+      setInterval: timers.setInterval,
+      clearInterval: timers.clearInterval,
+    });
+
+    runtime.startTopmostWatchdog();
+
+    // Fullscreen tick: the hit window is made non-activating so a click on the
+    // pet can't steal focus from the game and minimize it.
+    timers.intervals[0].fn();
+    assert.deepStrictEqual(focusableCalls, [false]);
+
+    // Leaving fullscreen restores activation so dragging works again (#545).
+    fullscreen = false;
+    timers.intervals[0].fn();
+    assert.deepStrictEqual(focusableCalls, [false, true]);
+  });
+
   it("guardAlwaysOnTop still reasserts helper windows while a fullscreen app is foreground (#538)", () => {
     const win = new FakeWindow();
     const hitWin = new FakeWindow();
@@ -476,6 +524,27 @@ describe("topmost runtime Windows recovery", () => {
     // No re-top, no 1px nudge, and no HWND-recovery timer scheduled.
     assert.deepStrictEqual(win.calls, []);
     assert.strictEqual(timers.timeouts.length, 0);
+  });
+
+  it("guardAlwaysOnTop does not fight hit-window topmost loss while a fullscreen app is foreground (#538)", () => {
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      isForegroundFullscreen: () => true,
+    });
+
+    runtime.guardAlwaysOnTop(hitWin);
+    hitWin.emit("always-on-top-changed", null, false);
+
+    // The hit layer is the other half of the pet pair — under a fullscreen
+    // foreground it must stand down too, not just the render window. Without
+    // the hitLayerWin branch this would fall through to the else and re-top the
+    // hit window back over the game.
+    assert.deepStrictEqual(hitWin.calls, []);
+    assert.deepStrictEqual(win.calls, []);
   });
 });
 

@@ -40,6 +40,13 @@ function createTopmostRuntime(options = {}) {
   // every tick (#538). Defaults to "never fullscreen" so non-Windows and any
   // FFI-load failure keep the original always-reassert behavior.
   const isForegroundFullscreen = options.isForegroundFullscreen || (() => false);
+  // Windows-only: toggle the hit window's activation with the fullscreen state.
+  // While a fullscreen app owns the foreground we make the hit window
+  // non-activating so a click on the pet can't steal focus from an
+  // exclusive-fullscreen game and minimize it; we re-enable activation when
+  // fullscreen ends because dragging needs it (#545). No-op off Windows / when
+  // unset. (#538 drag focus-steal)
+  const setHitWinFocusable = options.setHitWinFocusable || (() => {});
   const setForceEyeResend = options.setForceEyeResend || (() => {});
   const applyPetWindowPosition = options.applyPetWindowPosition || (() => {});
   const syncHitWin = options.syncHitWin || (() => {});
@@ -58,6 +65,14 @@ function createTopmostRuntime(options = {}) {
 
   function reassertWinTopmost() {
     if (!isWin) return;
+    // A fullscreen foreground app owns the screen — stand down so the pet/hit
+    // windows don't claw their topmost band back over it. This is the same
+    // #538 stand-down the watchdog and always-on-top guard already apply, but
+    // it has to live here too: dragging funnels through this function both
+    // mid-drag (pet-window-runtime nudges topmost near a work-area edge) and on
+    // drag-end, and HWND recovery re-enters it on a timer. Without the guard a
+    // single drag would yank the pet back in front of the fullscreen game.
+    if (isForegroundFullscreen()) return;
     const win = getWin();
     const hitWin = getHitWin();
     if (isLiveWindow(win)) win.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
@@ -173,7 +188,7 @@ function createTopmostRuntime(options = {}) {
         winToGuard.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
       }
       if (
-        winToGuard === getWin()
+        winToGuard === renderWin
         && !isDragLocked()
         && !isMiniAnimating()
         && !isMiniTransitioning()
@@ -211,6 +226,12 @@ function createTopmostRuntime(options = {}) {
       // Permission bubbles / HUD below are deliberate interruptions the user
       // must act on, so they keep re-asserting even over a fullscreen app.
       const skipTopmost = isForegroundFullscreen();
+      // Keep the hit window non-activating while a fullscreen app is foreground
+      // so a click on the pet can't yank focus off an exclusive-fullscreen game
+      // and minimize it; re-enable activation (drag needs it, #545) once it
+      // ends. The switch lags by up to one watchdog interval after entering
+      // fullscreen — an accepted trade-off of the watchdog-driven approach.
+      setHitWinFocusable(!skipTopmost);
       reassertWindowAndTaskbar(getWin(), { skipTopmost });
       reassertWindowAndTaskbar(getHitWin(), { skipTopmost });
 
