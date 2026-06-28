@@ -6,6 +6,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const { postStateToRunningServer, readHostPrefix } = require("./server-config");
+const { fitStateBodyToByteBudget } = require("./state-payload-size");
 const { extractClaudeContextUsageFromEntries } = require("./context-usage");
 const { createPidResolver, readStdinJson, getPlatformConfig } = require("./shared-process");
 
@@ -464,9 +465,21 @@ function main() {
     .then((payload) => {
       const body = buildStateBody(event, payload || {}, resolve);
       if (!body) process.exit(0);
+      // Completion events (Stop) fire the happy animation, are low-frequency,
+      // and matter more than a few ms of latency. Give them a generous POST
+      // timeout so a momentarily slow (but alive) Clawd still receives them;
+      // connection-refused (Clawd not running) still fails instantly, so an
+      // idle machine is never penalized. High-frequency events keep 100ms so
+      // they never stall the agent.
+      const isCompletionEvent = body.event === "Stop";
+      const statePostTimeoutMs = isCompletionEvent ? 1500 : 100;
+      // Byte-fit the body so a long CJK assistant_last_output can't push it past
+      // the server's /state cap and trigger a headerless 413 (read back as
+      // posted=false, dropping the happy completion). hooks/state-payload-size.js.
+      const fitted = fitStateBodyToByteBudget(body);
       postStateToRunningServer(
-        JSON.stringify(body),
-        { timeoutMs: 100 },
+        JSON.stringify(fitted.body),
+        { timeoutMs: statePostTimeoutMs },
         () => process.exit(0)
       );
     })

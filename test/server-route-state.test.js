@@ -302,6 +302,25 @@ describe("server-route-state POST", () => {
     assert.strictEqual(res.body, "state payload too large");
   });
 
+  it("accepts a large CJK Stop body now that the cap is 16KB (happy-413 regression)", async () => {
+    const body = JSON.stringify({
+      state: "attention",
+      session_id: "sid",
+      event: "Stop",
+      assistant_last_output: "字".repeat(2200), // ~6600 UTF-8 bytes
+    });
+    // Bigger than the OLD 4096 cap that silently 413'd CJK completions, yet
+    // within the new 16KB cap — the completion must register, not be rejected.
+    assert.ok(Buffer.byteLength(body, "utf8") > 4096);
+    assert.ok(Buffer.byteLength(body, "utf8") <= MAX_STATE_BODY_BYTES);
+
+    const res = await callStatePost(body);
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID);
+    assert.strictEqual(res.calls.updateSession.length, 1);
+  });
+
   it("returns 400 for invalid JSON", async () => {
     const res = await callStatePost("{not json");
 
