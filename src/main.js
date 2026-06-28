@@ -1261,6 +1261,7 @@ const {
   scheduleHwndRecovery,
   guardAlwaysOnTop,
   startTopmostWatchdog,
+  startFocusablePoll,
 } = topmostRuntime;
 
 // ── Permission bubble — delegated to src/permission.js ──
@@ -3533,6 +3534,7 @@ function createWindow() {
 
   guardAlwaysOnTop(win);
   startTopmostWatchdog();
+  startFocusablePoll();
 
   // display-metrics-changed fires in bursts during DPI changes and RDP
   // reconnects, and each one re-clamps/repositions the pet — running them all

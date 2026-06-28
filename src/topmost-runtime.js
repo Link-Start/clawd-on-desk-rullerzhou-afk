@@ -7,6 +7,12 @@ const {
 const WIN_TOPMOST_LEVEL = "pop-up-menu";  // above taskbar-level UI
 const MAC_TOPMOST_LEVEL = "screen-saver"; // above fullscreen apps on macOS
 const TOPMOST_WATCHDOG_MS = 5_000;
+// #562: the hit window's activation (focusable) tracks the fullscreen state on
+// its own fast timer, separate from the 5s topmost watchdog. Entering a
+// fullscreen game has to flip the hit window non-activating quickly — while it
+// still activates, an early click/drag can kick the game out of fullscreen — so
+// this polls ~1s instead of riding the slow watchdog (which left a ~5s window).
+const FOCUSABLE_POLL_MS = 1_000;
 const HWND_RECOVERY_DELAY_MS = 1000;
 
 function isLiveWindow(win) {
@@ -63,11 +69,15 @@ function createTopmostRuntime(options = {}) {
   const setTimeoutFn = options.setTimeout || setTimeout;
   const clearTimeoutFn = options.clearTimeout || clearTimeout;
   const watchdogMs = Number.isFinite(options.watchdogMs) ? options.watchdogMs : TOPMOST_WATCHDOG_MS;
+  const focusablePollMs = Number.isFinite(options.focusablePollMs)
+    ? options.focusablePollMs
+    : FOCUSABLE_POLL_MS;
   const hwndRecoveryDelayMs = Number.isFinite(options.hwndRecoveryDelayMs)
     ? options.hwndRecoveryDelayMs
     : HWND_RECOVERY_DELAY_MS;
 
   let topmostWatchdog = null;
+  let focusablePoll = null;
   let hwndRecoveryTimer = null;
   let pendingNudgeRestore = null;
 
@@ -236,16 +246,12 @@ function createTopmostRuntime(options = {}) {
       // Permission bubbles / HUD below are deliberate interruptions the user
       // must act on, so they keep re-asserting even over a fullscreen app.
       // #562: stand down topmost over a fullscreen foreground app UNLESS the
-      // user opted into overlay mode (then keep floating on top). The hit window
-      // goes non-activating whenever a fullscreen app owns the foreground
-      // (overlay or not) so a click can't steal focus and minimize an
-      // exclusive-fullscreen game; cursor-drag needs no activation, so overlay
-      // drag still works over a borderless game. Re-enable activation off
-      // fullscreen because desktop drag needs it (#545). The switch lags by up to
-      // one watchdog interval after entering fullscreen — accepted trade-off.
+      // user opted into overlay mode (then keep floating on top). The hit
+      // window's activation is handled separately on the faster focusable poll
+      // (startFocusablePoll) — float-on-top (topmost, here) and don't-steal-
+      // focus (focusable, there) are independent decisions (#562).
       const fsForeground = isForegroundFullscreen();
       const skipTopmost = fsForeground && !getFullscreenOverlay();
-      setHitWinFocusable(!fsForeground);
       reassertWindowAndTaskbar(getWin(), { skipTopmost });
       reassertWindowAndTaskbar(getHitWin(), { skipTopmost });
 
@@ -280,8 +286,40 @@ function createTopmostRuntime(options = {}) {
     }
   }
 
+  // #562: drop the hit window's activation whenever a fullscreen app owns the
+  // foreground (a click on the pet must never steal focus and kick an
+  // exclusive-fullscreen game out), and restore it otherwise (desktop drag
+  // needs activation, #545). Runs on its own ~1s timer instead of the 5s
+  // watchdog so entering fullscreen flips activation within ~1s — closing the
+  // window where an early drag could still kick the game out (#562). Decoupled
+  // from the overlay/topmost decision: focus is never stolen from a fullscreen
+  // app, overlay or not. setHitWinFocusable is idempotent (no-op unchanged).
+  function syncHitWinFocusable() {
+    if (!isWin) return;
+    setHitWinFocusable(!isForegroundFullscreen());
+  }
+
+  function startFocusablePoll() {
+    if (!isWin || focusablePoll) return;
+    // Sync once up front: if Clawd starts (or this re-arms) while a fullscreen
+    // game is already foreground, drop the hit window's activation immediately
+    // rather than leaving it activatable for up to one poll interval (the hit
+    // window is created focusable: true). Idempotent, so the desktop case is a
+    // no-op.
+    syncHitWinFocusable();
+    focusablePoll = setIntervalFn(syncHitWinFocusable, focusablePollMs);
+  }
+
+  function stopFocusablePoll() {
+    if (focusablePoll) {
+      clearIntervalFn(focusablePoll);
+      focusablePoll = null;
+    }
+  }
+
   function cleanup() {
     stopTopmostWatchdog();
+    stopFocusablePoll();
     if (hwndRecoveryTimer) {
       clearTimeoutFn(hwndRecoveryTimer);
       hwndRecoveryTimer = null;
@@ -297,6 +335,8 @@ function createTopmostRuntime(options = {}) {
     guardAlwaysOnTop,
     startTopmostWatchdog,
     stopTopmostWatchdog,
+    startFocusablePoll,
+    stopFocusablePoll,
     cleanup,
   };
 }
@@ -304,6 +344,7 @@ function createTopmostRuntime(options = {}) {
 createTopmostRuntime.WIN_TOPMOST_LEVEL = WIN_TOPMOST_LEVEL;
 createTopmostRuntime.MAC_TOPMOST_LEVEL = MAC_TOPMOST_LEVEL;
 createTopmostRuntime.TOPMOST_WATCHDOG_MS = TOPMOST_WATCHDOG_MS;
+createTopmostRuntime.FOCUSABLE_POLL_MS = FOCUSABLE_POLL_MS;
 createTopmostRuntime.HWND_RECOVERY_DELAY_MS = HWND_RECOVERY_DELAY_MS;
 
 module.exports = createTopmostRuntime;

@@ -371,7 +371,7 @@ describe("topmost runtime Windows recovery", () => {
     assert.strictEqual(timers.intervals[0].cleared, true);
   });
 
-  it("cleanup clears both the watchdog interval and pending HWND recovery", () => {
+  it("cleanup clears the watchdog, focusable poll, and pending HWND recovery", () => {
     const timers = makeTimers();
     const win = new FakeWindow();
     const runtime = createTopmostRuntime({
@@ -384,12 +384,13 @@ describe("topmost runtime Windows recovery", () => {
     });
 
     runtime.startTopmostWatchdog();
+    runtime.startFocusablePoll();
     runtime.scheduleHwndRecovery();
     runtime.cleanup();
 
-    assert.strictEqual(timers.intervals.length, 1);
+    assert.strictEqual(timers.intervals.length, 2);
     assert.strictEqual(timers.timeouts.length, 1);
-    assert.strictEqual(timers.intervals[0].cleared, true);
+    assert.ok(timers.intervals.every((interval) => interval.cleared));
     assert.strictEqual(timers.timeouts[0].cleared, true);
   });
 
@@ -454,7 +455,7 @@ describe("topmost runtime Windows recovery", () => {
     assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL]]);
   });
 
-  it("watchdog drops hit-window activation under fullscreen and restores it otherwise (#538)", () => {
+  it("focusable poll drops hit-window activation under fullscreen and restores it otherwise (#538/#562)", () => {
     const timers = makeTimers();
     const win = new FakeWindow();
     const hitWin = new FakeWindow();
@@ -470,17 +471,52 @@ describe("topmost runtime Windows recovery", () => {
       clearInterval: timers.clearInterval,
     });
 
-    runtime.startTopmostWatchdog();
+    runtime.startFocusablePoll();
 
-    // Fullscreen tick: the hit window is made non-activating so a click on the
-    // pet can't steal focus from the game and minimize it.
-    timers.intervals[0].fn();
+    // Up-front sync: starting while already fullscreen drops activation
+    // immediately, not after a full poll interval — closes the startup/restore
+    // window where the hit window (created focusable: true) could still steal
+    // the game's focus (#562). The poll runs at the ~1s focusable cadence, NOT
+    // the 5s watchdog.
+    assert.deepStrictEqual(focusableCalls, [false]);
+    assert.strictEqual(timers.intervals[0].ms, createTopmostRuntime.FOCUSABLE_POLL_MS);
+
+    runtime.startFocusablePoll();
+
+    // Idempotent: a second start neither registers another interval nor re-syncs.
+    assert.strictEqual(timers.intervals.length, 1);
     assert.deepStrictEqual(focusableCalls, [false]);
 
-    // Leaving fullscreen restores activation so dragging works again (#545).
+    // Leaving fullscreen restores activation on the next tick (drag needs it, #545).
     fullscreen = false;
     timers.intervals[0].fn();
     assert.deepStrictEqual(focusableCalls, [false, true]);
+
+    runtime.stopFocusablePoll();
+    assert.strictEqual(timers.intervals[0].cleared, true);
+  });
+
+  it("watchdog no longer toggles hit-window activation — that moved to the focusable poll (#562)", () => {
+    const timers = makeTimers();
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    const focusableCalls = [];
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      isForegroundFullscreen: () => true,
+      setHitWinFocusable: (focusable) => focusableCalls.push(focusable),
+      setInterval: timers.setInterval,
+      clearInterval: timers.clearInterval,
+    });
+
+    runtime.startTopmostWatchdog();
+    timers.intervals[0].fn();
+
+    // The watchdog handles only topmost/taskbar now; activation rides the
+    // separate fast poll so it can flip within ~1s of entering fullscreen.
+    assert.deepStrictEqual(focusableCalls, []);
   });
 
   it("guardAlwaysOnTop still reasserts helper windows while a fullscreen app is foreground (#538)", () => {
@@ -571,7 +607,31 @@ describe("topmost runtime Windows recovery", () => {
     assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL]]);
   });
 
-  it("watchdog floats the pet on top yet keeps it non-activating under fullscreen overlay (#562)", () => {
+  it("watchdog floats the pet on top under fullscreen overlay (#562)", () => {
+    const timers = makeTimers();
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      isForegroundFullscreen: () => true,
+      getFullscreenOverlay: () => true,
+      setInterval: timers.setInterval,
+      clearInterval: timers.clearInterval,
+    });
+
+    runtime.startTopmostWatchdog();
+    timers.intervals[0].fn();
+
+    // Topmost keeps re-asserting so the pet floats over the game (overlay opts
+    // out of the #538 stand-down). The decoupled focusable decision rides the
+    // focusable poll instead — see the overlay focusable-poll test below.
+    assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL]]);
+    assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL]]);
+  });
+
+  it("focusable poll keeps the hit window non-activating even in overlay mode (#562)", () => {
     const timers = makeTimers();
     const win = new FakeWindow();
     const hitWin = new FakeWindow();
@@ -587,15 +647,11 @@ describe("topmost runtime Windows recovery", () => {
       clearInterval: timers.clearInterval,
     });
 
-    runtime.startTopmostWatchdog();
-    timers.intervals[0].fn();
+    runtime.startFocusablePoll();
 
-    // Topmost keeps re-asserting so the pet floats over the game...
-    assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL]]);
-    assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL]]);
-    // ...but the decoupled focusable decision still drops activation: a
-    // fullscreen foreground must never have its focus stolen, overlay or not.
-    // This is the #562 fix — float-on-top and don't-steal-focus are independent.
+    // Overlay floats the pet on top (topmost), but focus must STILL never be
+    // stolen from the fullscreen game — float-on-top and don't-steal-focus are
+    // independent. The up-front sync drops activation immediately, overlay or not.
     assert.deepStrictEqual(focusableCalls, [false]);
   });
 
