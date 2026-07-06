@@ -21,6 +21,7 @@ const {
 } = require("./telegram-native-client");
 
 const { EVENTS } = require("./telegram-migration-state");
+const { createTranslator } = require("./i18n");
 
 const APPROVAL_CALLBACK_RE = /^cp:([a-z0-9]+):(a|d|s(\d+))$/;
 const LEGACY_APPROVAL_CALLBACK_RE = /^clawdperm:([a-z0-9]+):(allow|deny)$/;
@@ -36,26 +37,31 @@ const MAX_NOTIFY_RETRY_DELAY_MS = 30000;
 const DEFAULT_POLL_RETRY_INITIAL_MS = 1000;
 const DEFAULT_POLL_RETRY_MAX_MS = 30000;
 
-// Status lines appended to an approval card whose decision landed somewhere
+// Status line appended to an approval card whose decision landed somewhere
 // other than this Telegram chat, so the chat history shows the outcome
 // (issue #457). Keyed by the reason finishApproval received a null decision.
 // `elsewhere` is deliberately neutral: a signal abort covers more than a
 // desktop answer — the settings approval test arms a 60s abort, and DND /
 // dismissed interactive bubbles also abort without anything being "resolved".
-const APPROVAL_RESOLVED_ELSEWHERE_STATUS = Object.freeze({
-  elsewhere: "\u2705 Resolved outside Telegram",
-  timeout: "\u23F3 Timed out",
-  stopped: "\u23F9\uFE0F Session ended",
-});
+// Reads from `t` at call time (not a module-level constant) so the label
+// follows the app's current language, not whatever it was when this module
+// first loaded.
+function approvalResolvedElsewhereStatusText(t, reason) {
+  if (reason === "elsewhere") return t("telegramApprovalStatusResolvedElsewhere");
+  if (reason === "timeout") return t("telegramApprovalStatusTimedOut");
+  if (reason === "stopped") return t("telegramApprovalStatusSessionEnded");
+  return undefined;
+}
 
-// Status lines for a decision taken on Telegram itself (a button tap). The
+// Status line for a decision taken on Telegram itself (a button tap). The
 // callback toast is instant but ephemeral; rewriting the card body leaves the
 // outcome in the chat history, symmetric with the resolved-elsewhere path.
-const APPROVAL_DECIDED_STATUS = Object.freeze({
-  allow: "\u2705 Allowed",
-  deny: "\u274C Denied",
-  suggestion: "\u2705 Applied",
-});
+function approvalDecidedStatusText(t, action) {
+  if (action === "allow") return t("telegramApprovalStatusAllowed");
+  if (action === "deny") return t("telegramApprovalStatusDenied");
+  if (action === "suggestion") return t("telegramApprovalStatusApplied");
+  return undefined;
+}
 
 function randomId() {
   return Math.random().toString(36).slice(2, 12);
@@ -138,6 +144,7 @@ function createTelegramNativeRunner({
   getDispatch,        // () => migrationController.dispatch (lazy for cycle)
   getChatId,          // () => "<chat id>" (number-string)
   getAllowedUserId,   // () => "<user id>"
+  getLang = () => "en", // () => current app language, for approval card / button text
   onCommand = null,   // async ({ command, args, chatId, fromId }) => text | { text }
   isCommandEnabled = () => true,
   onTextMessage = null, // async ({ text, messageId, replyToMessageId, chatId, fromId }) => text | { text }
@@ -152,6 +159,7 @@ function createTelegramNativeRunner({
   sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); if (t && t.unref) t.unref(); }),
 }) {
   const client = new TelegramNativeClient({ tokenStore, transport });
+  const t = createTranslator(getLang);
 
   let abortController = null;
   let polling = false;
@@ -410,7 +418,7 @@ function createTelegramNativeRunner({
       try { await client.answerCallbackQuery({ callback_query_id: cb.id }); } catch {}
       return true;
     }
-    try { await client.answerCallbackQuery({ callback_query_id: cb.id, text: "OK" }); } catch {}
+    try { await client.answerCallbackQuery({ callback_query_id: cb.id, text: t("telegramApprovalToastAck") }); } catch {}
     try {
       await client.editMessageReplyMarkup({
         chat_id: chatId,
@@ -430,19 +438,19 @@ function createTelegramNativeRunner({
     if (!parsed) return false;
     const entry = pendingApprovals.get(parsed.id);
     if (!entry) {
-      try { await client.answerCallbackQuery({ callback_query_id: cb.id, text: "Expired" }); } catch {}
+      try { await client.answerCallbackQuery({ callback_query_id: cb.id, text: t("telegramApprovalToastExpired") }); } catch {}
       return true;
     }
     const isAllowedUser = !entry.allowedUser || fromId === String(entry.allowedUser);
     const isExpectedChat = !entry.chatId || chatId === String(entry.chatId);
     if (!isAllowedUser || !isExpectedChat) {
-      try { await client.answerCallbackQuery({ callback_query_id: cb.id, text: "Not allowed" }); } catch {}
+      try { await client.answerCallbackQuery({ callback_query_id: cb.id, text: t("telegramApprovalToastNotAllowed") }); } catch {}
       return true;
     }
 
     const decision = parsed.decision;
     if (decision.action === "suggestion" && !entry.suggestionIndexes.has(decision.index)) {
-      try { await client.answerCallbackQuery({ callback_query_id: cb.id, text: "Unavailable" }); } catch {}
+      try { await client.answerCallbackQuery({ callback_query_id: cb.id, text: t("telegramApprovalToastUnavailable") }); } catch {}
       return true;
     }
     // Acknowledge the tap (best-effort, NON-blocking) and then claim the
@@ -453,7 +461,9 @@ function createTelegramNativeRunner({
     // promise up front and fire-and-forgets the status-line rewrite.
     client.answerCallbackQuery({
       callback_query_id: cb.id,
-      text: decision.action === "allow" ? "Allowed" : (decision.action === "deny" ? "Denied" : "Applied"),
+      text: decision.action === "allow"
+        ? t("telegramApprovalToastAllowed")
+        : (decision.action === "deny" ? t("telegramApprovalToastDenied") : t("telegramApprovalToastApplied")),
     }).catch(() => {});
     const messageId = entry.messageId || (cb.message && cb.message.message_id);
     finishApproval(parsed.id, decision, undefined, messageId);
@@ -508,9 +518,9 @@ function createTelegramNativeRunner({
     try {
       const msg = await client.sendMessage({
         chat_id: chatId,
-        text: "Clawd: test native Telegram bot. Tap to confirm.",
+        text: t("telegramTestMessage"),
         reply_markup: {
-          inline_keyboard: [[{ text: "Confirm", callback_data: `clawd-test:${nonce}` }]],
+          inline_keyboard: [[{ text: t("telegramTestConfirmButton"), callback_data: `clawd-test:${nonce}` }]],
         },
       });
       if (pendingTest && pendingTest.nonce === nonce) {
@@ -578,8 +588,8 @@ function createTelegramNativeRunner({
     // null decision (resolved elsewhere / timeout / polling stopped) shows the
     // neutral reason. Best-effort — appendApprovalStatus never throws.
     const status = normalized
-      ? APPROVAL_DECIDED_STATUS[normalized.action]
-      : APPROVAL_RESOLVED_ELSEWHERE_STATUS[reason];
+      ? approvalDecidedStatusText(t, normalized.action)
+      : approvalResolvedElsewhereStatusText(t, reason);
     appendApprovalStatus(entry, status, messageIdOverride || entry.messageId);
   }
 
@@ -603,8 +613,8 @@ function createTelegramNativeRunner({
     const id = randomId();
     const callbackBase = `cp:${id}`;
     const inlineKeyboard = [[
-      { text: "Allow once", callback_data: `${callbackBase}:a` },
-      { text: "Deny", callback_data: `${callbackBase}:d` },
+      { text: t("telegramApprovalButtonAllowOnce"), callback_data: `${callbackBase}:a` },
+      { text: t("telegramApprovalButtonDeny"), callback_data: `${callbackBase}:d` },
     ]];
     for (const suggestion of suggestions) {
       inlineKeyboard.push([

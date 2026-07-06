@@ -1904,6 +1904,7 @@ const _serverCtx = {
   showPermissionBubble,
   maybeStartRemoteApproval,
   replyOpencodePermission,
+  syncPermissionShortcuts,
   permLog,
 };
 const _server = require("./server")(_serverCtx);
@@ -2643,6 +2644,7 @@ async function initTelegramMigrationController() {
         && getTelegramApprovalPrefs().r3DirectSendEnabled === true);
     },
     osPlatform: process.platform,
+    getLang: () => lang,
     log: telegramApprovalLog,
   });
   const nativeRunner = createTelegramNativeRunner({
@@ -2656,6 +2658,7 @@ async function initTelegramMigrationController() {
       log: telegramApprovalLog,
     }),
     getDispatch: () => _telegramMigrationController && _telegramMigrationController.dispatch,
+    getLang: () => lang,
     getChatId: () => {
       const cfg = getTelegramApprovalPrefs();
       const key = cfg && cfg.targetSessionKey;
@@ -2775,13 +2778,13 @@ function queueTelegramApprovalSidecarSync(reason) {
 
 function telegramApprovalUnavailableMessage(status) {
   if (status && status.message) return status.message;
-  if (status && status.reason === "disabled") return "Telegram approval is disabled";
-  if (status && status.reason === "missing-token") return "Telegram bot token is not configured";
-  if (status && status.reason === "invalid-config") return "Telegram approval config is incomplete";
-  if (status && status.reason === "native-inactive") return "Native Telegram approval is not active";
-  if (status && status.reason === "native-testing") return "Native Telegram approval test is already in progress";
-  if (status && status.transport === "native") return "Native Telegram approval is not active";
-  return "Telegram approval sidecar is not running";
+  if (status && status.reason === "disabled") return translate("telegramApprovalDisabledMessage");
+  if (status && status.reason === "missing-token") return translate("telegramApprovalMissingTokenMessage");
+  if (status && status.reason === "invalid-config") return translate("telegramApprovalIncompleteConfigMessage");
+  if (status && status.reason === "native-inactive") return translate("telegramApprovalNativeInactiveMessage");
+  if (status && status.reason === "native-testing") return translate("telegramApprovalNativeTestingMessage");
+  if (status && status.transport === "native") return translate("telegramApprovalNativeInactiveMessage");
+  return translate("telegramApprovalSidecarNotRunningMessage");
 }
 
 async function sendTelegramApprovalTest() {
@@ -2800,8 +2803,8 @@ async function sendTelegramApprovalTest() {
   const timer = setTimeout(() => controller.abort(), 60 * 1000);
   try {
     const decision = await client.requestApproval({
-      title: "Clawd Telegram approval test",
-      detail: "This is a settings test message. It is not attached to any agent permission request.",
+      title: translate("telegramSettingsTestTitle"),
+      detail: translate("telegramSettingsTestDetail"),
     }, { signal: controller.signal });
     if (decision === "allow" || decision === "deny") {
       return { status: "ok", decision };
@@ -2809,7 +2812,7 @@ async function sendTelegramApprovalTest() {
     if (decision && (decision.action === "allow" || decision.action === "deny")) {
       return { status: "ok", decision: decision.action };
     }
-    return { status: "error", message: "Telegram test did not receive a button response" };
+    return { status: "error", message: translate("telegramApprovalNoButtonResponseMessage") };
   } finally {
     clearTimeout(timer);
   }

@@ -5,6 +5,8 @@ const { BrowserWindow, globalShortcut } = require("electron");
 const { getDefaultShortcuts } = require("./shortcut-actions");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { clampTextScale, scaleWidth, scaleHeight, applyZoomToWindow } = require("./text-scale");
+const { createTranslator } = require("./i18n");
+const { firstStringValue } = require("./bubble-format");
 const path = require("path");
 const http = require("http");
 const {
@@ -394,6 +396,10 @@ function buildPermissionFocusEntry(perm) {
 
 module.exports = function initPermission(ctx) {
 
+// Bound to ctx.lang (a live getter), so a runtime language switch is picked up
+// by the next remote-approval payload without recreating this module.
+const t = createTranslator(() => ctx.lang);
+
 // Each entry: { res, abortHandler, suggestions, sessionId, bubble, hideTimer, toolName, toolInput, resolvedSuggestion, createdAt, measuredHeight }
 const pendingPermissions = [];
 // Pure-metadata tools auto-allowed without showing a bubble (zero side effects)
@@ -584,7 +590,7 @@ function repositionBubbles() {
   const bw = getBubbleWidth(scale, wa);
   const hitRect = ctx.bubbleFollowPet ? ctx.getHitRectScreen(petBounds) : null;
 
-  const layoutPermissions = pendingPermissions.filter((perm) => !isHardwareBuddyTestPermission(perm));
+  const layoutPermissions = pendingPermissions.filter((perm) => !isHardwareBuddyTestPermission(perm) && !perm.remoteOnly);
   const bubbleHeights = layoutPermissions.map(perm =>
     clampBubbleHeight(
       // measuredHeight/estimate are CSS px; the window needs DIP.
@@ -892,7 +898,7 @@ function compactRemoteApprovalText(value, maxLen = 200) {
   text = text.replace(/\b\d+:[A-Za-z0-9_-]{20,}\b/g, "<redacted:telegram-token>");
   text = text.replace(/\b(?:Bearer|Token)\s+[A-Za-z0-9._~+/=-]{12,}\b/gi, "Bearer <redacted>");
   text = text.replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|xox[abprs]-[A-Za-z0-9-]{10,})\b/g, "<redacted:token>");
-  text = text.replace(/\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|password|secret)\s*[:=]\s*\S+/gi, "$1=<redacted>");
+  text = text.replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|password|secret)\s*[:=]\s*\S+/gi, "$1=<redacted>");
   text = text.replace(/\b(?:telegram:)?-?\d{7,}(?::\d+){0,2}\b/g, "<redacted:id>");
   if (text.length > maxLen) text = `${text.slice(0, Math.max(0, maxLen - 1))}…`;
   return text;
@@ -947,11 +953,69 @@ function buildRemoteElicitationPayload(permEntry) {
   };
 }
 
-// Returns a redacted summary string, or null when no agent-supplied description
-// is available. We refuse to send a Telegram approval card without something
-// describing the action — the local bubble shows the full tool input, so a
-// Telegram-only "Tool input hidden by Clawd." card would let the user approve
-// a black box.
+// Tool-specific fields that hint at what the action targets, tried in order
+// when the tool gave no description/summary/reason (e.g. Write, Edit, Read —
+// unlike Bash, which always carries `description`). Only cheap, low-risk
+// identifiers (a path, a pattern) — never full file contents/diffs/commands.
+// Field names reuse bubble-format.js's firstStringValue so this list doesn't
+// drift out of sync with the naming variants (TargetFile/AbsolutePath/...)
+// other agents use.
+const FALLBACK_PATH_FIELDS = ["file_path", "path", "TargetFile", "AbsolutePath", "filePath", "FilePath", "DirectoryPath"];
+const FALLBACK_PATTERN_FIELDS = ["pattern", "Pattern"];
+const FALLBACK_URL_FIELDS = ["url", "Url"];
+
+// `command`/`query` are deliberately excluded: they can carry secrets a
+// generic sanitizer can't reliably catch (inline env vars, API query
+// params), so they never leave the desktop bubble.
+function stripUrlQueryAndCredentials(value) {
+  try {
+    const parsed = new URL(value);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+function buildRemoteApprovalFallbackDetail(input) {
+  const pathValue = firstStringValue(input, FALLBACK_PATH_FIELDS);
+  if (pathValue) {
+    const text = compactRemoteApprovalText(basenameForDisplay(pathValue), 200);
+    if (text) return text;
+  }
+  const patternValue = firstStringValue(input, FALLBACK_PATTERN_FIELDS);
+  if (patternValue) {
+    const text = compactRemoteApprovalText(patternValue, 200);
+    if (text) return text;
+  }
+  const urlValue = firstStringValue(input, FALLBACK_URL_FIELDS);
+  if (urlValue) {
+    const originAndPath = stripUrlQueryAndCredentials(urlValue);
+    if (originAndPath) {
+      const text = compactRemoteApprovalText(originAndPath, 200);
+      if (text) return text;
+    }
+  }
+  return null;
+}
+
+// String.prototype.replace's replacement-string argument treats $$/$&/$`/$'
+// as special sequences. Dynamic values (tool input, agent/tool names, etc.)
+// must never be interpolated with the string form — a Grep pattern
+// containing "$$", for example, would corrupt the rendered card. The
+// function form of the replacement argument is never parsed for $-sequences.
+function interpolate(template, token, value) {
+  return template.replace(token, () => value);
+}
+
+// Returns a redacted summary string — never null. We used to refuse to send a
+// Telegram card at all when the tool gave no description/summary/reason (e.g.
+// Write/Edit, unlike Bash which always carries `description`), reasoning that
+// a blank "Tool input hidden by Clawd" card would let the user approve a black
+// box. In practice that meant those requests never reached Telegram at all —
+// worse than a labelled blank card, since the user had no idea anything was
+// pending. Now we fall back to a cheap identifier (file path / pattern / URL)
+// and, failing that, an explicit "no description, go check the desktop bubble"
+// notice — so every remote-approval-eligible request produces a card.
 function buildRemoteApprovalSummary(permEntry) {
   const input = permEntry && permEntry.toolInput && typeof permEntry.toolInput === "object"
     ? permEntry.toolInput
@@ -965,16 +1029,18 @@ function buildRemoteApprovalSummary(permEntry) {
     const text = compactRemoteApprovalText(candidate, 200);
     if (text) return text;
   }
-  return null;
+  const fallbackDetail = buildRemoteApprovalFallbackDetail(input);
+  if (fallbackDetail) return interpolate(t("approvalSummaryFallbackDetail"), "{detail}", fallbackDetail);
+  return t("approvalSummaryUnavailable");
 }
 
 function buildRemoteSuggestionLabel(suggestion) {
   if (!suggestion || typeof suggestion !== "object") return "";
   if (suggestion.type === "setMode") {
-    if (suggestion.mode === "acceptEdits") return "Auto edits";
-    if (suggestion.mode === "plan") return "Plan mode";
+    if (suggestion.mode === "acceptEdits") return t("approvalSuggestionAutoEdits");
+    if (suggestion.mode === "plan") return t("approvalSuggestionPlanMode");
     const mode = compactRemoteApprovalText(suggestion.mode || "", 18);
-    return mode ? `Mode: ${mode}` : "";
+    return mode ? interpolate(t("approvalSuggestionModePrefix"), "{mode}", mode) : "";
   }
   if (suggestion.type === "addRules") {
     const rules = Array.isArray(suggestion.rules) ? suggestion.rules : [suggestion];
@@ -982,8 +1048,12 @@ function buildRemoteSuggestionLabel(suggestion) {
     const behavior = compactRemoteApprovalText(suggestion.behavior || first.behavior || "allow", 12);
     const isDeny = behavior === "deny";
     const toolName = compactRemoteApprovalText(first.toolName || suggestion.toolName || "", 16);
-    if (toolName) return isDeny ? `Always deny ${toolName}` : `Always ${toolName}`;
-    return isDeny ? "Always deny" : "Always allow";
+    if (toolName) {
+      return isDeny
+        ? interpolate(t("approvalSuggestionAlwaysDenyTool"), "{tool}", toolName)
+        : interpolate(t("approvalSuggestionAlwaysAllowTool"), "{tool}", toolName);
+    }
+    return isDeny ? t("approvalSuggestionAlwaysDeny") : t("approvalSuggestionAlwaysAllow");
   }
   return "";
 }
@@ -1002,32 +1072,34 @@ function buildRemoteSuggestionButtons(permEntry) {
   return buttons;
 }
 
-// Returns the Telegram approval payload, or null when there is no safe summary
-// to ship. Callers must treat null as a no-op signal — never send a card
-// without an action-describing summary.
+// Returns the Telegram approval payload. buildRemoteApprovalSummary always
+// returns a non-empty string (a real summary, a cheap fallback identifier, or
+// an explicit "no description" notice), so there is always a safe summary to
+// ship — this never returns null.
 function buildRemoteApprovalPayload(permEntry) {
   const summary = buildRemoteApprovalSummary(permEntry);
-  if (!summary) return null;
   const agentId = compactRemoteApprovalText(permEntry.agentId || "claude-code", 80) || "claude-code";
-  const toolName = compactRemoteApprovalText(permEntry.toolName || "Unknown", 80) || "Unknown";
+  const toolName = compactRemoteApprovalText(permEntry.toolName || t("approvalUnknownTool"), 80) || t("approvalUnknownTool");
   const session = ctx.sessions.get(permEntry.sessionId);
   const sessionFolder = compactRemoteApprovalText(
     basenameForDisplay((session && session.cwd) || permEntry.cwd || ""),
     80
   );
-  // Label is "Folder" (not "Session") on purpose: the pinned cc-connect-clawd
-  // sidecar redacts any "<sensitive_key>: <value>" pair it recognises, and
-  // "session" is in its keyword set — even though the value here is just the
-  // cwd basename, not a session id. "Folder" is plain and avoids the redact.
+  // Label is "Folder" (not "Session") on purpose, in every language: the pinned
+  // cc-connect-clawd sidecar redacts any "<sensitive_key>: <value>" pair it
+  // recognises against an English keyword list, and "session" is in that set —
+  // even though the value here is just the cwd basename, not a session id.
+  // Translated "Folder" labels don't match that English keyword list either,
+  // so they stay just as un-redacted as the English one.
   const detail = [
-    `Agent: ${agentId}`,
-    `Tool: ${toolName}`,
-    sessionFolder ? `Folder: ${sessionFolder}` : null,
-    `Summary: ${summary}`,
+    `${t("approvalDetailAgent")}: ${agentId}`,
+    `${t("approvalDetailTool")}: ${toolName}`,
+    sessionFolder ? `${t("approvalDetailFolder")}: ${sessionFolder}` : null,
+    `${t("approvalDetailSummary")}: ${summary}`,
   ].filter(Boolean).join("\n");
   const suggestionButtons = buildRemoteSuggestionButtons(permEntry);
   const payload = {
-    title: `${agentId} requests ${toolName}`,
+    title: interpolate(interpolate(t("approvalRequestsTitle"), "{agent}", agentId), "{tool}", toolName),
     detail,
   };
   if (suggestionButtons.length > 0) payload.suggestions = suggestionButtons;
@@ -1169,6 +1241,21 @@ function maybeStartRemoteApproval(permEntry) {
   const controllers = [];
   const remoteRequests = [];
   let started = false;
+  // Remote-only entries (bubble === null, from tryRemoteOnlyApproval when the
+  // desktop bubble is disabled) have no other UI waiting on the decision — if
+  // every remote client settles without ever producing one (send failure,
+  // invalid payload, client disconnect), the entry would otherwise sit in
+  // pendingPermissions holding the HTTP connection open until the hook's own
+  // timeout. Track settlements and fall back to a deny once none are left.
+  let settledWithoutDecision = 0;
+
+  function maybeFallBackRemoteOnlyEntry() {
+    if (!permEntry.remoteOnly) return;
+    if (settledWithoutDecision < remoteRequests.length) return;
+    if (pendingPermissions.indexOf(permEntry) === -1) return;
+    permLog(`remote-only approval: all remote requests settled without a decision, falling back (tool=${permEntry.toolName} session=${permEntry.sessionId})`);
+    resolvePermissionEntry(permEntry, "deny", "Remote approval unavailable; no client returned a decision");
+  }
 
   for (const { name, client } of clients) {
     const controller = typeof AbortController === "function" ? new AbortController() : null;
@@ -1203,12 +1290,16 @@ function maybeStartRemoteApproval(permEntry) {
       .then((decision) => {
         if (!isRemoteApprovalDecision(decision)) {
           if (decision) permLog(`${name} remote approval ignored decision=${compactRemoteApprovalText(decision, 40)}`);
+          settledWithoutDecision += 1;
+          maybeFallBackRemoteOnlyEntry();
           return;
         }
         handleRemoteApprovalDecision(permEntry, decision, name);
       })
       .catch((err) => {
         permLog(`${name} remote approval failed: ${compactRemoteApprovalText(err && err.message ? err.message : err, 200)}`);
+        settledWithoutDecision += 1;
+        maybeFallBackRemoteOnlyEntry();
       })
       .finally(() => {
         if (!controller || !Array.isArray(permEntry.remoteApprovalAbortControllers)) return;
