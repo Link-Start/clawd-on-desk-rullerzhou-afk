@@ -640,4 +640,26 @@ describe("permission telegram remote approval", () => {
     assert.equal(signal.aborted, true);
     assert.equal(perm.pendingPermissions.indexOf(entry), -1);
   });
+
+  it("destroys the socket instead of hanging when a remote-only entry goes to terminal", async () => {
+    const client = {
+      isEnabled: () => true,
+      requestApproval: () => Promise.resolve("terminal"),
+    };
+    const perm = initPermission(makeCtx({ getRemoteApprovalClients: () => [{ name: "feishu", client }] }));
+    // remoteOnly: true means there is no desktop bubble for the user to act
+    // on locally (server-route-permission.js's tryRemoteOnlyApproval sets
+    // this when bubbles are disabled) — dismissPermissionForTerminal's usual
+    // "leave res unanswered, the agent's own disconnect drives cleanup"
+    // assumption only holds when a desktop bubble is actually showing.
+    const entry = makePermEntry({ remoteOnly: true });
+    perm.pendingPermissions.push(entry);
+
+    assert.equal(perm.maybeStartRemoteApproval(entry), true);
+    await flush();
+    await flush();
+
+    assert.equal(perm.pendingPermissions.indexOf(entry), -1);
+    assert.equal(entry.res.destroyed, true);
+  });
 });

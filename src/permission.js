@@ -1195,9 +1195,19 @@ function cancelRemoteApproval(permEntry, options = {}) {
 // "Go to terminal" path: drop the bubble, abort any in-flight Telegram prompt,
 // hand focus back to the agent terminal. The HTTP res is intentionally NOT
 // answered here — the original socket-close abortHandler stays registered so
-// the agent's own disconnect drives final cleanup.
+// the agent's own disconnect drives final cleanup. That assumption only holds
+// when there's a desktop bubble the user is looking at; a remote-only entry
+// (bubbles disabled, decided over Feishu/Telegram) has no local UI to fall
+// back on, so leaving res unanswered would hang the hook until its own
+// timeout. Route those through the same no-decision/destroy path the other
+// remote-only "go to terminal" branches already use.
 function dismissPermissionForTerminal(perm) {
   if (!perm) return;
+  if (perm.remoteOnly) {
+    resolvePermissionEntry(perm, "no-decision", "Go to terminal from remote approval");
+    ctx.focusTerminalForSession(perm.sessionId, { fallbackEntry: buildPermissionFocusEntry(perm) });
+    return;
+  }
   // Cancel before splicing so a late Telegram decision can't slip in between
   // the splice and the abort.
   const remoteOutcome = perm.remoteApprovalResolution || {
