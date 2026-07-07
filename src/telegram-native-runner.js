@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 
 // Bridges TelegramNativeClient (raw API primitives) and the owner-manager's
 // expected handle shape:
@@ -1144,7 +1144,7 @@ function createTelegramNativeRunner({
   // no pending lifecycle — this is the building block for fire-and-forget
   // notifications (R1a). Returns the raw message or throws a classified error.
   // The injected logger ultimately does a synchronous file write
-  // (telegramApprovalLog 鈫?permLog 鈫?rotatedAppend), which can throw on a
+  // (telegramApprovalLog → permLog → rotatedAppend), which can throw on a
   // bad path / EACCES. Notifications are fire-and-forget on an async chain, so
   // a throwing log must not turn into an unhandled rejection.
   function safeLog(level, message, meta) {
