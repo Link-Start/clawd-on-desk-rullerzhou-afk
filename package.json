@@ -50,6 +50,8 @@
     "uninstall:reasonix-hooks": "node hooks/reasonix-install.js --uninstall",
     "install:qoderwork-hooks": "node hooks/qoderwork-install.js",
     "uninstall:qoderwork-hooks": "node hooks/qoderwork-install.js --uninstall",
+    "install:workbuddy-hooks": "node hooks/workbuddy-install.js",
+    "uninstall:workbuddy-hooks": "node hooks/workbuddy-install.js --uninstall",
     "cleanup:integrations": "node hooks/cleanup-integrations.js --apply",
     "register-protocol:dev": "node launch.js --register-protocol"
   },

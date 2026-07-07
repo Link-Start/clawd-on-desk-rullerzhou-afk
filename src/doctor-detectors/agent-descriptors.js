@@ -21,6 +21,7 @@ const hermes = require("../../hooks/hermes-install");
 const qoder = require("../../hooks/qoder-install");
 const reasonix = require("../../hooks/reasonix-install");
 const qoderwork = require("../../hooks/qoderwork-install");
+const workbuddy = require("../../hooks/workbuddy-install");
 
 function agentName(agentId) {
   const agent = getAgent(agentId);
@@ -114,6 +115,17 @@ const AGENT_DESCRIPTORS = Object.freeze([
     configMode: "file",
     autoInstall: true,
     marker: "codebuddy-hook.js",
+    nested: true,
+  }),
+  Object.freeze({
+    agentId: "workbuddy",
+    agentName: agentName("workbuddy"),
+    eventSource: agentEventSource("workbuddy"),
+    parentDir: workbuddy.DEFAULT_PARENT_DIR,
+    configPath: workbuddy.DEFAULT_CONFIG_PATH,
+    configMode: "file",
+    autoInstall: true,
+    marker: "workbuddy-hook.js",
     nested: true,
   }),
   Object.freeze({

@@ -175,6 +175,21 @@ function createIntegrationSyncRuntime(options = {}) {
     }
   }
 
+  function syncWorkBuddyHooks() {
+    try {
+      if (typeof ctx.syncWorkBuddyHooksImpl === "function") return ctx.syncWorkBuddyHooksImpl();
+      const { registerWorkBuddyHooks } = require("../hooks/workbuddy-install.js");
+      const result = registerWorkBuddyHooks({ silent: true });
+      if (hasPositiveCount(result.added) || hasPositiveCount(result.updated)) {
+        console.log(`Clawd: synced WorkBuddy hooks (added ${result.added}, updated ${result.updated})`);
+      }
+      return normalizeCountSyncResult(result, "WorkBuddy", "workbuddy-not-installed");
+    } catch (err) {
+      console.warn("Clawd: failed to sync WorkBuddy hooks:", err.message);
+      return { status: "error", message: err && err.message ? err.message : "Failed to sync WorkBuddy hooks" };
+    }
+  }
+
   function syncKiroHooks() {
     try {
       if (typeof ctx.syncKiroHooksImpl === "function") return ctx.syncKiroHooksImpl();
@@ -464,6 +479,7 @@ function createIntegrationSyncRuntime(options = {}) {
     "cursor-agent": syncCursorHooks,
     "copilot-cli": syncCopilotHooks,
     codebuddy: syncCodeBuddyHooks,
+    workbuddy: syncWorkBuddyHooks,
     "kiro-cli": syncKiroHooks,
     "kimi-cli": syncKimiHooks,
     "qwen-code": syncQwenHooks,
@@ -606,6 +622,7 @@ function createIntegrationSyncRuntime(options = {}) {
     syncCursorHooks,
     syncCopilotHooks,
     syncCodeBuddyHooks,
+    syncWorkBuddyHooks,
     syncKiroHooks,
     syncKimiHooks,
     syncQwenHooks,
