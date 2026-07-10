@@ -25,6 +25,37 @@ describe("Codex monitor callback helpers", () => {
     );
   });
 
+  it("identifies token_count quota-only updates as metadata-only events", () => {
+    assert.strictEqual(
+      isCodexMonitorMetadataOnlyEvent("event_msg:token_count", {
+        codexQuota: { codexFiveHour: { usedPercent: 1 } },
+      }),
+      true
+    );
+  });
+
+  it("passes normalized codexQuota from JSONL monitor updates", () => {
+    const options = buildCodexMonitorUpdateOptions({
+      cwd: "/repo",
+      codexQuota: {
+        codexFiveHour: { usedPercent: 1.4, resetAt: 1783669570000 },
+        codexWeekly: { usedPercent: 43 },
+      },
+    });
+    assert.deepStrictEqual(options.codexQuota, {
+      codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+      codexWeekly: { usedPercent: 43 },
+    });
+  });
+
+  it("omits invalid codexQuota from JSONL monitor updates", () => {
+    const options = buildCodexMonitorUpdateOptions({
+      cwd: "/repo",
+      codexQuota: { codexFiveHour: { usedPercent: "nope" } },
+    });
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(options, "codexQuota"), false);
+  });
+
   it("passes headless for normal monitor state updates", () => {
     assert.deepStrictEqual(buildCodexMonitorUpdateOptions({
       cwd: "/repo",

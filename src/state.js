@@ -39,6 +39,7 @@ const { normalizeTranscriptPath } = require("./transcript-path");
 const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
 const { ANTIGRAVITY_QUOTA_FIELDS } = require("../hooks/antigravity-context-usage");
 const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
+const { CODEX_QUOTA_FIELDS } = require("../hooks/codex-rate-limits");
 const {
   readTranscriptTailEntries: readClaudeTranscriptTailEntries,
   extractLastAssistantTextFromEntries: extractLastClaudeAssistantTextFromEntries,
@@ -1093,6 +1094,10 @@ function normalizeClaudeQuota(value) {
   return normalizeQuotaGroup(value, CLAUDE_QUOTA_FIELDS);
 }
 
+function normalizeCodexQuota(value) {
+  return normalizeQuotaGroup(value, CODEX_QUOTA_FIELDS);
+}
+
 function updateSessionFocusMetadata(sessionId, opts = {}) {
   const id = typeof sessionId === "string" ? sessionId : "";
   if (!id) return false;
@@ -1128,7 +1133,8 @@ function updateSessionMetadata(sessionId, opts = {}) {
   const contextUsage = normalizeContextUsage(opts.contextUsage);
   const antigravityQuota = normalizeAntigravityQuota(opts.antigravityQuota);
   const claudeQuota = normalizeClaudeQuota(opts.claudeQuota);
-  if (!contextUsage && !antigravityQuota && !claudeQuota) return false;
+  const codexQuota = normalizeCodexQuota(opts.codexQuota);
+  if (!contextUsage && !antigravityQuota && !claudeQuota && !codexQuota) return false;
   let changed = false;
   if (contextUsage && JSON.stringify(contextUsage) !== JSON.stringify(session.contextUsage)) {
     session.contextUsage = contextUsage;
@@ -1140,6 +1146,10 @@ function updateSessionMetadata(sessionId, opts = {}) {
   }
   if (claudeQuota && JSON.stringify(claudeQuota) !== JSON.stringify(session.claudeQuota)) {
     session.claudeQuota = claudeQuota;
+    changed = true;
+  }
+  if (codexQuota && JSON.stringify(codexQuota) !== JSON.stringify(session.codexQuota)) {
+    session.codexQuota = codexQuota;
     changed = true;
   }
   if (changed) {
@@ -1305,6 +1315,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     contextUsage = null,
     antigravityQuota = null,
     claudeQuota = null,
+    codexQuota = null,
     assistantLastOutput = null,
     assistantLastOutputTruncated = false,
     toolName = null,
@@ -1451,6 +1462,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   const srcContextUsage = normalizeContextUsage(contextUsage) || (existing && existing.contextUsage) || null;
   const srcAntigravityQuota = normalizeAntigravityQuota(antigravityQuota) || (existing && existing.antigravityQuota) || null;
   const srcClaudeQuota = normalizeClaudeQuota(claudeQuota) || (existing && existing.claudeQuota) || null;
+  const srcCodexQuota = normalizeCodexQuota(codexQuota) || (existing && existing.codexQuota) || null;
   const srcAssistantLastOutput = normalizeAssistantOutput(assistantLastOutput);
   const srcAssistantLastOutputTruncated = !!(srcAssistantLastOutput && assistantLastOutputTruncated === true);
   const srcToolName = normalizeToolName(toolName) || (existing && existing.lastToolName) || null;
@@ -1580,7 +1592,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   // silently reset its freshness stamp, or stale carried-over quota would
   // win display arbitration on updatedAt alone.
   const srcMetadataUpdatedAt = existing && Number.isFinite(existing.metadataUpdatedAt) ? existing.metadataUpdatedAt : null;
-  const base = { sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, agentPid: srcAgentPid, agentId: srcAgentId, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, contextUsage: srcContextUsage, antigravityQuota: srcAntigravityQuota, claudeQuota: srcClaudeQuota, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true };
+  const base = { sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, agentPid: srcAgentPid, agentId: srcAgentId, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, contextUsage: srcContextUsage, antigravityQuota: srcAntigravityQuota, claudeQuota: srcClaudeQuota, codexQuota: srcCodexQuota, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true };
   if (preserveCompletionAck) base.requiresCompletionAck = true;
 
   // Evict oldest session if at capacity and this is a new session.

@@ -15,6 +15,7 @@ const { normalizeTranscriptPath } = require("./transcript-path");
 const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
 const { ANTIGRAVITY_QUOTA_FIELDS } = require("../hooks/antigravity-context-usage");
 const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
+const { CODEX_QUOTA_FIELDS } = require("../hooks/codex-rate-limits");
 
 // /state POST body size cap. Raised 1024 → 4096 → 16384: a CJK
 // assistant_last_output (3 UTF-8 bytes/char) on a Stop completion blew past
@@ -95,6 +96,10 @@ function normalizeAntigravityQuota(value) {
 
 function normalizeClaudeQuota(value) {
   return normalizeQuotaGroup(value, CLAUDE_QUOTA_FIELDS);
+}
+
+function normalizeCodexQuota(value) {
+  return normalizeQuotaGroup(value, CODEX_QUOTA_FIELDS);
 }
 
 function sendStateHealthResponse(res, options) {
@@ -199,6 +204,7 @@ function handleStatePost(req, res, options) {
       const contextUsage = normalizeContextUsage(data.context_usage);
       const antigravityQuota = normalizeAntigravityQuota(data.antigravity_quota);
       const claudeQuota = normalizeClaudeQuota(data.claude_quota);
+      const codexQuota = normalizeCodexQuota(data.codex_quota);
       const assistantLastOutput = normalizeAssistantLastOutput(data.assistant_last_output);
       const assistantLastOutputTruncated = data.assistant_last_output_truncated === true;
       const transcriptPath = normalizeTranscriptPath(data.transcript_path);
@@ -248,6 +254,7 @@ function handleStatePost(req, res, options) {
             contextUsage,
             antigravityQuota,
             claudeQuota,
+            codexQuota,
           });
         }
         res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });

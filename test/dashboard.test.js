@@ -248,7 +248,7 @@ describe("dashboard window", () => {
     assert.match(preloadSource, /dashboard:hide-session/);
   });
 
-  it("wires the account-quota summary bar (Antigravity + Claude Code) into the dashboard header", () => {
+  it("wires the account-quota summary bar (Antigravity + Claude Code + Codex) into the dashboard header", () => {
     const rendererSource = fs.readFileSync(path.join(__dirname, "..", "src", "dashboard-renderer.js"), "utf8");
     const htmlSource = fs.readFileSync(path.join(__dirname, "..", "src", "dashboard.html"), "utf8");
 
@@ -257,15 +257,19 @@ describe("dashboard window", () => {
     assert.match(rendererSource, /resolveQuotaForDisplay\(sessions, agentId, field\)/);
     assert.match(rendererSource, /resolveQuotaForDisplay\(sessions, "antigravity-cli", "antigravityQuota"\)/);
     assert.match(rendererSource, /resolveQuotaForDisplay\(sessions, "claude-code", "claudeQuota"\)/);
+    assert.match(rendererSource, /resolveQuotaForDisplay\(sessions, "codex", "codexQuota"\)/);
     // #590 B2: quota arbitration must consider metadataUpdatedAt — statusline
     // refreshes stamp it without bumping updatedAt, so updatedAt alone would
-    // pick a lifecycle-recent session over one with fresher quota.
+    // pick a lifecycle-recent session over one with fresher quota. Local and
+    // remote sessions coexist under the same agentId, so this stamp is also
+    // what lets the freshest reporter win across hosts.
     assert.match(rendererSource, /session\.metadataUpdatedAt/);
     for (const key of [
       "dashboardQuotaSectionAntigravity",
       "dashboardQuotaGroupGemini",
       "dashboardQuotaGroupThirdParty",
       "dashboardQuotaSectionClaudeCode",
+      "dashboardQuotaSectionCodex",
       "dashboardQuotaFiveHour",
       "dashboardQuotaWeekly",
       "dashboardQuotaResetIn",
@@ -280,7 +284,7 @@ describe("dashboard window", () => {
   it("memoizes the quota summary rebuild instead of rebuilding on every 1s render tick", () => {
     const rendererSource = fs.readFileSync(path.join(__dirname, "..", "src", "dashboard-renderer.js"), "utf8");
 
-    assert.match(rendererSource, /computeQuotaSummarySignature\(antigravityQuota, claudeQuota\)/);
+    assert.match(rendererSource, /computeQuotaSummarySignature\(antigravityQuota, claudeQuota, codexQuota\)/);
     assert.match(rendererSource, /if \(signature === lastQuotaSummarySignature\) return;/);
     assert.match(rendererSource, /resetDateFormatterLang !== lang/);
   });

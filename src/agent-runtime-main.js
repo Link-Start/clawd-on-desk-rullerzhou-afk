@@ -171,34 +171,44 @@ function createAgentRuntimeMain(options = {}) {
       const CodexLogMonitor = loadCodexLogMonitor();
       const codexAgent = loadCodexAgent();
       codexMonitor = new CodexLogMonitor(codexAgent, (sid, state, event, extra) => {
+        // Subscription quota enters sessions only through
+        // updateSessionMetadata: updateSession would persist the value
+        // without stamping metadataUpdatedAt, and the display arbitration
+        // (resolveQuotaForDisplay) keys on that stamp — a busy local
+        // session would then beat a fresher remote reporter.
+        const { codexQuota, ...sessionOptions } = buildCodexMonitorUpdateOptions(extra, {
+          includeHeadless: true,
+        });
+        const annotateCodexQuota = () => {
+          if (!codexQuota) return;
+          const stateRuntime = getStateRuntime();
+          if (stateRuntime && typeof stateRuntime.updateSessionMetadata === "function") {
+            stateRuntime.updateSessionMetadata(String(sid), { codexQuota });
+          }
+        };
         if (isCodexMonitorMetadataOnlyEvent(event, extra)) {
-          const metadataOptions = buildCodexMonitorUpdateOptions(extra, {
-            includeHeadless: true,
-          });
-          if (metadataOptions.contextUsage) {
+          if (sessionOptions.contextUsage) {
             updateSession(sid, state, event, {
-              ...metadataOptions,
+              ...sessionOptions,
               preserveState: true,
             });
           }
+          annotateCodexQuota();
           return;
         }
         if (shouldSuppressCodexLogEvent(sid, state, event)) {
-          const metadataOptions = buildCodexMonitorUpdateOptions(extra, {
-            includeHeadless: true,
-          });
-          if (metadataOptions.contextUsage) {
+          if (sessionOptions.contextUsage) {
             updateSession(sid, state, event, {
-              ...metadataOptions,
+              ...sessionOptions,
               preserveState: true,
             });
           }
+          annotateCodexQuota();
           return;
         }
         clearCodexNotifyBubbles(sid, `codex-state-transition:${state}`);
-        updateSession(sid, state, event, buildCodexMonitorUpdateOptions(extra, {
-          includeHeadless: true,
-        }));
+        updateSession(sid, state, event, sessionOptions);
+        annotateCodexQuota();
       }, { classifier: codexSubagentClassifier });
       if (isAgentEnabled("codex")) {
         codexMonitor.start();

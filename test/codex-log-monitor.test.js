@@ -561,6 +561,83 @@ describe("CodexLogMonitor", () => {
     });
   });
 
+  it("carries token_count subscription quota with a fresh line timestamp", () => {
+    const testFile = path.join(dateDir, TEST_FILENAME);
+    fs.writeFileSync(testFile, [
+      '{"type":"session_meta","payload":{"cwd":"/tmp"}}',
+      '{"type":"event_msg","payload":{"type":"task_started"}}',
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: new Date().toISOString(),
+        payload: {
+          type: "token_count",
+          rate_limits: {
+            primary: { used_percent: 1.0, window_minutes: 300, resets_at: 1783669570 },
+            secondary: { used_percent: 42.6, window_minutes: 10080, resets_at: 1784256370 },
+          },
+        },
+      }),
+    ].join("\n") + "\n");
+
+    const config = makeConfig(tmpDir);
+    const events = [];
+    monitor = new CodexLogMonitor(config, (sid, state, event, extra) => {
+      events.push({ sid, state, event, extra });
+    });
+
+    monitor._pollFile(testFile, path.basename(testFile));
+
+    const tokenEvent = events.find((entry) => entry.event === "event_msg:token_count");
+    assert.ok(tokenEvent, "quota-only token_count must still emit a metadata event");
+    assert.deepStrictEqual(tokenEvent.extra.codexQuota, {
+      codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+      codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+    });
+  });
+
+  it("drops token_count subscription quota from stale backfill replays but keeps context usage", () => {
+    const testFile = path.join(dateDir, TEST_FILENAME);
+    fs.writeFileSync(testFile, [
+      '{"type":"session_meta","payload":{"cwd":"/tmp"}}',
+      '{"type":"event_msg","payload":{"type":"task_started"}}',
+      JSON.stringify({
+        type: "event_msg",
+        // Older than CODEX_QUOTA_MAX_AGE_MS — a restart replay, not live data.
+        // Posting it would stamp fresh arbitration metadata on stale quota.
+        timestamp: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        payload: {
+          type: "token_count",
+          info: { last_token_usage: { total_tokens: 23959 }, model_context_window: 258400 },
+          rate_limits: {
+            primary: { used_percent: 1.0, window_minutes: 300, resets_at: 1783669570 },
+          },
+        },
+      }),
+    ].join("\n") + "\n");
+    // Backdate mtime past BACKFILL_GRACE_MS so the file replays as history:
+    // backfill bypasses the line-level timestamp guard, which is exactly the
+    // path where the quota freshness gate has to hold the line.
+    const backfillTime = new Date(Date.now() - 60000);
+    fs.utimesSync(testFile, backfillTime, backfillTime);
+
+    const config = makeConfig(tmpDir);
+    const events = [];
+    monitor = new CodexLogMonitor(config, (sid, state, event, extra) => {
+      events.push({ sid, state, event, extra });
+    });
+
+    monitor._pollFile(testFile, path.basename(testFile));
+
+    assert.strictEqual(events.length, 1, "backfill must emit exactly one snapshot");
+    assert.strictEqual(events[0].extra.codexQuota, undefined);
+    assert.deepStrictEqual(events[0].extra.contextUsage, {
+      used: 23959,
+      limit: 258400,
+      percent: 9,
+      source: "codex",
+    });
+  });
+
   it("should skip old files (>5min mtime)", (_, done) => {
     const testFile = path.join(dateDir, TEST_FILENAME);
     fs.writeFileSync(testFile, '{"type":"session_meta","payload":{"cwd":"/tmp"}}\n');

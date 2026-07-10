@@ -1966,6 +1966,40 @@ describe("updateSession()", () => {
     assert.strictEqual(session.metadataUpdatedAt, 777, "hook-event rebuild must not drop the quota freshness stamp");
   });
 
+  it("updateSessionMetadata annotates codexQuota and stamps metadataUpdatedAt", () => {
+    update(api, { id: "codex:abc", state: "working" });
+    const session = api.sessions.get("codex:abc");
+    session.updatedAt = 12345;
+
+    const applied = api.updateSessionMetadata("codex:abc", {
+      codexQuota: {
+        codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+        codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+      },
+    });
+
+    assert.strictEqual(applied, true);
+    assert.deepStrictEqual(session.codexQuota, {
+      codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+      codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+    });
+    assert.ok(Number.isFinite(session.metadataUpdatedAt), "codex quota change must stamp metadataUpdatedAt");
+    assert.strictEqual(session.updatedAt, 12345);
+  });
+
+  it("keeps codexQuota sticky across lifecycle updateSession rebuilds", () => {
+    update(api, { id: "codex:abc", state: "thinking" });
+    api.updateSessionMetadata("codex:abc", {
+      codexQuota: { codexWeekly: { usedPercent: 43 } },
+    });
+
+    update(api, { id: "codex:abc", state: "working" });
+
+    assert.deepStrictEqual(api.sessions.get("codex:abc").codexQuota, {
+      codexWeekly: { usedPercent: 43 },
+    });
+  });
+
   it("trims whitespace on sessionTitle", () => {
     update(api, { id: "s1", state: "working", sessionTitle: "  Spaced  " });
     assert.strictEqual(api.sessions.get("s1").sessionTitle, "Spaced");

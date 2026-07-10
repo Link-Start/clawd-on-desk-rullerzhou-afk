@@ -1,8 +1,11 @@
 "use strict";
 
+const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
+const { CODEX_QUOTA_FIELDS } = require("../hooks/codex-rate-limits");
+
 function isCodexMonitorMetadataOnlyEvent(event, extra) {
   return event === "event_msg:token_count"
-    && !!(extra && typeof extra === "object" && extra.contextUsage);
+    && !!(extra && typeof extra === "object" && (extra.contextUsage || extra.codexQuota));
 }
 
 function normalizeContextUsage(value) {
@@ -36,6 +39,8 @@ function buildCodexMonitorUpdateOptions(extra, options = {}) {
   if (Object.prototype.hasOwnProperty.call(input, "codexSource")) out.codexSource = input.codexSource;
   const contextUsage = normalizeContextUsage(input.contextUsage);
   if (contextUsage) out.contextUsage = contextUsage;
+  const codexQuota = normalizeQuotaGroup(input.codexQuota, CODEX_QUOTA_FIELDS);
+  if (codexQuota) out.codexQuota = codexQuota;
   if (options.includeHeadless) out.headless = input.headless === true;
   return out;
 }

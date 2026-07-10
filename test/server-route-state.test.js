@@ -366,6 +366,32 @@ describe("server-route-state POST", () => {
     });
   });
 
+  it("routes metadata_only codex_quota to updateSessionMetadata (remote monitor POSTs)", async () => {
+    const metadataCalls = [];
+    const res = await callStatePost(JSON.stringify({
+      state: "idle",
+      preserve_state: true,
+      metadata_only: true,
+      session_id: "codex:abc",
+      agent_id: "codex",
+      codex_quota: {
+        codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+        codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+      },
+    }), {
+      ctx: { updateSessionMetadata: (...args) => metadataCalls.push(args) },
+    });
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.calls.updateSession.length, 0);
+    assert.strictEqual(metadataCalls.length, 1);
+    assert.strictEqual(metadataCalls[0][0], "codex:abc");
+    assert.deepStrictEqual(metadataCalls[0][1].codexQuota, {
+      codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+      codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+    });
+  });
+
   it("metadata_only still respects the disabled-agent gate", async () => {
     const metadataCalls = [];
     const res = await callStatePost(JSON.stringify({

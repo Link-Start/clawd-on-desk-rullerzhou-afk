@@ -65,9 +65,10 @@ function contextUsageText(session) {
 
 // Account-wide rate-limit quota, shown once at the top of the dashboard -
 // it's the same number regardless of which session reported it most
-// recently, so it is not repeated per session card. Two independent
-// sources, each its own section: Antigravity's own /usage (Gemini +
-// Claude/GPT-via-agy, 2 rows) and Claude Code's own rate_limits (1 row).
+// recently (local or remote host alike), so it is not repeated per session
+// card. Three independent sources, each its own section: Antigravity's own
+// /usage (Gemini + Claude/GPT-via-agy, 2 rows), Claude Code's own
+// rate_limits (1 row) and Codex's rollout rate_limits (1 row).
 const QUOTA_WARNING_THRESHOLD = 90;
 
 function formatResetIn(resetAt) {
@@ -182,13 +183,14 @@ function buildQuotaSection(headerKey, rows) {
 // for nothing.
 let lastQuotaSummarySignature = null;
 
-function computeQuotaSummarySignature(antigravityQuota, claudeQuota) {
-  const hasData = !!(antigravityQuota || claudeQuota);
+function computeQuotaSummarySignature(antigravityQuota, claudeQuota, codexQuota) {
+  const hasData = !!(antigravityQuota || claudeQuota || codexQuota);
   return JSON.stringify({
     lang: (i18nPayload && i18nPayload.lang) || "en",
     minute: hasData ? Math.floor(Date.now() / 60000) : null,
     antigravityQuota,
     claudeQuota,
+    codexQuota,
   });
 }
 
@@ -196,8 +198,9 @@ function renderQuotaSummary(sessions) {
   if (!quotaSummaryEl) return;
   const antigravityQuota = resolveQuotaForDisplay(sessions, "antigravity-cli", "antigravityQuota");
   const claudeQuota = resolveQuotaForDisplay(sessions, "claude-code", "claudeQuota");
+  const codexQuota = resolveQuotaForDisplay(sessions, "codex", "codexQuota");
 
-  const signature = computeQuotaSummarySignature(antigravityQuota, claudeQuota);
+  const signature = computeQuotaSummarySignature(antigravityQuota, claudeQuota, codexQuota);
   if (signature === lastQuotaSummarySignature) return;
   lastQuotaSummarySignature = signature;
 
@@ -212,6 +215,12 @@ function renderQuotaSummary(sessions) {
   if (claudeQuota) {
     const section = buildQuotaSection("dashboardQuotaSectionClaudeCode", [
       buildQuotaGroupRow(null, claudeQuota.claudeFiveHour, claudeQuota.claudeWeekly),
+    ]);
+    if (section) sections.push(section);
+  }
+  if (codexQuota) {
+    const section = buildQuotaSection("dashboardQuotaSectionCodex", [
+      buildQuotaGroupRow(null, codexQuota.codexFiveHour, codexQuota.codexWeekly),
     ]);
     if (section) sections.push(section);
   }

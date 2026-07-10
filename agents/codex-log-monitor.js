@@ -23,6 +23,10 @@ const {
   clampAssistantOutputText,
   extractAssistantTextFromRecord,
 } = require("../hooks/codex-assistant-output");
+const {
+  resolveCodexRateLimitQuota,
+  isFreshCodexQuotaTimestamp,
+} = require("../hooks/codex-rate-limits");
 
 const MAX_TRACKED_FILES = 50;
 const MAX_RETIRED_TRACKED_FILES = 100;
@@ -344,6 +348,7 @@ class CodexLogMonitor {
         assistantLastOutput: retired ? retired.assistantLastOutput || null : null,
         assistantLastOutputTruncated: retired ? retired.assistantLastOutputTruncated === true : false,
         contextUsage: retired ? retired.contextUsage || null : null,
+        codexQuota: retired ? retired.codexQuota || null : null,
         // Backfill mode: only a file whose last write predates monitor
         // start (by more than BACKFILL_GRACE_MS) is treated as stale
         // history — we replay it silently to advance offset + pick up
@@ -435,11 +440,16 @@ class CodexLogMonitor {
 
     if (key === "event_msg:token_count") {
       const contextUsage = extractCodexContextUsage(payload);
-      if (contextUsage) {
-        tracked.contextUsage = contextUsage;
-        if (!tracked.backfilling) {
-          this._emitStateChange(tracked, tracked.lastState || "idle", key);
-        }
+      if (contextUsage) tracked.contextUsage = contextUsage;
+      // Subscription quota rides the same event. Gated on the line's own
+      // timestamp: backfill/restart replays parse old lines, and posting
+      // their quota would stamp fresh arbitration metadata on stale data.
+      const codexQuota = isFreshCodexQuotaTimestamp(obj && obj.timestamp)
+        ? resolveCodexRateLimitQuota(payload)
+        : null;
+      if (codexQuota) tracked.codexQuota = codexQuota;
+      if ((contextUsage || codexQuota) && !tracked.backfilling) {
+        this._emitStateChange(tracked, tracked.lastState || "idle", key);
       }
       return;
     }
@@ -626,6 +636,7 @@ class CodexLogMonitor {
       assistantLastOutput: tracked.assistantLastOutput || null,
       assistantLastOutputTruncated: tracked.assistantLastOutputTruncated === true,
       contextUsage: tracked.contextUsage || null,
+      codexQuota: tracked.codexQuota || null,
     });
     while (this._retiredTracked.size > MAX_RETIRED_TRACKED_FILES) {
       const oldest = this._retiredTracked.keys().next().value;
@@ -636,7 +647,7 @@ class CodexLogMonitor {
   _emitBackfillSnapshot(tracked) {
     const snapshotState = tracked.lastState;
     if (!BACKFILL_SNAPSHOT_STATES.has(snapshotState)) {
-      if (tracked.contextUsage) {
+      if (tracked.contextUsage || tracked.codexQuota) {
         this._emitStateChange(tracked, "idle", "event_msg:token_count");
       }
       return;
@@ -660,8 +671,11 @@ class CodexLogMonitor {
   }
 
   _withTrackedContextUsage(tracked, extra = null) {
-    if (!tracked || !tracked.contextUsage) return extra;
-    return { ...(extra || {}), contextUsage: tracked.contextUsage };
+    if (!tracked || (!tracked.contextUsage && !tracked.codexQuota)) return extra;
+    const out = { ...(extra || {}) };
+    if (tracked.contextUsage) out.contextUsage = tracked.contextUsage;
+    if (tracked.codexQuota) out.codexQuota = tracked.codexQuota;
+    return out;
   }
 
   _isTrackedSubagent(tracked) {
