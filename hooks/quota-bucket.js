@@ -34,4 +34,17 @@ function normalizeQuotaGroup(value, fields) {
   return Object.keys(out).length ? out : null;
 }
 
-module.exports = { normalizeQuotaBucket, normalizeQuotaGroup };
+// Anchor a relative "resets in N seconds" countdown to an absolute epoch-ms
+// instant, quantized to whole minutes. The countdown and our receive time
+// tick independently, so a raw nowMs + s*1000 jitters by hundreds of ms on
+// every refresh - each refresh would produce a "different" resetAt, changing
+// the snapshot signature every tick and re-opening the broadcast storm that
+// absolute timestamps were adopted to close. Reset labels render at minute
+// granularity, so nothing is lost.
+function anchorRelativeResetAt(resetInSeconds, nowMs = Date.now()) {
+  const seconds = Number(resetInSeconds);
+  if (!Number.isFinite(seconds)) return null;
+  return Math.round((nowMs + seconds * 1000) / 60000) * 60000;
+}
+
+module.exports = { normalizeQuotaBucket, normalizeQuotaGroup, anchorRelativeResetAt };
