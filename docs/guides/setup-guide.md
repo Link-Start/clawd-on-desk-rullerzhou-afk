@@ -71,6 +71,10 @@ in the dedicated guide:
 - **Codex CLI** — official hooks on the remote server POST state changes and permission requests through the same tunnel. If Codex hooks are unavailable or disabled on the remote install, use the fallback log monitor: `node ~/.claude/hooks/codex-remote-monitor.js --port 23333`
 - **Copilot CLI** — one-click deploy writes `~/.copilot/hooks/hooks.json` on the remote (when Copilot CLI is installed, i.e. `~/.copilot/` exists). Hooks POST state and session titles through the same tunnel.
 
+**Subscription quota from remote machines:**
+- **Claude Code** — deploy also registers Clawd's statusline on the remote (`~/.claude/settings.json` `statusLine`), so the Pro/Max `rate_limits` it reports flow through the tunnel into the Dashboard's account-usage bars. The freshest reporter wins: work on the remote and the remote's numbers show; work locally and local ones do. The slot is only taken when it is empty or already Clawd's — if you run your own statusline on the remote, enable **"Chain into an existing statusline on deploy"** on the profile: your statusline keeps rendering (its original registration is preserved in `~/.claude/hooks/clawd-statusline-chain.json` and restored on uninstall) while Clawd only siphons the quota numbers.
+- **Codex CLI** — the remote log monitor forwards the subscription rate limits carried by rollout `token_count` events through the same tunnel. Only `{used percent, reset time}` ever leaves the remote — no tokens, no credentials, no transcript content.
+
 For remote-only Copilot CLI tracking on a fresh local install, turn on **Copilot CLI** in **Settings → Agents** so Clawd accepts those remote hook events. You do not need to click **Install** unless you also want local Copilot hooks on this machine.
 
 Remote hooks run in `CLAWD_REMOTE` mode which skips PID collection (remote PIDs are meaningless locally). Terminal focus is not available for remote sessions.
