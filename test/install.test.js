@@ -1688,6 +1688,58 @@ describe("Claude Code statusline installer", () => {
     assert.strictEqual(result.changed, false);
   });
 
+  // Remote deploys run install.js --remote ON the remote (POSIX shells only —
+  // deploy aborts on cmd.exe), and CLAWD_REMOTE=1 is what makes the
+  // statusline stamp body.host + use the remote POST timeout so quota rides
+  // the reverse tunnel. Same env-prefix convention as remote command hooks.
+  it("remote: prefixes the command with CLAWD_REMOTE=1 and stays marker-detectable", () => {
+    const settingsPath = makeTempSettings({});
+
+    const result = registerClaudeStatusline({
+      silent: true,
+      settingsPath,
+      remote: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    });
+
+    assert.strictEqual(result.installed, true);
+    assert.strictEqual(result.changed, true);
+    const command = readSettings(settingsPath).statusLine.command;
+    assert.ok(command.startsWith("CLAWD_REMOTE=1 "), command);
+    assert.ok(command.includes(STATUSLINE_MARKER));
+
+    // Re-register (deploy repair) must be idempotent on the remote form too.
+    const again = registerClaudeStatusline({
+      silent: true,
+      settingsPath,
+      remote: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    });
+    assert.strictEqual(again.changed, false);
+  });
+
+  it("remote: still never overwrites a pre-existing third-party statusline", () => {
+    const settingsPath = makeTempSettings({
+      statusLine: { type: "command", command: "~/.claude/my-custom-statusline.sh" },
+    });
+
+    const result = registerClaudeStatusline({
+      silent: true,
+      settingsPath,
+      remote: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    });
+
+    assert.strictEqual(result.skippedExisting, true);
+    assert.strictEqual(
+      readSettings(settingsPath).statusLine.command,
+      "~/.claude/my-custom-statusline.sh"
+    );
+  });
+
   // On Windows Claude Code runs statusLine.command through Git Bash whenever
   // Git is installed (a Claude Code install prerequisite), so the PowerShell
   // call-operator form (`& "..."`) is a bash syntax error and the statusline

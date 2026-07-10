@@ -20,6 +20,18 @@ const {
   getDefaults,
 } = require("../src/remote-ssh-profile");
 
+// ── remoteForwardPort ↔ SERVER_PORTS invariant ──
+
+// Remote hooks and the remotely registered Claude statusline discover the
+// tunnel by walking hooks/server-config.js SERVER_PORTS on the remote's
+// 127.0.0.1 (no ~/.clawd/runtime.json exists there). If the profile schema
+// ever allowed a forward port outside that set, those POSTs would silently
+// stop reaching the desktop.
+test("REMOTE_FORWARD_PORTS stays equal to hooks/server-config SERVER_PORTS", () => {
+  const { SERVER_PORTS } = require("../hooks/server-config");
+  assert.deepEqual(REMOTE_FORWARD_PORTS, SERVER_PORTS);
+});
+
 // ── isValidHost ──
 
 test("isValidHost accepts bare hostname", () => {

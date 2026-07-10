@@ -1510,7 +1510,17 @@ function registerClaudeStatusline(options = {}) {
   // Code runs this through Git Bash when Git is installed - the PowerShell
   // call-operator form is a bash syntax error and the statusline dies
   // silently. See buildPortableStatuslineCommand.
-  const command = buildPortableStatuslineCommand(nodeBin, scriptPath, { platform });
+  //
+  // Remote installs (install.js --remote, run ON the remote from
+  // ~/.claude/hooks/) target POSIX shells only (deploy aborts on cmd.exe),
+  // so the bash-style env prefix is safe - same convention as
+  // buildCommandHookSpec's remote hook form. CLAWD_REMOTE=1 is what makes
+  // claude-statusline.js stamp body.host and use the remote POST timeout,
+  // so its quota POSTs ride the reverse tunnel onto the right sessions.
+  // nodeBin needs no remote resolution here: this code already runs under
+  // the remote's own node, so resolveNodeBin() IS the remote path.
+  const portableCommand = buildPortableStatuslineCommand(nodeBin, scriptPath, { platform });
+  const command = options.remote === true ? `CLAWD_REMOTE=1 ${portableCommand}` : portableCommand;
   const desired = { type: "command", command, padding: 0 };
 
   const changed = !existing || JSON.stringify(existing) !== JSON.stringify(desired);
@@ -1597,9 +1607,10 @@ if (require.main === module) {
     registerHooks({ remote });
     // Keep the CLI symmetric with hooks/uninstall.js, which unregisters the
     // statusline: without this, a manual uninstall + reinstall cycle loses
-    // the statusline until the next app startup sync. Remote installs skip
-    // it - remote/SSH statusline support is an intentional non-goal.
-    if (!remote) registerClaudeStatusline();
+    // the statusline until the next app startup sync. Remote installs
+    // register it too (with the CLAWD_REMOTE=1 env prefix) - that is how
+    // remote machines report subscription quota through the SSH tunnel.
+    registerClaudeStatusline({ remote });
   } catch (err) {
     console.error(err.message);
     process.exit(1);

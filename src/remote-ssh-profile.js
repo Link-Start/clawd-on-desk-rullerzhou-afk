@@ -24,6 +24,13 @@
 
 const path = require("path");
 
+// Must stay equal to hooks/server-config.js SERVER_PORTS: remote hooks and
+// the remotely registered Claude statusline discover the tunnel by walking
+// SERVER_PORTS on the remote's 127.0.0.1 (there is no ~/.clawd/runtime.json
+// there). Constraining the forward port to this set is what guarantees that
+// walk always finds the tunnel — widen one list without the other and
+// remote quota/state POSTs silently stop. Enforced by a test
+// (test/remote-ssh-profile.test.js).
 const REMOTE_FORWARD_PORTS = [23333, 23334, 23335, 23336, 23337];
 
 const HOST_BARE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
