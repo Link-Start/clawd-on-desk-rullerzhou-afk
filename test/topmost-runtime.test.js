@@ -845,8 +845,10 @@ describe("IME editing pet dodge (#640)", () => {
       getWin: () => pet,
       getHitWin: () => hit,
       getPendingPermissions: () => [{ bubble }],
-      // Sprite rect intersecting the bubble unless overridden
-      getHitRectScreen: () => ({ x: 320, y: 240, width: 120, height: 120 }),
+      // Sprite rect intersecting the bubble unless overridden — in the
+      // production { left, top, right, bottom } hit-geometry shape, which is
+      // exactly what the first real-machine run caught the arbiter mishandling.
+      getHitRectScreen: () => ({ left: 320, top: 240, right: 440, bottom: 360 }),
       imeEditingFadeMs: 0,
       applyStationaryCollectionBehavior: () => true,
       ...overrides,
@@ -911,7 +913,7 @@ describe("IME editing pet dodge (#640)", () => {
 
   it("does nothing while editing without geometric overlap", () => {
     const { pet, hit, runtime } = makeDodgeSetup({
-      getHitRectScreen: () => ({ x: 900, y: 900, width: 120, height: 120 }),
+      getHitRectScreen: () => ({ left: 900, top: 900, right: 1020, bottom: 1020 }),
     });
 
     runtime.syncImeEditingPetDodge();

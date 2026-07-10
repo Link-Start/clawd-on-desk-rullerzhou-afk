@@ -31,14 +31,26 @@ function defaultGetter(value) {
   return typeof value === "function" ? value : () => value;
 }
 
-function rectsIntersect(a, b) {
+// Accepts both rect shapes in use across the codebase: window bounds are
+// { x, y, width, height } while hit-geometry rects (getHitRectScreen) are
+// { left, top, right, bottom }.
+function normalizeRect(rect) {
+  if (!rect) return null;
+  if (Number.isFinite(rect.x) && Number.isFinite(rect.width)) {
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  }
+  if (Number.isFinite(rect.left) && Number.isFinite(rect.right)) {
+    return { x: rect.left, y: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top };
+  }
+  return null;
+}
+
+function rectsIntersect(rawA, rawB) {
+  const a = normalizeRect(rawA);
+  const b = normalizeRect(rawB);
   if (!a || !b) return false;
-  const aw = Number(a.width) || 0;
-  const ah = Number(a.height) || 0;
-  const bw = Number(b.width) || 0;
-  const bh = Number(b.height) || 0;
-  if (aw <= 0 || ah <= 0 || bw <= 0 || bh <= 0) return false;
-  return a.x < b.x + bw && b.x < a.x + aw && a.y < b.y + bh && b.y < a.y + ah;
+  if (a.width <= 0 || a.height <= 0 || b.width <= 0 || b.height <= 0) return false;
+  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 
 function createTopmostRuntime(options = {}) {
