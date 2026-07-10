@@ -1169,7 +1169,12 @@ function handlePermissionPost(req, res, options) {
         const abortHandler = () => {
           if (res.writableFinished) return;
           ctx.permLog("abortHandler fired (elicitation)");
-          ctx.resolvePermissionEntry(permEntry, "deny", "Client disconnected");
+          // A dropped connection is not a user decision (CC's HTTP hook gives
+          // up after its 600s timeout and re-prompts in the terminal) — settle
+          // without one, like the codex/qwen/copilot abort paths. A "deny"
+          // here would stamp a refusal nobody made on the log and on any
+          // still-live remote approval card.
+          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
         };
         permEntry.abortHandler = abortHandler;
         res.on("close", abortHandler);
@@ -1216,7 +1221,8 @@ function handlePermissionPost(req, res, options) {
       const abortHandler = () => {
         if (res.writableFinished) return;
         ctx.permLog("abortHandler fired");
-        ctx.resolvePermissionEntry(permEntry, "deny", "Client disconnected");
+        // Same rationale as the elicitation abort above: disconnect ≠ deny.
+        ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
       };
       permEntry.abortHandler = abortHandler;
       res.on("close", abortHandler);

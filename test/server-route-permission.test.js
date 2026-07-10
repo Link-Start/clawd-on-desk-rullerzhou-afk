@@ -697,6 +697,42 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [entry]);
   });
 
+  it("resolves Claude elicitation abort as no-decision (NOT deny) when the connection closes", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "claude-code",
+      session_id: "sid",
+      tool_name: "AskUserQuestion",
+      tool_input: { questions: [{ question: "Continue?" }] },
+    }));
+
+    assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+    const entry = res.ctx.pendingPermissions[0];
+    res.emit("close");
+
+    assert.strictEqual(res.ctx.calls.resolved.length, 1);
+    assert.strictEqual(res.ctx.calls.resolved[0].entry, entry);
+    assert.strictEqual(res.ctx.calls.resolved[0].behavior, "no-decision");
+    assert.strictEqual(res.ctx.calls.resolved[0].message, "Client disconnected");
+  });
+
+  it("resolves Claude permission abort as no-decision (NOT deny) when the connection closes", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "claude-code",
+      session_id: "sid",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    }));
+
+    assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+    const entry = res.ctx.pendingPermissions[0];
+    res.emit("close");
+
+    assert.strictEqual(res.ctx.calls.resolved.length, 1);
+    assert.strictEqual(res.ctx.calls.resolved[0].entry, entry);
+    assert.strictEqual(res.ctx.calls.resolved[0].behavior, "no-decision");
+    assert.strictEqual(res.ctx.calls.resolved[0].message, "Client disconnected");
+  });
+
   it("keeps local Claude permission pending if remote approval startup throws", async () => {
     const res = await callPermissionPost(JSON.stringify({
       agent_id: "claude-code",
