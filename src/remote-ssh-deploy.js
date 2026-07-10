@@ -55,6 +55,7 @@ const HOOK_FILES = [
   "context-usage.js",
   "antigravity-context-usage.js",
   "claude-rate-limits.js",
+  "codex-rate-limits.js",
   "quota-bucket.js",
   "state-payload-size.js",
   "clawd-hook.js",

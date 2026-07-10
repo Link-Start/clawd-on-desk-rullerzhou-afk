@@ -137,6 +137,7 @@ FILES=(
   "$HOOKS_DIR/context-usage.js"
   "$HOOKS_DIR/antigravity-context-usage.js"
   "$HOOKS_DIR/claude-rate-limits.js"
+  "$HOOKS_DIR/codex-rate-limits.js"
   "$HOOKS_DIR/quota-bucket.js"
   "$HOOKS_DIR/state-payload-size.js"
   "$HOOKS_DIR/clawd-hook.js"
