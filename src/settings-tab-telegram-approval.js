@@ -311,6 +311,10 @@
     refreshTokenInfo();
     refreshFeishuStatus();
     refreshFeishuSecretInfo();
+    // The migration card UI is gone, but the Step-3 enable switch still routes
+    // turn-on through the native migration test flow based on this snapshot —
+    // keep it loading even though no card renders.
+    refreshMigrationSnapshot();
 
     const h1 = document.createElement("h1");
     h1.textContent = t("remoteApprovalTitle");
@@ -321,16 +325,46 @@
     subtitle.textContent = t("remoteApprovalSubtitle");
     parent.appendChild(subtitle);
 
-    // v0.9.0 migration: native vs sidecar transport selector. Lives ABOVE the
-    // legacy Telegram card so users see migration progress before the legacy
-    // setup steps.
-    parent.appendChild(buildTelegramMigrationCard());
-
+    // Two subtabs (same pattern as the anim-overrides page): IM channels vs
+    // the LAN approval bridge. Hardware Buddy's card was retired 2026-07-10
+    // (Clawstick not shipped); its panel module and adapter wiring are dead
+    // code pending the same cleanup pass as the migration card below.
+    parent.appendChild(buildSubtabSwitcher());
+    if (coreRef.runtime.remoteApprovalSubtab === "lan") {
+      parent.appendChild(buildMobileChannelCard());
+      return;
+    }
     // Each remote approval channel renders as its own collapsible card so the
     // page can stay tidy as external approval channels grow.
     parent.appendChild(buildTelegramChannelCard());
     parent.appendChild(buildFeishuChannelCard());
-    parent.appendChild(buildHardwareBuddyChannelCard());
+  }
+
+  function buildSubtabSwitcher() {
+    const wrap = document.createElement("div");
+    wrap.className = "anim-override-subtabs";
+    const group = document.createElement("div");
+    group.className = "segmented";
+    group.setAttribute("role", "tablist");
+    const current = coreRef.runtime.remoteApprovalSubtab === "lan" ? "lan" : "channels";
+    const entries = [
+      { key: "channels", label: t("remoteApprovalSubtabChannels") },
+      { key: "lan", label: t("remoteApprovalSubtabLan") },
+    ];
+    for (const entry of entries) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = entry.label;
+      if (entry.key === current) btn.classList.add("active");
+      btn.addEventListener("click", () => {
+        if (coreRef.runtime.remoteApprovalSubtab === entry.key) return;
+        coreRef.runtime.remoteApprovalSubtab = entry.key;
+        coreRef.ops.requestRender({ content: true });
+      });
+      group.appendChild(btn);
+    }
+    wrap.appendChild(group);
+    return wrap;
   }
 
   function refreshRuntimeStatus(payload) {
@@ -340,6 +374,10 @@
   }
 
   // ── v0.9.0 migration card ──────────────────────────────────────────────────
+  // UI entry removed 2026-07-10: the v0.9.0 native-transport migration window
+  // is over (native is the default; rollback no longer offered). Everything in
+  // this block plus the controller wiring in main.js/settings-actions.js is
+  // dead code pending a dedicated cleanup pass.
   let migrationSnapshot = null;
   let migrationCardEl = null;
   let migrationPending = false;
@@ -612,11 +650,40 @@
     });
   }
 
-  function buildHardwareBuddyChannelCard() {
-    return root.ClawdSettingsHardwareBuddyPanel.build(coreRef, {
-      id: "remote-approval.hardware-buddy",
-      activeTabId: "telegram-approval",
-      className: "remote-approval-channel-card",
+  // Mobile Web channel: today a read-only LAN preview (no approval actions
+  // yet — #208 tracks that), but it lives with the approval channels because
+  // "I'm away from the desk" is the same user intent and that is where the
+  // approval console will land.
+  function buildMobileChannelCard() {
+    const enabled = !!(state.snapshot && state.snapshot.mobilePreviewEnabled === true);
+    const kind = enabled ? "running" : "ready";
+    const body = document.createElement("div");
+    const mobile = root.ClawdSettingsTabMobile;
+    if (mobile && typeof mobile.renderChannelBody === "function") {
+      mobile.renderChannelBody(body);
+    }
+    // Named for its trajectory (#208 approval console); the Beta badge + note
+    // make the current read-only-preview limitation explicit.
+    const header = buildChannelHeader(t("mobileChannelName"), kind);
+    const beta = document.createElement("span");
+    beta.className = "channel-beta-badge";
+    beta.textContent = "Beta";
+    header.insertBefore(beta, header.children[1] || null);
+    const note = document.createElement("div");
+    note.className = "channel-beta-note";
+    note.textContent = t("mobileBetaNote");
+    return helpers.buildCollapsibleGroup({
+      id: "remote-approval.mobile",
+      headerContent: header,
+      // Never default-collapsed: while running the card shows the pair
+      // URL/token the user needs on their phone.
+      defaultCollapsed: false,
+      className: "remote-approval-channel-card mobile-channel-card",
+      children: [
+        note,
+        buildChannelStatusRow(kind, t(enabled ? "mobileCardRunning" : "mobileCardReady")),
+        body,
+      ],
     });
   }
 
