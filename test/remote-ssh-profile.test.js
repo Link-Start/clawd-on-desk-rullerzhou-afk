@@ -485,6 +485,7 @@ test("deployTargetDrift detects each field change deterministically", () => {
     else if (f === "identityFile") changed.identityFile = "/k";
     else if (f === "remoteForwardPort") changed.remoteForwardPort = 23335;
     else if (f === "hostPrefix") changed.hostPrefix = "pi-prefix";
+    else if (f === "chainStatusline") changed.chainStatusline = true;
     const drift = deployTargetDrift(baseFp, deployTargetFingerprint(changed));
     assert.equal(drift, f, `expected drift on ${f}`);
   }

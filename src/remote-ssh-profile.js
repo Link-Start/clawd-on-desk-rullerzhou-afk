@@ -152,6 +152,11 @@ function validateProfile(profile) {
   if (typeof profile.autoStartCodexMonitor !== "boolean") {
     return { status: "error", message: "profile.autoStartCodexMonitor must be a boolean" };
   }
+  // Optional for backward compatibility: profiles stored before the field
+  // existed simply lack it (sanitizeProfile normalizes absence to false).
+  if (profile.chainStatusline !== undefined && typeof profile.chainStatusline !== "boolean") {
+    return { status: "error", message: "profile.chainStatusline must be a boolean" };
+  }
   if (typeof profile.connectOnLaunch !== "boolean") {
     return { status: "error", message: "profile.connectOnLaunch must be a boolean" };
   }
@@ -205,6 +210,9 @@ function sanitizeProfile(raw) {
       ? raw.hostPrefix
       : undefined,
     autoStartCodexMonitor: raw.autoStartCodexMonitor === true,
+    // Opt-in: on deploy, wrap a pre-existing third-party statusline on the
+    // remote (chain mode) instead of leaving the quota source unregistered.
+    chainStatusline: raw.chainStatusline === true,
     connectOnLaunch: raw.connectOnLaunch === true,
     createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
     lastDeployedAt: Number.isFinite(raw.lastDeployedAt) && raw.lastDeployedAt > 0
@@ -276,19 +284,26 @@ function deployTargetFingerprint(profile) {
   const hostPrefix = typeof profile.hostPrefix === "string" && profile.hostPrefix.length > 0
     ? profile.hostPrefix
     : undefined;
+  // false and absent are equivalent: profiles stored before the field
+  // existed lack it, and both mean "deploy without statusline chaining".
+  const chainStatusline = profile.chainStatusline === true ? true : undefined;
   return {
     host: typeof profile.host === "string" && profile.host.length > 0 ? profile.host : undefined,
     port,
     identityFile,
     remoteForwardPort: Number.isInteger(profile.remoteForwardPort) ? profile.remoteForwardPort : undefined,
     hostPrefix,
+    chainStatusline,
   };
 }
 
 // Compare two fingerprints. Returns null if equal, or the name of the first
 // drifted field. Stable field order so the diff is deterministic for UX
 // messages ("host changed during deploy").
-const DEPLOY_TARGET_FIELDS = ["host", "port", "identityFile", "remoteForwardPort", "hostPrefix"];
+// chainStatusline is a deploy-target field: flipping it changes what the
+// install-claude step writes on the remote, so the profile must read as
+// "not deployed" until the user redeploys.
+const DEPLOY_TARGET_FIELDS = ["host", "port", "identityFile", "remoteForwardPort", "hostPrefix", "chainStatusline"];
 
 function deployTargetDrift(a, b) {
   if (!a || !b) return DEPLOY_TARGET_FIELDS[0];

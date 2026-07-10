@@ -281,10 +281,16 @@ async function deploy({ profile, runtime, deps = {} }) {
   }
 
   // 5. ~/.claude/hooks/install.js --remote — Claude hook registration.
+  // --chain-existing (profile opt-in) additionally lets the statusline
+  // installer wrap a pre-existing third-party statusline on the remote
+  // instead of skipping it (see install.js registerClaudeStatusline).
   progress("install-claude", "start");
   {
+    const installClaudeArgs = profile.chainStatusline === true
+      ? ["--remote", "--chain-existing"]
+      : ["--remote"];
     const args = buildSshArgs(profile).concat([
-      buildRemoteHookNodeCommand(remoteNode, "install.js", ["--remote"]),
+      buildRemoteHookNodeCommand(remoteNode, "install.js", installClaudeArgs),
     ]);
     const r = await spawnAndWait(spawn, "ssh", args, { timeoutMs: 60000, runtime });
     if (r.code !== 0) {

@@ -204,6 +204,7 @@
         remoteForwardPort: 23333,
         hostPrefix: "",
         autoStartCodexMonitor: false,
+        chainStatusline: false,
         connectOnLaunch: false,
         _isNew: true,
       };
@@ -590,6 +591,7 @@
       hint: t("remoteSshFieldHostPrefixHint"),
     }));
     section.appendChild(checkbox("remoteSshFieldAutoStartCodex", "autoStartCodexMonitor"));
+    section.appendChild(checkbox("remoteSshFieldChainStatusline", "chainStatusline"));
     section.appendChild(checkbox("remoteSshFieldConnectOnLaunch", "connectOnLaunch"));
 
     // Submit / cancel
@@ -616,6 +618,7 @@
         host: (formData.host || "").trim(),
         remoteForwardPort: formData.remoteForwardPort,
         autoStartCodexMonitor: !!formData.autoStartCodexMonitor,
+        chainStatusline: !!formData.chainStatusline,
         connectOnLaunch: !!formData.connectOnLaunch,
         createdAt: formData.createdAt,
       };

@@ -24,15 +24,20 @@ if [ $# -lt 1 ]; then
   echo "Options:"
   echo "  --prefix NAME   Short name for this machine (shown in Sessions menu)."
   echo "                  If omitted, hostname is used automatically."
+  echo "  --chain-statusline"
+  echo "                  Wrap a pre-existing third-party Claude Code statusline"
+  echo "                  on the remote (quota only, keeps its output)."
   exit 1
 fi
 
 SSH_TARGET="$1"
 HOST_PREFIX=""
+CHAIN_STATUSLINE=0
 shift
 while [ $# -gt 0 ]; do
   case "$1" in
     --prefix) HOST_PREFIX="$2"; shift 2 ;;
+    --chain-statusline) CHAIN_STATUSLINE=1; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -240,7 +245,14 @@ fi
 # ── Register hooks ──
 
 echo "Registering Claude Code hooks (remote mode)..."
-ssh "$SSH_TARGET" "$(remote_node_command install.js --remote)" || {
+# Mirrors src/remote-ssh-deploy.js install-claude: --chain-existing lets the
+# statusline installer wrap a pre-existing third-party statusline (opt-in).
+INSTALL_CLAUDE_ARGS="--remote"
+if [ "$CHAIN_STATUSLINE" = "1" ]; then
+  INSTALL_CLAUDE_ARGS="--remote --chain-existing"
+fi
+# shellcheck disable=SC2086
+ssh "$SSH_TARGET" "$(remote_node_command install.js $INSTALL_CLAUDE_ARGS)" || {
   echo "WARNING: Hook registration failed (Claude Code may not be installed on remote)"
 }
 
