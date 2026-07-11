@@ -977,6 +977,18 @@ html, body {
   flex: 1 1 260px;
   min-width: min(100%, 260px);
 }
+.agent-custom-tools-section .agent-text-input-row {
+  gap: 24px;
+}
+.agent-custom-tools-section .row-text {
+  flex: 0 0 150px;
+}
+.agent-custom-tools-section .row-label {
+  white-space: nowrap;
+}
+.agent-custom-tools-section .agent-text-input-control {
+  min-width: 0;
+}
 .agent-text-input-control input {
   width: 100%;
   min-width: 0;
@@ -1002,6 +1014,9 @@ html, body {
   .agent-text-input-control {
     width: 100%;
     flex-basis: auto;
+  }
+  .agent-custom-tools-section .row-text {
+    flex: 1 1 auto;
   }
 }
 .agent-badges {
