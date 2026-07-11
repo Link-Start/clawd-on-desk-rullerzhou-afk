@@ -105,6 +105,27 @@ describe("account quota store", () => {
     assert.deepStrictEqual(store.snapshot(), []);
   });
 
+  it("mergeSources collapses to one entry with the freshest report per provider", () => {
+    let nowMs = 1000;
+    const store = createAccountQuotaStore({ persistPath: null, now: () => nowMs });
+    store.update("pi", {
+      claudeQuota: { claudeWeekly: { usedPercent: 41, resetAt: 999999 } },
+      codexQuota: { codexWeekly: { usedPercent: 43, resetAt: 999999 } },
+    });
+    nowMs = 2000; // local reports codex later - its numbers must win
+    store.update(null, { codexQuota: { codexWeekly: { usedPercent: 9, resetAt: 999999 } } });
+
+    const merged = store.snapshot({ mergeSources: true });
+    assert.strictEqual(merged.length, 1);
+    assert.strictEqual(merged[0].host, null, "merged entry is unlabeled");
+    assert.strictEqual(merged[0].claudeQuota.group.claudeWeekly.usedPercent, 41, "remote-only provider survives");
+    assert.strictEqual(merged[0].codexQuota.group.codexWeekly.usedPercent, 9, "freshest reporter wins per provider");
+    // Default stays per-source (the maintainer's shape).
+    assert.strictEqual(store.snapshot().length, 2);
+    // Single source needs no merging.
+    assert.strictEqual(store.snapshot({ mergeSources: true })[0].claudeQuota.updatedAt, 1000);
+  });
+
   it("persists on flush and reloads last-known numbers (app-restart survival)", () => {
     const persistPath = tempPersistPath();
     const group = { claudeWeekly: { usedPercent: 41, resetAt: 9999999 } };

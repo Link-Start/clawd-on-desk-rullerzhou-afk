@@ -17,6 +17,7 @@
     "sessionHudShowElapsed",
     "sessionHudShowContextUsage",
     "sessionHudShowQuota",
+    "quotaMergeSources",
     "sessionHudCleanupDetached",
     "allowEdgePinning",
     "disableMiniMode",
@@ -58,6 +59,7 @@
     "sessionHudShowElapsed",
     "sessionHudShowContextUsage",
     "sessionHudShowQuota",
+    "quotaMergeSources",
     "sessionHudCleanupDetached",
   ];
   const SESSION_HUD_SUMMARY_KEYS = new Set([
@@ -66,6 +68,7 @@
     "sessionHudShowElapsed",
     "sessionHudShowContextUsage",
     "sessionHudShowQuota",
+    "quotaMergeSources",
     "sessionHudCleanupDetached",
   ]);
   const BUBBLE_SECONDS_AUTO_COMMIT_DELAY_MS = 600;
@@ -482,6 +485,11 @@
         labelKey: "rowSessionHudQuota",
         descKey: "rowSessionHudQuotaDesc",
         disabled: !sessionHudControlsEnabled,
+      }),
+      helpers.buildSwitchRow({
+        key: "quotaMergeSources",
+        labelKey: "rowQuotaMergeSources",
+        descKey: "rowQuotaMergeSourcesDesc",
       }),
       helpers.buildSwitchRow({
         key: "sessionHudCleanupDetached",

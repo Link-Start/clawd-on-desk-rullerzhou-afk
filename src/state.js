@@ -911,7 +911,7 @@ function buildSessionSnapshot() {
     sessionHudCleanupDetached: ctx.sessionHudCleanupDetached === true,
     focusHostPlatform: ctx.focusHostPlatform || process.platform,
     isProcessAlive,
-    accountQuota: accountQuota.snapshot(),
+    accountQuota: accountQuota.snapshot({ mergeSources: ctx.quotaMergeSources === true }),
   });
 }
 

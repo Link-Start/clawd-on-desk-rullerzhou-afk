@@ -207,6 +207,15 @@ function createSettingsEffectRouter(options = {}) {
         warn(logWarn, "Clawd: session HUD setting sync failed:", err);
       }
     }
+    if ("quotaMergeSources" in changes) {
+      try {
+        // Snapshot CONTENT changes (merged vs per-source accountQuota), so a
+        // forced re-emit is needed for the Dashboard/HUD to pick it up.
+        emitSessionSnapshot({ force: true });
+      } catch (err) {
+        warn(logWarn, "Clawd: quota merge mode re-emit failed:", err);
+      }
+    }
     if ("sessionHudCleanupDetached" in changes && changes.sessionHudCleanupDetached === true) {
       try {
         cleanStaleSessions();

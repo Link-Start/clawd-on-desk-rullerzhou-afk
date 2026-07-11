@@ -170,7 +170,14 @@ function createAccountQuotaStore(options = {}) {
 
   // Renderer-facing view: expired buckets dropped (wall-clock window reset),
   // local source first, remotes sorted by host for a stable UI order.
-  function snapshot() {
+  //
+  // options.mergeSources: opt-in for the "same subscription on every
+  // machine" setup — collapse all sources into one unlabeled entry, taking
+  // the freshest report per provider (work remotely and the remote's
+  // numbers win; work locally and the local ones do). Deliberately NOT the
+  // default: with different subscriptions per machine a merged view lies,
+  // which is why the per-source shape exists in the first place.
+  function snapshot(options = {}) {
     const nowMs = now();
     const out = [];
     for (const record of sources.values()) {
@@ -191,7 +198,23 @@ function createAccountQuotaStore(options = {}) {
       if (!b.host) return 1;
       return a.host.localeCompare(b.host);
     });
-    return out;
+    if (options.mergeSources !== true || out.length <= 1) return out;
+
+    const merged = { host: null };
+    let hasAny = false;
+    for (const providerKey of QUOTA_PROVIDER_KEYS) {
+      let best = null;
+      for (const entry of out) {
+        const candidate = entry[providerKey];
+        if (!candidate) continue;
+        if (!best || Number(candidate.updatedAt) > Number(best.updatedAt)) best = candidate;
+      }
+      if (best) {
+        merged[providerKey] = best;
+        hasAny = true;
+      }
+    }
+    return hasAny ? [merged] : [];
   }
 
   function flush() {
