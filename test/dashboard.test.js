@@ -248,28 +248,31 @@ describe("dashboard window", () => {
     assert.match(preloadSource, /dashboard:hide-session/);
   });
 
-  it("wires the account-quota summary bar (Antigravity + Claude Code + Codex) into the dashboard header", () => {
+  it("wires the account-quota summary bar (Antigravity + Claude Code + Codex, per source) into the dashboard header", () => {
     const rendererSource = fs.readFileSync(path.join(__dirname, "..", "src", "dashboard-renderer.js"), "utf8");
     const htmlSource = fs.readFileSync(path.join(__dirname, "..", "src", "dashboard.html"), "utf8");
 
     assert.match(htmlSource, /id="quotaSummary" class="quota-summary" hidden/);
-    assert.match(rendererSource, /renderQuotaSummary\(sessions\)/);
-    assert.match(rendererSource, /resolveQuotaForDisplay\(sessions, agentId, field\)/);
-    assert.match(rendererSource, /resolveQuotaForDisplay\(sessions, "antigravity-cli", "antigravityQuota"\)/);
-    assert.match(rendererSource, /resolveQuotaForDisplay\(sessions, "claude-code", "claudeQuota"\)/);
-    assert.match(rendererSource, /resolveQuotaForDisplay\(sessions, "codex", "codexQuota"\)/);
-    // #590 B2: quota arbitration must consider metadataUpdatedAt — statusline
-    // refreshes stamp it without bumping updatedAt, so updatedAt alone would
-    // pick a lifecycle-recent session over one with fresher quota. Local and
-    // remote sessions coexist under the same agentId, so this stamp is also
-    // what lets the freshest reporter win across hosts.
-    assert.match(rendererSource, /session\.metadataUpdatedAt/);
+    // Quota renders from the session-independent per-source store
+    // (snapshot.accountQuota), grouped local + one row per remote host —
+    // never from per-session fields.
+    assert.match(rendererSource, /renderQuotaSummary\(snapshot\)/);
+    assert.match(rendererSource, /snapshot\.accountQuota/);
+    assert.doesNotMatch(rendererSource, /resolveQuotaForDisplay/);
+    assert.match(rendererSource, /buildQuotaSourceHeader/);
+    // Wall-clock expiry: a bucket whose resetAt passed must not keep showing
+    // the pre-reset high between snapshots.
+    assert.match(rendererSource, /isExpiredBucket/);
+    // Quiet sources are labeled instead of presenting old numbers as live.
+    assert.match(rendererSource, /QUOTA_STALE_AFTER_MS/);
     for (const key of [
       "dashboardQuotaSectionAntigravity",
       "dashboardQuotaGroupGemini",
       "dashboardQuotaGroupThirdParty",
       "dashboardQuotaSectionClaudeCode",
       "dashboardQuotaSectionCodex",
+      "dashboardQuotaSourceLocal",
+      "dashboardQuotaAsOf",
       "dashboardQuotaFiveHour",
       "dashboardQuotaWeekly",
       "dashboardQuotaResetIn",
@@ -284,7 +287,7 @@ describe("dashboard window", () => {
   it("memoizes the quota summary rebuild instead of rebuilding on every 1s render tick", () => {
     const rendererSource = fs.readFileSync(path.join(__dirname, "..", "src", "dashboard-renderer.js"), "utf8");
 
-    assert.match(rendererSource, /computeQuotaSummarySignature\(antigravityQuota, claudeQuota, codexQuota\)/);
+    assert.match(rendererSource, /computeQuotaSummarySignature\(accountQuota\)/);
     assert.match(rendererSource, /if \(signature === lastQuotaSummarySignature\) return;/);
     assert.match(rendererSource, /resetDateFormatterLang !== lang/);
   });

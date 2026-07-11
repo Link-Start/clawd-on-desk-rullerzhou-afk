@@ -174,10 +174,10 @@ describe("agent-runtime-main", () => {
     ]);
   });
 
-  it("routes JSONL codexQuota through updateSessionMetadata, never updateSession opts", () => {
+  it("routes JSONL codexQuota to the session-independent store, never updateSession opts", () => {
     const instances = [];
     const calls = [];
-    const metadataCalls = [];
+    const quotaCalls = [];
     const FakeMonitor = makeFakeMonitorClass(instances);
     const runtime = createAgentRuntimeMain({
       loadCodexLogMonitor: () => FakeMonitor,
@@ -186,7 +186,7 @@ describe("agent-runtime-main", () => {
       updateSession: (...args) => calls.push(["update", ...args]),
       clearCodexNotifyBubbles: (...args) => calls.push(["clear", ...args]),
       getStateRuntime: () => ({
-        updateSessionMetadata: (...args) => metadataCalls.push(args),
+        updateAccountQuota: (...args) => quotaCalls.push(args),
       }),
       codexSubagentClassifier: {},
     });
@@ -202,21 +202,20 @@ describe("agent-runtime-main", () => {
       codexQuota,
     });
     // Quota-only refresh (no contextUsage): must not enter the updateSession
-    // lifecycle machine at all, only annotate metadata.
+    // lifecycle machine at all, only feed the store.
     monitor.emit("codex:abc", "working", "event_msg:token_count", { codexQuota });
 
-    // updateSession must never see codexQuota in its opts: it would persist
-    // the value without stamping metadataUpdatedAt, and the later stamp
-    // attempt would see no change (freshest-wins arbitration would then
-    // key on stale data).
+    // updateSession must never see codexQuota in its opts: account quota is
+    // not session state (src/state-account-quota.js).
     for (const call of calls) {
       if (call[0] !== "update") continue;
       assert.strictEqual(Object.prototype.hasOwnProperty.call(call[4], "codexQuota"), false);
     }
     assert.strictEqual(calls.filter((c) => c[0] === "update").length, 1);
-    assert.deepStrictEqual(metadataCalls, [
-      ["codex:abc", { codexQuota }],
-      ["codex:abc", { codexQuota }],
+    // Local monitor reports as the local source (null host).
+    assert.deepStrictEqual(quotaCalls, [
+      [null, { codexQuota }],
+      [null, { codexQuota }],
     ]);
   });
 

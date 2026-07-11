@@ -8,10 +8,6 @@ const {
   isSupersededLocalCodexProcessSession,
 } = require("./state-session-dedupe");
 const { readCodexThreadName } = require("../hooks/codex-session-index");
-const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
-const { ANTIGRAVITY_QUOTA_FIELDS } = require("../hooks/antigravity-context-usage");
-const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
-const { CODEX_QUOTA_FIELDS } = require("../hooks/codex-rate-limits");
 
 // ── Session source derivation ────────────────────────────────────────
 
@@ -256,9 +252,6 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     codexOriginator: (session && session.codexOriginator) || null,
     codexSource: (session && session.codexSource) || null,
     contextUsage: snapshotContextUsage(session),
-    antigravityQuota: normalizeQuotaGroup(session && session.antigravityQuota, ANTIGRAVITY_QUOTA_FIELDS),
-    claudeQuota: normalizeQuotaGroup(session && session.claudeQuota, CLAUDE_QUOTA_FIELDS),
-    codexQuota: normalizeQuotaGroup(session && session.codexQuota, CODEX_QUOTA_FIELDS),
     assistantLastOutput: (session && typeof session.assistantLastOutput === "string")
       ? session.assistantLastOutput
       : null,
@@ -346,6 +339,9 @@ function buildSessionSnapshot(sessions, options = {}) {
     hudLastTitle: hudEntries.length ? hudEntries[0].displayTitle : null,
     lastSessionId: lastSession ? lastSession.id : null,
     lastTitle: lastSession ? lastSession.displayTitle : null,
+    // Session-independent per-source account quota (src/state-account-quota.js).
+    // Injected by the caller so this module stays a pure sessions mapper.
+    accountQuota: Array.isArray(options.accountQuota) ? options.accountQuota : [],
   };
 }
 
@@ -372,6 +368,16 @@ function sessionSnapshotSignature(snapshot) {
     hudLastTitle: snapshot.hudLastTitle,
     lastSessionId: snapshot.lastSessionId,
     lastTitle: snapshot.lastTitle,
+    // Account quota participates as groups only: the per-provider updatedAt
+    // stamp moves exactly when its group changes (change-detected in the
+    // store), so including it would be redundant, and the renderer's own
+    // minute tick covers the "as of" label refresh.
+    accountQuota: (snapshot.accountQuota || []).map((entry) => ({
+      host: entry.host,
+      antigravityQuota: entry.antigravityQuota ? entry.antigravityQuota.group : null,
+      claudeQuota: entry.claudeQuota ? entry.claudeQuota.group : null,
+      codexQuota: entry.codexQuota ? entry.codexQuota.group : null,
+    })),
     sessions: snapshot.sessions.map((entry) => ({
       id: entry.id,
       state: entry.state,
@@ -395,9 +401,6 @@ function sessionSnapshotSignature(snapshot) {
       codexOriginator: entry.codexOriginator,
       codexSource: entry.codexSource,
       contextUsage: entry.contextUsage,
-      antigravityQuota: entry.antigravityQuota,
-      claudeQuota: entry.claudeQuota,
-      codexQuota: entry.codexQuota,
       assistantLastOutput: entry.assistantLastOutput,
       assistantLastOutputTruncated: !!entry.assistantLastOutputTruncated,
       lastEventLabelKey: entry.lastEvent ? entry.lastEvent.labelKey : null,

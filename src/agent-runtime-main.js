@@ -171,19 +171,18 @@ function createAgentRuntimeMain(options = {}) {
       const CodexLogMonitor = loadCodexLogMonitor();
       const codexAgent = loadCodexAgent();
       codexMonitor = new CodexLogMonitor(codexAgent, (sid, state, event, extra) => {
-        // Subscription quota enters sessions only through
-        // updateSessionMetadata: updateSession would persist the value
-        // without stamping metadataUpdatedAt, and the display arbitration
-        // (resolveQuotaForDisplay) keys on that stamp — a busy local
-        // session would then beat a fresher remote reporter.
+        // Subscription quota is account state, not session state: it goes
+        // to the session-independent per-source store (null host = this
+        // machine), never into updateSession opts — see state.js
+        // updateAccountQuota and src/state-account-quota.js.
         const { codexQuota, ...sessionOptions } = buildCodexMonitorUpdateOptions(extra, {
           includeHeadless: true,
         });
         const annotateCodexQuota = () => {
           if (!codexQuota) return;
           const stateRuntime = getStateRuntime();
-          if (stateRuntime && typeof stateRuntime.updateSessionMetadata === "function") {
-            stateRuntime.updateSessionMetadata(String(sid), { codexQuota });
+          if (stateRuntime && typeof stateRuntime.updateAccountQuota === "function") {
+            stateRuntime.updateAccountQuota(null, { codexQuota });
           }
         };
         if (isCodexMonitorMetadataOnlyEvent(event, extra)) {

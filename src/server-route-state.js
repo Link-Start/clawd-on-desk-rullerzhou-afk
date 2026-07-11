@@ -243,19 +243,23 @@ function handleStatePost(req, res, options) {
         res.end();
         return;
       }
+      // Account quota goes to the session-independent per-source store,
+      // regardless of POST shape — it must survive with no live session at
+      // all ("check the remote's quota before starting work"), so it is
+      // never gated on the session lookup that contextUsage annotation
+      // performs. The source is the reporting host (null = this machine).
+      if (typeof ctx.updateAccountQuota === "function"
+        && (antigravityQuota || claudeQuota || codexQuota)) {
+        ctx.updateAccountQuota(host, { antigravityQuota, claudeQuota, codexQuota });
+      }
       if (metadataOnly) {
         // Deliberately NOT recorded in the recent-hook-events ring: a
         // statusline refreshing every few hundred ms would evict the real
         // hook events the diagnostics exist to show. 204 either way — the
         // statusline script never reads the response, and "session unknown"
         // is the designed drop, not an error.
-        if (typeof ctx.updateSessionMetadata === "function") {
-          ctx.updateSessionMetadata(session_id || "default", {
-            contextUsage,
-            antigravityQuota,
-            claudeQuota,
-            codexQuota,
-          });
+        if (contextUsage && typeof ctx.updateSessionMetadata === "function") {
+          ctx.updateSessionMetadata(session_id || "default", { contextUsage });
         }
         res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
         res.end();
@@ -355,8 +359,6 @@ function handleStatePost(req, res, options) {
             displayHint: display_svg,
             sessionTitle,
             contextUsage,
-            antigravityQuota,
-            claudeQuota,
             assistantLastOutput,
             assistantLastOutputTruncated,
             toolName,

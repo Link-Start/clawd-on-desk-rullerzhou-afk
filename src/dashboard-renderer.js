@@ -64,24 +64,54 @@ function contextUsageText(session) {
 }
 
 // Account-wide rate-limit quota, shown once at the top of the dashboard -
-// it's the same number regardless of which session reported it most
-// recently (local or remote host alike), so it is not repeated per session
-// card. Three independent sources, each its own section: Antigravity's own
-// /usage (Gemini + Claude/GPT-via-agy, 2 rows), Claude Code's own
-// rate_limits (1 row) and Codex's rollout rate_limits (1 row).
+// grouped per reporting source (this machine + one group per remote host;
+// snapshot.accountQuota, fed by src/state-account-quota.js), because local
+// and remote can be different subscriptions. Freshest-wins applies within
+// a source only. Three providers, each its own section: Antigravity's own
+// /usage (Gemini + Claude/GPT-via-agy), Claude Code's rate_limits and
+// Codex's rollout rate_limits.
 const QUOTA_WARNING_THRESHOLD = 90;
+// A source that has not confirmed its numbers recently gets an explicit
+// "as of N ago" label instead of presenting old numbers as live.
+const QUOTA_STALE_AFTER_MS = 5 * 60 * 1000;
+
+function formatDurationHM(totalMinutes) {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0
+    ? t("dashboardQuotaResetHoursMinutes").replace("{h}", hours).replace("{m}", minutes)
+    : t("dashboardQuotaResetMinutes").replace("{m}", minutes);
+}
 
 function formatResetIn(resetAt) {
   const n = Number(resetAt);
   if (!Number.isFinite(n)) return "";
   const secondsLeft = Math.round((n - Date.now()) / 1000);
   if (secondsLeft < 0) return "";
-  const totalMinutes = Math.round(secondsLeft / 60);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return hours > 0
-    ? t("dashboardQuotaResetHoursMinutes").replace("{h}", hours).replace("{m}", minutes)
-    : t("dashboardQuotaResetMinutes").replace("{m}", minutes);
+  return formatDurationHM(Math.round(secondsLeft / 60));
+}
+
+function formatAsOf(updatedAt) {
+  const n = Number(updatedAt);
+  if (!Number.isFinite(n)) return "";
+  const agoMinutes = Math.round((Date.now() - n) / 60000);
+  if (agoMinutes < 1) return "";
+  return t("dashboardQuotaAsOf").replace("{time}", formatDurationHM(agoMinutes));
+}
+
+// The rate-limit windows reset on wall clock regardless of CLI activity, so
+// a bucket whose resetAt has passed would show the pre-reset high - worse
+// than showing nothing. The store already drops expired buckets at snapshot
+// time; this guard covers buckets that expire between snapshots (the
+// dashboard rerenders on its own tick).
+function isExpiredBucket(bucket) {
+  return Number.isFinite(bucket.resetAt) && bucket.resetAt <= Date.now();
+}
+
+function liveBucket(group, field) {
+  const bucket = group && group[field];
+  if (!bucket || typeof bucket !== "object") return null;
+  return isExpiredBucket(bucket) ? null : bucket;
 }
 
 // renderQuotaSummary can run once a second (see the setInterval(render, 1000)
@@ -105,22 +135,23 @@ function formatResetDate(resetAt) {
   }
 }
 
-function resolveQuotaForDisplay(sessions, agentId, field) {
-  let best = null;
-  for (const session of sessions) {
-    if (!session || session.agentId !== agentId) continue;
-    const quota = session[field];
-    if (!quota || typeof quota !== "object") continue;
-    // Quota freshness, not lifecycle freshness: metadataUpdatedAt is when
-    // this session's quota was last CONFIRMED by a statusline (it travels
-    // with the quota through lifecycle rebuilds), so it outranks updatedAt
-    // outright - a session carrying stale quota competes with the stale
-    // stamp it inherited, not with its latest hook event. updatedAt is only
-    // a fallback for quota that never came through a statusline.
-    const freshness = Number(session.metadataUpdatedAt) || Number(session.updatedAt) || 0;
-    if (!best || freshness > best.freshness) best = { quota, freshness };
+// One row (or two for Antigravity) per source that has live data for the
+// provider. Source labels appear only when they carry information: a single
+// local-only source renders exactly the compact pre-grouping layout, and a
+// fresh source shows no "as of" suffix.
+function buildQuotaSourceHeader(sourceEntry, providerEntry, baseLabel) {
+  const parts = [];
+  const multiSource = sourceEntry.multiSource === true;
+  if (multiSource) {
+    parts.push(sourceEntry.host || t("dashboardQuotaSourceLocal"));
   }
-  return best ? best.quota : null;
+  if (baseLabel) parts.push(baseLabel);
+  const age = Date.now() - Number(providerEntry.updatedAt || 0);
+  if (Number.isFinite(age) && age > QUOTA_STALE_AFTER_MS) {
+    const asOf = formatAsOf(providerEntry.updatedAt);
+    if (asOf) parts.push(asOf);
+  }
+  return parts.length ? parts.join(" · ") : null;
 }
 
 function buildQuotaHalfBar(labelText, bucket, resetStyle) {
@@ -183,47 +214,73 @@ function buildQuotaSection(headerKey, rows) {
 // for nothing.
 let lastQuotaSummarySignature = null;
 
-function computeQuotaSummarySignature(antigravityQuota, claudeQuota, codexQuota) {
-  const hasData = !!(antigravityQuota || claudeQuota || codexQuota);
+function computeQuotaSummarySignature(accountQuota) {
   return JSON.stringify({
     lang: (i18nPayload && i18nPayload.lang) || "en",
-    minute: hasData ? Math.floor(Date.now() / 60000) : null,
-    antigravityQuota,
-    claudeQuota,
-    codexQuota,
+    minute: accountQuota.length ? Math.floor(Date.now() / 60000) : null,
+    accountQuota,
   });
 }
 
-function renderQuotaSummary(sessions) {
+function renderQuotaSummary(snapshot) {
   if (!quotaSummaryEl) return;
-  const antigravityQuota = resolveQuotaForDisplay(sessions, "antigravity-cli", "antigravityQuota");
-  const claudeQuota = resolveQuotaForDisplay(sessions, "claude-code", "claudeQuota");
-  const codexQuota = resolveQuotaForDisplay(sessions, "codex", "codexQuota");
+  const accountQuota = Array.isArray(snapshot && snapshot.accountQuota) ? snapshot.accountQuota : [];
 
-  const signature = computeQuotaSummarySignature(antigravityQuota, claudeQuota, codexQuota);
+  const signature = computeQuotaSummarySignature(accountQuota);
   if (signature === lastQuotaSummarySignature) return;
   lastQuotaSummarySignature = signature;
 
+  const multiSource = accountQuota.length > 1;
+  const sources = accountQuota.map((entry) => ({ ...entry, multiSource }));
+
   const sections = [];
-  if (antigravityQuota) {
-    const section = buildQuotaSection("dashboardQuotaSectionAntigravity", [
-      buildQuotaGroupRow(t("dashboardQuotaGroupGemini"), antigravityQuota.geminiFiveHour, antigravityQuota.geminiWeekly),
-      buildQuotaGroupRow(t("dashboardQuotaGroupThirdParty"), antigravityQuota.thirdPartyFiveHour, antigravityQuota.thirdPartyWeekly),
-    ]);
-    if (section) sections.push(section);
+
+  const antigravityRows = [];
+  for (const source of sources) {
+    const provider = source.antigravityQuota;
+    const group = provider && provider.group;
+    if (!group) continue;
+    antigravityRows.push(
+      buildQuotaGroupRow(
+        buildQuotaSourceHeader(source, provider, t("dashboardQuotaGroupGemini")),
+        liveBucket(group, "geminiFiveHour"),
+        liveBucket(group, "geminiWeekly")
+      ),
+      buildQuotaGroupRow(
+        buildQuotaSourceHeader(source, provider, t("dashboardQuotaGroupThirdParty")),
+        liveBucket(group, "thirdPartyFiveHour"),
+        liveBucket(group, "thirdPartyWeekly")
+      )
+    );
   }
-  if (claudeQuota) {
-    const section = buildQuotaSection("dashboardQuotaSectionClaudeCode", [
-      buildQuotaGroupRow(null, claudeQuota.claudeFiveHour, claudeQuota.claudeWeekly),
-    ]);
-    if (section) sections.push(section);
-  }
-  if (codexQuota) {
-    const section = buildQuotaSection("dashboardQuotaSectionCodex", [
-      buildQuotaGroupRow(null, codexQuota.codexFiveHour, codexQuota.codexWeekly),
-    ]);
-    if (section) sections.push(section);
-  }
+  const antigravitySection = buildQuotaSection("dashboardQuotaSectionAntigravity", antigravityRows);
+  if (antigravitySection) sections.push(antigravitySection);
+
+  const claudeRows = sources.map((source) => {
+    const provider = source.claudeQuota;
+    const group = provider && provider.group;
+    if (!group) return null;
+    return buildQuotaGroupRow(
+      buildQuotaSourceHeader(source, provider, null),
+      liveBucket(group, "claudeFiveHour"),
+      liveBucket(group, "claudeWeekly")
+    );
+  });
+  const claudeSection = buildQuotaSection("dashboardQuotaSectionClaudeCode", claudeRows);
+  if (claudeSection) sections.push(claudeSection);
+
+  const codexRows = sources.map((source) => {
+    const provider = source.codexQuota;
+    const group = provider && provider.group;
+    if (!group) return null;
+    return buildQuotaGroupRow(
+      buildQuotaSourceHeader(source, provider, null),
+      liveBucket(group, "codexFiveHour"),
+      liveBucket(group, "codexWeekly")
+    );
+  });
+  const codexSection = buildQuotaSection("dashboardQuotaSectionCodex", codexRows);
+  if (codexSection) sections.push(codexSection);
 
   if (!sections.length) {
     quotaSummaryEl.hidden = true;
@@ -565,7 +622,7 @@ function render(options = {}) {
   titleEl.textContent = t("dashboardWindowTitle");
   countEl.textContent = t("dashboardCount").replace("{n}", count);
   document.title = t("dashboardWindowTitle");
-  renderQuotaSummary(sessions);
+  renderQuotaSummary(snapshot);
 
   if (count === 0) {
     renderEmpty();

@@ -36,10 +36,7 @@ const {
 } = require("./state-session-snapshot");
 const { getAgentIconUrl } = require("./state-agent-icons");
 const { normalizeTranscriptPath } = require("./transcript-path");
-const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
-const { ANTIGRAVITY_QUOTA_FIELDS } = require("../hooks/antigravity-context-usage");
-const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
-const { CODEX_QUOTA_FIELDS } = require("../hooks/codex-rate-limits");
+const { createAccountQuotaStore } = require("./state-account-quota");
 const {
   readTranscriptTailEntries: readClaudeTranscriptTailEntries,
   extractLastAssistantTextFromEntries: extractLastClaudeAssistantTextFromEntries,
@@ -85,6 +82,14 @@ let DISPLAY_HINT_MAP = {};
 
 // ── Session tracking ──
 const sessions = new Map();
+// Account-wide rate-limit quota, keyed by reporting source — deliberately
+// NOT session state (see src/state-account-quota.js). Persistence is
+// opt-in via ctx so the many test-constructed state runtimes stay
+// filesystem-free; main.js passes the real path.
+const accountQuota = createAccountQuotaStore({
+  persistPath: ctx.accountQuotaPersistPath || null,
+  logWarn: console.warn,
+});
 const MAX_SESSIONS = 20;
 const ASSISTANT_OUTPUT_MAX = 2400;
 const CODEX_EXIT_PROBE_DELAYS_MS = [1000, 3000, 8000, 15000];
@@ -906,6 +911,7 @@ function buildSessionSnapshot() {
     sessionHudCleanupDetached: ctx.sessionHudCleanupDetached === true,
     focusHostPlatform: ctx.focusHostPlatform || process.platform,
     isProcessAlive,
+    accountQuota: accountQuota.snapshot(),
   });
 }
 
@@ -1086,18 +1092,6 @@ function normalizeContextUsage(value) {
   return out;
 }
 
-function normalizeAntigravityQuota(value) {
-  return normalizeQuotaGroup(value, ANTIGRAVITY_QUOTA_FIELDS);
-}
-
-function normalizeClaudeQuota(value) {
-  return normalizeQuotaGroup(value, CLAUDE_QUOTA_FIELDS);
-}
-
-function normalizeCodexQuota(value) {
-  return normalizeQuotaGroup(value, CODEX_QUOTA_FIELDS);
-}
-
 function updateSessionFocusMetadata(sessionId, opts = {}) {
   const id = typeof sessionId === "string" ? sessionId : "";
   if (!id) return false;
@@ -1118,10 +1112,11 @@ function updateSessionFocusMetadata(sessionId, opts = {}) {
 // happened, and the badge derivation reads that tail), and never bump
 // updatedAt (a statusline refreshing every ~300ms would keep any session
 // eternally "fresh", defeating staleness sweeps and resurrecting completed
-// cards as idle). Quota/context are the only fields a statusline owns.
+// cards as idle). Context usage is the only per-session field a statusline
+// owns — account quota is not a session property and lives in the
+// session-independent store (updateAccountQuota below).
 // Broadcast goes through emitSessionSnapshot, whose signature dedup already
-// swallows no-op refreshes (quota values are stable between real updates
-// now that resets are stored as absolute timestamps).
+// swallows no-op refreshes.
 function updateSessionMetadata(sessionId, opts = {}) {
   const id = typeof sessionId === "string" ? sessionId : "";
   if (!id) return false;
@@ -1131,38 +1126,29 @@ function updateSessionMetadata(sessionId, opts = {}) {
     return false;
   }
   const contextUsage = normalizeContextUsage(opts.contextUsage);
-  const antigravityQuota = normalizeAntigravityQuota(opts.antigravityQuota);
-  const claudeQuota = normalizeClaudeQuota(opts.claudeQuota);
-  const codexQuota = normalizeCodexQuota(opts.codexQuota);
-  if (!contextUsage && !antigravityQuota && !claudeQuota && !codexQuota) return false;
-  let changed = false;
-  if (contextUsage && JSON.stringify(contextUsage) !== JSON.stringify(session.contextUsage)) {
+  if (!contextUsage) return false;
+  if (JSON.stringify(contextUsage) !== JSON.stringify(session.contextUsage)) {
     session.contextUsage = contextUsage;
-    changed = true;
-  }
-  if (antigravityQuota && JSON.stringify(antigravityQuota) !== JSON.stringify(session.antigravityQuota)) {
-    session.antigravityQuota = antigravityQuota;
-    changed = true;
-  }
-  if (claudeQuota && JSON.stringify(claudeQuota) !== JSON.stringify(session.claudeQuota)) {
-    session.claudeQuota = claudeQuota;
-    changed = true;
-  }
-  if (codexQuota && JSON.stringify(codexQuota) !== JSON.stringify(session.codexQuota)) {
-    session.codexQuota = codexQuota;
-    changed = true;
-  }
-  if (changed) {
-    // Freshness stamp for quota display arbitration only. Deliberately a
-    // separate field from updatedAt: staleness sweeps, badge derivation and
-    // eviction all key on updatedAt, and a statusline heartbeat must not
-    // feed them. Stamped only on real changes, so it cannot re-introduce a
-    // per-tick broadcast (and it is excluded from the snapshot signature
-    // like updatedAt anyway).
+    // Freshness stamp for telemetry arbitration. Deliberately a separate
+    // field from updatedAt: staleness sweeps, badge derivation and eviction
+    // all key on updatedAt, and a statusline heartbeat must not feed them.
+    // Stamped only on real changes, so it cannot re-introduce a per-tick
+    // broadcast (and it is excluded from the snapshot signature anyway).
     session.metadataUpdatedAt = Date.now();
     emitSessionSnapshot();
   }
   return true;
+}
+
+// Account-wide rate-limit quota reported by one source (host prefix for
+// remotes, null for this machine). Session-independent by design: the
+// numbers must survive session eviction and app restarts so "check the
+// remote's quota before starting work" has something honest to show — see
+// src/state-account-quota.js for the expiry/staleness contract.
+function updateAccountQuota(host, quotas = {}) {
+  const changed = accountQuota.update(host, quotas);
+  if (changed) emitSessionSnapshot();
+  return changed;
 }
 
 // ── #406 Stop completion gate ──
@@ -1313,9 +1299,6 @@ function updateSession(sessionId, state, event, opts = {}) {
     displayHint = undefined,
     sessionTitle = null,
     contextUsage = null,
-    antigravityQuota = null,
-    claudeQuota = null,
-    codexQuota = null,
     assistantLastOutput = null,
     assistantLastOutputTruncated = false,
     toolName = null,
@@ -1460,9 +1443,6 @@ function updateSession(sessionId, state, event, opts = {}) {
   // ever been named keeps that name until the user explicitly renames it.
   const srcSessionTitle = normalizeTitle(sessionTitle) || (existing && existing.sessionTitle) || null;
   const srcContextUsage = normalizeContextUsage(contextUsage) || (existing && existing.contextUsage) || null;
-  const srcAntigravityQuota = normalizeAntigravityQuota(antigravityQuota) || (existing && existing.antigravityQuota) || null;
-  const srcClaudeQuota = normalizeClaudeQuota(claudeQuota) || (existing && existing.claudeQuota) || null;
-  const srcCodexQuota = normalizeCodexQuota(codexQuota) || (existing && existing.codexQuota) || null;
   const srcAssistantLastOutput = normalizeAssistantOutput(assistantLastOutput);
   const srcAssistantLastOutputTruncated = !!(srcAssistantLastOutput && assistantLastOutputTruncated === true);
   const srcToolName = normalizeToolName(toolName) || (existing && existing.lastToolName) || null;
@@ -1587,12 +1567,11 @@ function updateSession(sessionId, state, event, opts = {}) {
   const srcLastStopAt = isStopBoundary
     ? Date.now()
     : (existing && Number.isFinite(existing.lastStopAt) ? existing.lastStopAt : null);
-  // metadataUpdatedAt rides along with the quota fields it timestamps: a
-  // lifecycle event that carries the quota forward from `existing` must not
-  // silently reset its freshness stamp, or stale carried-over quota would
-  // win display arbitration on updatedAt alone.
+  // metadataUpdatedAt rides along with the telemetry it timestamps
+  // (contextUsage): a lifecycle event that carries it forward from
+  // `existing` must not silently reset the freshness stamp.
   const srcMetadataUpdatedAt = existing && Number.isFinite(existing.metadataUpdatedAt) ? existing.metadataUpdatedAt : null;
-  const base = { sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, agentPid: srcAgentPid, agentId: srcAgentId, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, contextUsage: srcContextUsage, antigravityQuota: srcAntigravityQuota, claudeQuota: srcClaudeQuota, codexQuota: srcCodexQuota, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true };
+  const base = { sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, agentPid: srcAgentPid, agentId: srcAgentId, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, contextUsage: srcContextUsage, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true };
   if (preserveCompletionAck) base.requiresCompletionAck = true;
 
   // Evict oldest session if at capacity and this is a new session.
@@ -2314,6 +2293,7 @@ return {
   formatStdinDiag,
   updateSessionFocusMetadata,
   updateSessionMetadata,
+  updateAccountQuota,
   clearPermissionNotification,
   ackSessionCompletion,
   clearSessionsByAgent,
