@@ -365,23 +365,87 @@ function createPinButton(pinned) {
 
 // ── Account-quota strip ──
 // The maintainer's #370 direction: pet-attached, on-demand quota indicators,
-// with the Dashboard owning the detailed view. One compact line per source
-// (local + each remote host), providers abbreviated (AG/CC/CX are product
-// names, not translated), buckets as "5h%·weekly%". Expired buckets are
-// dropped (wall-clock window reset — see src/state-account-quota.js) and a
-// quiet source gets a muted age suffix instead of posing as live.
+// with the Dashboard owning the detailed view. One row per source (local +
+// each remote host): a soft pill per provider (AG/CC/CX are product names,
+// not translated) holding two ring gauges (5h / 7d) with the used% in the
+// center, ring colored by severity. Expired buckets are dropped (wall-clock
+// window reset — see src/state-account-quota.js) and a quiet source gets a
+// muted age line under its name instead of posing as live.
 const HUD_QUOTA_STALE_AFTER_MS = 5 * 60 * 1000;
 const HUD_QUOTA_PROVIDERS = [
   { key: "antigravityQuota", label: "AG", fiveHour: "geminiFiveHour", weekly: "geminiWeekly" },
   { key: "claudeQuota", label: "CC", fiveHour: "claudeFiveHour", weekly: "claudeWeekly" },
   { key: "codexQuota", label: "CX", fiveHour: "codexFiveHour", weekly: "codexWeekly" },
 ];
+const QUOTA_DONUT_SIZE = 24;
+const QUOTA_DONUT_STROKE = 3;
+const SVG_NS = "http://www.w3.org/2000/svg";
 
 function liveQuotaBucket(group, field, now) {
   const bucket = group && group[field];
   if (!bucket || typeof bucket !== "object") return null;
   if (Number.isFinite(bucket.resetAt) && bucket.resetAt <= now) return null;
   return bucket;
+}
+
+function quotaSeverityClass(percent) {
+  if (percent > 85) return "sev-hot";
+  if (percent >= 60) return "sev-warn";
+  return "sev-ok";
+}
+
+function createQuotaDonut(bucket, windowCap) {
+  const percent = Math.max(0, Math.min(100, Number(bucket.usedPercent) || 0));
+  const wrap = document.createElement("div");
+  wrap.className = "quota-donut-wrap";
+  wrap.title = `${windowCap} · ${percent}%`;
+
+  const size = QUOTA_DONUT_SIZE;
+  const half = size / 2;
+  const radius = half - QUOTA_DONUT_STROKE / 2 - 0.5;
+  const circumference = 2 * Math.PI * radius;
+
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "quota-donut");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+
+  const track = document.createElementNS(SVG_NS, "circle");
+  track.setAttribute("class", "track");
+  track.setAttribute("cx", String(half));
+  track.setAttribute("cy", String(half));
+  track.setAttribute("r", String(radius));
+  track.setAttribute("fill", "none");
+  track.setAttribute("stroke-width", String(QUOTA_DONUT_STROKE));
+  svg.appendChild(track);
+
+  const arc = document.createElementNS(SVG_NS, "circle");
+  arc.setAttribute("class", `arc ${quotaSeverityClass(percent)}`);
+  arc.setAttribute("cx", String(half));
+  arc.setAttribute("cy", String(half));
+  arc.setAttribute("r", String(radius));
+  arc.setAttribute("stroke-width", String(QUOTA_DONUT_STROKE));
+  // A hairline of arc even at 0% reads as "alive and unused" rather than
+  // "broken gauge"; full circle at 100%.
+  const filled = Math.max(circumference * (percent / 100), percent > 0 ? 1.2 : 0.6);
+  arc.setAttribute("stroke-dasharray", `${filled} ${circumference}`);
+  svg.appendChild(arc);
+
+  const text = document.createElementNS(SVG_NS, "text");
+  text.setAttribute("x", String(half));
+  text.setAttribute("y", String(half));
+  text.setAttribute("text-anchor", "middle");
+  text.setAttribute("dominant-baseline", "central");
+  text.textContent = String(Math.round(percent));
+  svg.appendChild(text);
+
+  wrap.appendChild(svg);
+  const cap = document.createElement("div");
+  cap.className = "quota-donut-cap";
+  cap.textContent = windowCap;
+  wrap.appendChild(cap);
+  return wrap;
 }
 
 function buildQuotaStrip(now) {
@@ -395,8 +459,10 @@ function buildQuotaStrip(now) {
   let hasAny = false;
 
   for (const source of sources) {
-    const parts = [];
+    const pills = document.createElement("div");
+    pills.className = "quota-pills";
     let oldestUpdatedAt = null;
+
     for (const def of HUD_QUOTA_PROVIDERS) {
       const provider = source[def.key];
       const group = provider && provider.group;
@@ -404,37 +470,44 @@ function buildQuotaStrip(now) {
       const fiveHour = liveQuotaBucket(group, def.fiveHour, now);
       const weekly = liveQuotaBucket(group, def.weekly, now);
       if (!fiveHour && !weekly) continue;
-      const nums = [
-        fiveHour ? `${fiveHour.usedPercent}%` : null,
-        weekly ? `${weekly.usedPercent}%` : null,
-      ].filter(Boolean).join("·");
-      parts.push(`${def.label} ${nums}`);
+
+      const pill = document.createElement("div");
+      pill.className = "quota-pill";
+      const label = document.createElement("span");
+      label.className = "quota-pill-label";
+      label.textContent = def.label;
+      pill.appendChild(label);
+      if (fiveHour) pill.appendChild(createQuotaDonut(fiveHour, "5h"));
+      if (weekly) pill.appendChild(createQuotaDonut(weekly, "7d"));
+      pills.appendChild(pill);
+
       const updatedAt = Number(provider.updatedAt);
       if (Number.isFinite(updatedAt)) {
         oldestUpdatedAt = oldestUpdatedAt === null ? updatedAt : Math.min(oldestUpdatedAt, updatedAt);
       }
     }
-    if (!parts.length) continue;
+    if (!pills.childElementCount) continue;
     hasAny = true;
 
     const row = document.createElement("div");
     row.className = "quota-strip-row";
-    if (multiSource || source.host) {
-      const label = document.createElement("span");
-      label.className = "quota-strip-source";
-      label.textContent = source.host || t("dashboardQuotaSourceLocal");
-      row.appendChild(label);
+    const isStale = oldestUpdatedAt !== null && now - oldestUpdatedAt > HUD_QUOTA_STALE_AFTER_MS;
+    if (multiSource || source.host || isStale) {
+      const sourceEl = document.createElement("div");
+      sourceEl.className = "quota-strip-source";
+      const host = document.createElement("span");
+      host.className = "quota-strip-host";
+      host.textContent = source.host || t("dashboardQuotaSourceLocal");
+      sourceEl.appendChild(host);
+      if (isStale) {
+        const stale = document.createElement("span");
+        stale.className = "quota-strip-stale";
+        stale.textContent = formatElapsed(now - oldestUpdatedAt);
+        sourceEl.appendChild(stale);
+      }
+      row.appendChild(sourceEl);
     }
-    const values = document.createElement("span");
-    values.className = "quota-strip-values";
-    values.textContent = parts.join("  ");
-    row.appendChild(values);
-    if (oldestUpdatedAt !== null && now - oldestUpdatedAt > HUD_QUOTA_STALE_AFTER_MS) {
-      const stale = document.createElement("span");
-      stale.className = "quota-strip-stale";
-      stale.textContent = formatElapsed(now - oldestUpdatedAt);
-      row.appendChild(stale);
-    }
+    row.appendChild(pills);
     strip.appendChild(row);
   }
 

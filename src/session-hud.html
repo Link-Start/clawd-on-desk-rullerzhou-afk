@@ -217,11 +217,15 @@ body { padding: 2px 3px 8px; }
   white-space: nowrap;
 }
 
-/* Account-quota strip: one compact line per reporting source, above the
-   session rows. At-a-glance only — the Dashboard owns the detailed view. */
+/* Account-quota strip: per reporting source, ring gauges grouped in a soft
+   pill per provider, above the session rows. At-a-glance only — the
+   Dashboard owns the detailed view. */
 .quota-strip {
-  padding: 3px 10px 2px;
+  padding: 5px 10px 4px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 @media (prefers-color-scheme: dark) {
   .quota-strip { border-bottom-color: rgba(255, 255, 255, 0.10); }
@@ -229,25 +233,83 @@ body { padding: 2px 3px 8px; }
 .quota-strip-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 10px;
-  line-height: 16px;
+  gap: 8px;
   white-space: nowrap;
   overflow: hidden;
 }
 .quota-strip-source {
-  font-weight: 600;
-  opacity: 0.75;
-  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  flex: 0 1 auto;
 }
-.quota-strip-values {
+.quota-strip-host {
+  font-size: 10px;
+  font-weight: 600;
+  opacity: 0.78;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .quota-strip-stale {
+  font-size: 8.5px;
+  opacity: 0.5;
+}
+.quota-pills {
+  display: flex;
+  gap: 6px;
   margin-left: auto;
-  opacity: 0.55;
   flex: 0 0 auto;
+}
+.quota-pill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px 3px 6px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.045);
+}
+@media (prefers-color-scheme: dark) {
+  .quota-pill { background: rgba(255, 255, 255, 0.07); }
+}
+.quota-pill-label {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  opacity: 0.6;
+}
+.quota-donut-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+.quota-donut { display: block; }
+.quota-donut .track {
+  stroke: rgba(0, 0, 0, 0.10);
+}
+@media (prefers-color-scheme: dark) {
+  .quota-donut .track { stroke: rgba(255, 255, 255, 0.14); }
+}
+.quota-donut .arc {
+  fill: none;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: center;
+}
+.quota-donut .arc.sev-ok { stroke: #10b981; }
+.quota-donut .arc.sev-warn { stroke: #f59e0b; }
+.quota-donut .arc.sev-hot { stroke: #ef4444; }
+.quota-donut text {
+  font-size: 8px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  fill: var(--text, currentColor);
+}
+.quota-donut-cap {
+  font-size: 7px;
+  line-height: 1.1;
+  opacity: 0.5;
 }
 
 .state-chip {

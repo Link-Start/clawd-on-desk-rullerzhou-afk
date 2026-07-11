@@ -16,6 +16,17 @@ describe("session HUD account-quota strip", () => {
     assert.match(sessionHudHtml, /\.quota-strip\s*\{/);
   });
 
+  it("draws ring gauges per provider window with severity coloring", () => {
+    assert.match(sessionHudRenderer, /createQuotaDonut/);
+    assert.match(sessionHudRenderer, /stroke-dasharray/);
+    assert.match(sessionHudRenderer, /quotaSeverityClass/);
+    assert.match(sessionHudRenderer, /sev-hot/);
+    assert.match(sessionHudHtml, /\.quota-donut \.arc\.sev-ok/);
+    assert.match(sessionHudHtml, /\.quota-donut \.arc\.sev-warn/);
+    assert.match(sessionHudHtml, /\.quota-donut \.arc\.sev-hot/);
+    assert.match(sessionHudHtml, /\.quota-pill\s*\{/);
+  });
+
   it("drops expired buckets and labels quiet sources instead of posing as live", () => {
     assert.match(sessionHudRenderer, /liveQuotaBucket/);
     assert.match(sessionHudRenderer, /bucket\.resetAt <= now/);
