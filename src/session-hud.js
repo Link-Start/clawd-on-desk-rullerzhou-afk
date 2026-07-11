@@ -177,7 +177,7 @@ function computeHudLayout(snapshot, options = {}) {
 // + row padding), and the source-count logic must mirror the renderer's
 // "would this source draw anything" rules (expired buckets drop).
 const HUD_QUOTA_ROW_HEIGHT = 54;
-const HUD_QUOTA_STRIP_PADDING_Y = 12;
+const HUD_QUOTA_STRIP_PADDING_Y = 14;
 const HUD_QUOTA_MIN_WIDTH = 300;
 
 function hasLiveQuotaBucket(providerEntry, now) {

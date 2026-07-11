@@ -221,8 +221,11 @@ body { padding: 2px 3px 8px; }
    pill per provider, above the session rows. At-a-glance only — the
    Dashboard owns the detailed view. */
 .quota-strip {
-  /* right padding clears the absolutely-positioned pin button corner */
-  padding: 6px 26px 5px 10px;
+  /* Its own block, not part of the session-list rhythm: inset margins make
+     the separator a floating hairline, and the right inset keeps the pills
+     clear of the card-level pin button corner. */
+  margin: 5px 8px 2px;
+  padding: 2px 18px 4px 2px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.08);
   display: flex;
   flex-direction: column;
