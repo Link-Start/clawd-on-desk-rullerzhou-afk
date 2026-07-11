@@ -13,6 +13,8 @@ const {
   computeHudOuterWidth,
   evaluateBaseEligible,
   evaluateShouldShow,
+  countQuotaSources,
+  computeQuotaStripHeight,
   pointInExpandedRect,
   computeAutoHideHotZone,
   pointInHotZone,
@@ -354,6 +356,44 @@ describe("session HUD layout", () => {
     );
     assert.strictEqual(computeHudHeight(0), constants.HUD_ROW_HEIGHT);
     assert.strictEqual(computeHudHeight(-1), constants.HUD_ROW_HEIGHT);
+  });
+
+  it("adds the quota strip height and sizes a strip-only card to the strip alone", () => {
+    const strip = computeQuotaStripHeight(1);
+    assert.strictEqual(strip, constants.HUD_QUOTA_ROW_HEIGHT + constants.HUD_QUOTA_STRIP_PADDING_Y);
+    assert.strictEqual(
+      computeHudHeight(2, strip),
+      constants.HUD_ROW_HEIGHT * 2 + strip + constants.HUD_BORDER_Y
+    );
+    // Quota with zero sessions: no phantom session row in the height.
+    assert.strictEqual(computeHudHeight(0, strip), strip + constants.HUD_BORDER_Y);
+    assert.strictEqual(computeQuotaStripHeight(0), 0);
+  });
+
+  it("counts quota sources with the renderer's live-bucket rules", () => {
+    const future = Date.now() + 3600000;
+    const past = Date.now() - 60000;
+    const snapshot = {
+      sessions: [],
+      accountQuota: [
+        { host: "pi", claudeQuota: { group: { claudeWeekly: { usedPercent: 41, resetAt: future } }, updatedAt: 1 } },
+        { host: "expired", codexQuota: { group: { codexFiveHour: { usedPercent: 9, resetAt: past } }, updatedAt: 1 } },
+      ],
+    };
+    assert.strictEqual(countQuotaSources(snapshot, true), 1, "expired-only source must not count");
+    assert.strictEqual(countQuotaSources(snapshot, false), 0, "hudShowQuota off disables the strip");
+  });
+
+  it("quota alone makes the HUD base-eligible (check-before-work with zero sessions)", () => {
+    const quotaOnly = {
+      sessions: [],
+      accountQuota: [
+        { host: "pi", claudeQuota: { group: { claudeWeekly: { usedPercent: 41, resetAt: Date.now() + 3600000 } }, updatedAt: 1 } },
+      ],
+    };
+    assert.strictEqual(evaluateBaseEligible({ snapshot: quotaOnly, showQuota: true }), true);
+    assert.strictEqual(evaluateBaseEligible({ snapshot: quotaOnly, showQuota: false }), false);
+    assert.strictEqual(evaluateBaseEligible({ snapshot: { sessions: [], accountQuota: [] }, showQuota: true }), false);
   });
 });
 

@@ -519,11 +519,16 @@ function render() {
   updateUnread(sessions);
   hudEl.replaceChildren();
   hudEl.classList.add("has-pin");
-  if (!sessions.length) return;
 
   const now = Date.now();
   const quotaStrip = buildQuotaStrip(now);
   if (quotaStrip) hudEl.appendChild(quotaStrip);
+  if (!sessions.length) {
+    // Quota-only card ("check the quota before starting work"): the strip
+    // stands alone, and the pin still works so it can be kept on screen.
+    if (quotaStrip) hudEl.appendChild(createPinButton(snapshot.hudPinned === true));
+    return;
+  }
   const { expanded, folded } = splitHudLayout(sessions);
 
   for (const session of expanded) {

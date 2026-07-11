@@ -66,12 +66,17 @@ function evaluateBaseEligible({
   petHidden,
   miniMode,
   miniTransitioning,
+  showQuota,
 }) {
   if (!snapshot) return false;
   if (sessionHudEnabled === false) return false;
   if (petHidden) return false;
   if (miniMode || miniTransitioning) return false;
-  return snapshotHasVisibleSessions(snapshot);
+  // Account quota alone is enough to show the HUD: the headline use case
+  // ("check the remote's quota BEFORE starting work") is exactly the
+  // zero-sessions moment.
+  return snapshotHasVisibleSessions(snapshot)
+    || countQuotaSources(snapshot, showQuota) > 0;
 }
 
 function pointInExpandedRect(point, rect, pad) {
@@ -124,6 +129,7 @@ function evaluateShouldShow({
   petHidden,
   miniMode,
   miniTransitioning,
+  showQuota,
 }) {
   const baseEligible = evaluateBaseEligible({
     snapshot,
@@ -131,6 +137,7 @@ function evaluateShouldShow({
     petHidden,
     miniMode,
     miniTransitioning,
+    showQuota,
   });
   if (!baseEligible) return { show: false, nextHoldUntil: 0 };
   if (sessionHudPinned === true) return { show: true, nextHoldUntil: 0 };
@@ -212,7 +219,10 @@ function computeQuotaStripHeight(quotaSourceRows) {
 
 function computeHudHeight(rowCount, quotaStripHeight = 0) {
   const strip = Number.isFinite(quotaStripHeight) && quotaStripHeight > 0 ? quotaStripHeight : 0;
-  if (!Number.isFinite(rowCount) || rowCount <= 0) return HUD_ROW_HEIGHT + strip;
+  if (!Number.isFinite(rowCount) || rowCount <= 0) {
+    // Strip-only card (quota with zero sessions) sizes to the strip alone.
+    return strip > 0 ? strip + HUD_BORDER_Y : HUD_ROW_HEIGHT;
+  }
   return rowCount * HUD_ROW_HEIGHT + strip + HUD_BORDER_Y;
 }
 
@@ -362,6 +372,7 @@ module.exports = function initSessionHud(ctx) {
       petHidden: ctx.petHidden,
       miniMode: getMiniMode(),
       miniTransitioning: getMiniTransitioning(),
+      showQuota: ctx.sessionHudShowQuota !== false,
     });
   }
 
@@ -447,6 +458,7 @@ module.exports = function initSessionHud(ctx) {
       petHidden: ctx.petHidden,
       miniMode: getMiniMode(),
       miniTransitioning: getMiniTransitioning(),
+      showQuota: ctx.sessionHudShowQuota !== false,
     });
     visibleHoldUntil = result.nextHoldUntil;
     // In revealed state, poll detecting !show means user moved away past grace.
