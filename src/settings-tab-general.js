@@ -16,6 +16,7 @@
     "sessionHudShowStateLabels",
     "sessionHudShowElapsed",
     "sessionHudShowContextUsage",
+    "sessionHudShowQuota",
     "sessionHudCleanupDetached",
     "allowEdgePinning",
     "disableMiniMode",
@@ -56,6 +57,7 @@
     "sessionHudShowStateLabels",
     "sessionHudShowElapsed",
     "sessionHudShowContextUsage",
+    "sessionHudShowQuota",
     "sessionHudCleanupDetached",
   ];
   const SESSION_HUD_SUMMARY_KEYS = new Set([
@@ -63,6 +65,7 @@
     "sessionHudShowStateLabels",
     "sessionHudShowElapsed",
     "sessionHudShowContextUsage",
+    "sessionHudShowQuota",
     "sessionHudCleanupDetached",
   ]);
   const BUBBLE_SECONDS_AUTO_COMMIT_DELAY_MS = 600;
@@ -475,6 +478,12 @@
         disabled: !sessionHudControlsEnabled,
       }),
       helpers.buildSwitchRow({
+        key: "sessionHudShowQuota",
+        labelKey: "rowSessionHudQuota",
+        descKey: "rowSessionHudQuotaDesc",
+        disabled: !sessionHudControlsEnabled,
+      }),
+      helpers.buildSwitchRow({
         key: "sessionHudCleanupDetached",
         labelKey: "rowSessionHudCleanupDetached",
         descKey: "rowSessionHudCleanupDetachedDesc",
@@ -522,6 +531,13 @@
             snapshot.sessionHudShowContextUsage !== false ? onLabel : offLabel
           ),
           accent: snapshot.sessionHudShowContextUsage !== false,
+        });
+        items.push({
+          text: t("sessionHudSummaryQuota").replace(
+            "{state}",
+            snapshot.sessionHudShowQuota !== false ? onLabel : offLabel
+          ),
+          accent: snapshot.sessionHudShowQuota !== false,
         });
         items.push({
           text: t("sessionHudSummaryCleanup").replace(

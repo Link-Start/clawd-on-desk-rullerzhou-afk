@@ -142,6 +142,7 @@ const SCHEMA = {
   sessionHudShowStateLabels: { type: "boolean", default: true },
   sessionHudShowElapsed: { type: "boolean", default: false },
   sessionHudShowContextUsage: { type: "boolean", default: true },
+  sessionHudShowQuota: { type: "boolean", default: true },
   sessionHudCleanupDetached: { type: "boolean", default: true },
   sessionHudPinned: { type: "boolean", default: false },
   // Stale-cleanup intervals (ms). Defaults match the historical constants in

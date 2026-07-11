@@ -251,6 +251,7 @@ const updateRegistry = {
   sessionHudShowStateLabels: requireBoolean("sessionHudShowStateLabels"),
   sessionHudShowElapsed: requireBoolean("sessionHudShowElapsed"),
   sessionHudShowContextUsage: requireBoolean("sessionHudShowContextUsage"),
+  sessionHudShowQuota: requireBoolean("sessionHudShowQuota"),
   sessionHudCleanupDetached: requireBoolean("sessionHudCleanupDetached"),
   sessionHudPinned: requireBoolean("sessionHudPinned"),
   hideBubbles: requireBoolean("hideBubbles"),

@@ -537,6 +537,7 @@ module.exports = function initSessionHud(ctx) {
       hudShowStateLabels: ctx.sessionHudShowStateLabels !== false,
       hudShowElapsed: ctx.sessionHudShowElapsed !== false,
       hudShowContextUsage: ctx.sessionHudShowContextUsage !== false,
+      hudShowQuota: ctx.sessionHudShowQuota !== false,
       hudPinned: ctx.sessionHudPinned === true,
     });
   }

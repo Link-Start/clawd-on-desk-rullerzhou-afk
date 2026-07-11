@@ -217,6 +217,39 @@ body { padding: 2px 3px 8px; }
   white-space: nowrap;
 }
 
+/* Account-quota strip: one compact line per reporting source, above the
+   session rows. At-a-glance only — the Dashboard owns the detailed view. */
+.quota-strip {
+  padding: 3px 10px 2px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+@media (prefers-color-scheme: dark) {
+  .quota-strip { border-bottom-color: rgba(255, 255, 255, 0.10); }
+}
+.quota-strip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.quota-strip-source {
+  font-weight: 600;
+  opacity: 0.75;
+  flex: 0 0 auto;
+}
+.quota-strip-values {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.quota-strip-stale {
+  margin-left: auto;
+  opacity: 0.55;
+  flex: 0 0 auto;
+}
+
 .state-chip {
   flex: 0 0 auto;
   font-size: 10px;

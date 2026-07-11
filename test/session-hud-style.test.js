@@ -6,6 +6,29 @@ const path = require("node:path");
 const sessionHudHtml = fs.readFileSync(path.join(__dirname, "..", "src", "session-hud.html"), "utf8");
 const sessionHudRenderer = fs.readFileSync(path.join(__dirname, "..", "src", "session-hud-renderer.js"), "utf8");
 
+describe("session HUD account-quota strip", () => {
+  it("renders the per-source quota strip above session rows, gated by hudShowQuota", () => {
+    // Maintainer's #370 direction: pet-attached on-demand indicators; the
+    // Dashboard owns the detailed view.
+    assert.match(sessionHudRenderer, /buildQuotaStrip\(now\)/);
+    assert.match(sessionHudRenderer, /snapshot\.hudShowQuota === false/);
+    assert.match(sessionHudRenderer, /snapshot\.accountQuota/);
+    assert.match(sessionHudHtml, /\.quota-strip\s*\{/);
+  });
+
+  it("drops expired buckets and labels quiet sources instead of posing as live", () => {
+    assert.match(sessionHudRenderer, /liveQuotaBucket/);
+    assert.match(sessionHudRenderer, /bucket\.resetAt <= now/);
+    assert.match(sessionHudRenderer, /HUD_QUOTA_STALE_AFTER_MS/);
+    assert.match(sessionHudRenderer, /quota-strip-stale/);
+  });
+
+  it("hides the source label for a single local source (compact default)", () => {
+    assert.match(sessionHudRenderer, /multiSource \|\| source\.host/);
+    assert.match(sessionHudRenderer, /dashboardQuotaSourceLocal/);
+  });
+});
+
 describe("session HUD visual shell", () => {
   it("adds asymmetric body padding so the shadow has more room below than above", () => {
     assert.match(sessionHudHtml, /body\s*\{[\s\S]*padding:\s*2px 3px 8px;[\s\S]*\}/);

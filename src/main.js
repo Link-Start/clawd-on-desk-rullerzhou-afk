@@ -860,6 +860,7 @@ let sessionHudEnabled = _settingsController.get("sessionHudEnabled");
 let sessionHudShowStateLabels = _settingsController.get("sessionHudShowStateLabels");
 let sessionHudShowElapsed = _settingsController.get("sessionHudShowElapsed");
 let sessionHudShowContextUsage = _settingsController.get("sessionHudShowContextUsage");
+let sessionHudShowQuota = _settingsController.get("sessionHudShowQuota");
 let sessionHudCleanupDetached = _settingsController.get("sessionHudCleanupDetached");
 let sessionHudPinned = _settingsController.get("sessionHudPinned");
 let sessionStaleMs = _settingsController.get("sessionStaleMs");
@@ -1859,6 +1860,7 @@ const _sessionHud = require("./session-hud")({
   get sessionHudShowStateLabels() { return sessionHudShowStateLabels; },
   get sessionHudShowElapsed() { return sessionHudShowElapsed; },
   get sessionHudShowContextUsage() { return sessionHudShowContextUsage; },
+  get sessionHudShowQuota() { return sessionHudShowQuota; },
   get sessionHudPinned() { return sessionHudPinned; },
   get lowPowerIdleMode() { return lowPowerIdleMode; },
   getMiniMode: () => _mini.getMiniMode(),
@@ -3390,6 +3392,7 @@ const SETTINGS_MIRROR_SETTERS = {
   sessionHudShowStateLabels: (v) => { sessionHudShowStateLabels = v; },
   sessionHudShowElapsed: (v) => { sessionHudShowElapsed = v; },
   sessionHudShowContextUsage: (v) => { sessionHudShowContextUsage = v; },
+  sessionHudShowQuota: (v) => { sessionHudShowQuota = v; },
   sessionHudCleanupDetached: (v) => { sessionHudCleanupDetached = v; },
   sessionHudPinned: (v) => { sessionHudPinned = v; },
   sessionStaleMs: (v) => { sessionStaleMs = v; }, workingStaleMs: (v) => { workingStaleMs = v; },

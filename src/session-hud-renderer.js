@@ -5,7 +5,7 @@ const HUD_MAX_EXPANDED_ROWS_LABELS = 5;
 const HUD_TITLE_MAX_UNITS = 15;
 const RECENT_DONE_UNREAD_MS = 60 * 1000;
 
-let snapshot = { sessions: [], orderedIds: [], hudTotalNonIdle: 0, hudLastTitle: null, hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: true, hudPinned: false };
+let snapshot = { sessions: [], orderedIds: [], hudTotalNonIdle: 0, hudLastTitle: null, hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: true, hudShowQuota: true, hudPinned: false, accountQuota: [] };
 let i18nPayload = { lang: "en", translations: {} };
 
 const unreadSessions = new Set();
@@ -363,6 +363,84 @@ function createPinButton(pinned) {
   return btn;
 }
 
+// ── Account-quota strip ──
+// The maintainer's #370 direction: pet-attached, on-demand quota indicators,
+// with the Dashboard owning the detailed view. One compact line per source
+// (local + each remote host), providers abbreviated (AG/CC/CX are product
+// names, not translated), buckets as "5h%·weekly%". Expired buckets are
+// dropped (wall-clock window reset — see src/state-account-quota.js) and a
+// quiet source gets a muted age suffix instead of posing as live.
+const HUD_QUOTA_STALE_AFTER_MS = 5 * 60 * 1000;
+const HUD_QUOTA_PROVIDERS = [
+  { key: "antigravityQuota", label: "AG", fiveHour: "geminiFiveHour", weekly: "geminiWeekly" },
+  { key: "claudeQuota", label: "CC", fiveHour: "claudeFiveHour", weekly: "claudeWeekly" },
+  { key: "codexQuota", label: "CX", fiveHour: "codexFiveHour", weekly: "codexWeekly" },
+];
+
+function liveQuotaBucket(group, field, now) {
+  const bucket = group && group[field];
+  if (!bucket || typeof bucket !== "object") return null;
+  if (Number.isFinite(bucket.resetAt) && bucket.resetAt <= now) return null;
+  return bucket;
+}
+
+function buildQuotaStrip(now) {
+  if (snapshot.hudShowQuota === false) return null;
+  const sources = Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [];
+  if (!sources.length) return null;
+
+  const strip = document.createElement("div");
+  strip.className = "quota-strip";
+  const multiSource = sources.length > 1;
+  let hasAny = false;
+
+  for (const source of sources) {
+    const parts = [];
+    let oldestUpdatedAt = null;
+    for (const def of HUD_QUOTA_PROVIDERS) {
+      const provider = source[def.key];
+      const group = provider && provider.group;
+      if (!group) continue;
+      const fiveHour = liveQuotaBucket(group, def.fiveHour, now);
+      const weekly = liveQuotaBucket(group, def.weekly, now);
+      if (!fiveHour && !weekly) continue;
+      const nums = [
+        fiveHour ? `${fiveHour.usedPercent}%` : null,
+        weekly ? `${weekly.usedPercent}%` : null,
+      ].filter(Boolean).join("·");
+      parts.push(`${def.label} ${nums}`);
+      const updatedAt = Number(provider.updatedAt);
+      if (Number.isFinite(updatedAt)) {
+        oldestUpdatedAt = oldestUpdatedAt === null ? updatedAt : Math.min(oldestUpdatedAt, updatedAt);
+      }
+    }
+    if (!parts.length) continue;
+    hasAny = true;
+
+    const row = document.createElement("div");
+    row.className = "quota-strip-row";
+    if (multiSource || source.host) {
+      const label = document.createElement("span");
+      label.className = "quota-strip-source";
+      label.textContent = source.host || t("dashboardQuotaSourceLocal");
+      row.appendChild(label);
+    }
+    const values = document.createElement("span");
+    values.className = "quota-strip-values";
+    values.textContent = parts.join("  ");
+    row.appendChild(values);
+    if (oldestUpdatedAt !== null && now - oldestUpdatedAt > HUD_QUOTA_STALE_AFTER_MS) {
+      const stale = document.createElement("span");
+      stale.className = "quota-strip-stale";
+      stale.textContent = formatElapsed(now - oldestUpdatedAt);
+      row.appendChild(stale);
+    }
+    strip.appendChild(row);
+  }
+
+  return hasAny ? strip : null;
+}
+
 function render() {
   const sessions = orderedHudSessions(snapshot);
   updateUnread(sessions);
@@ -371,6 +449,8 @@ function render() {
   if (!sessions.length) return;
 
   const now = Date.now();
+  const quotaStrip = buildQuotaStrip(now);
+  if (quotaStrip) hudEl.appendChild(quotaStrip);
   const { expanded, folded } = splitHudLayout(sessions);
 
   for (const session of expanded) {
