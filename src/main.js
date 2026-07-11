@@ -276,6 +276,18 @@ function _readSystemOpenAtLogin() {
   ).openAtLogin;
 }
 
+function _getAgentIntegrationOptions(agentId) {
+  const agents = _settingsController && _settingsController.get("agents");
+  const entry = agents && agents[agentId];
+  if (!entry || typeof entry !== "object") return {};
+  const options = {};
+  if (agentId === "codebuddy") {
+    const customPermissionUrl = prefsModule.normalizeOptionalHttpUrl(entry.customPermissionUrl);
+    if (customPermissionUrl) options.customPermissionUrl = customPermissionUrl;
+  }
+  return options;
+}
+
 function _deferredResizePet(sizeKey) {
   // Bound to _menu.resizeWindow after menu module is created below. Settings
   // panel's size slider commands route through here so they get the same
@@ -341,7 +353,8 @@ const _settingsController = createSettingsController({
     setOpenAtLogin: _writeSystemOpenAtLogin,
     startMonitorForAgent: (id) => agentRuntime && agentRuntime.startMonitorForAgent(id),
     stopMonitorForAgent: (id) => agentRuntime && agentRuntime.stopMonitorForAgent(id),
-    syncIntegrationForAgent: (id) => agentRuntime ? agentRuntime.syncIntegrationForAgent(id) : false,
+    syncIntegrationForAgent: (id, options) =>
+      agentRuntime ? agentRuntime.syncIntegrationForAgent(id, options) : false,
     repairIntegrationForAgent: (id, options) =>
       agentRuntime ? agentRuntime.repairIntegrationForAgent(id, options) : false,
     stopIntegrationForAgent: (id) => agentRuntime ? agentRuntime.stopIntegrationForAgent(id) : false,
@@ -1893,6 +1906,7 @@ const _serverCtx = {
   isAgentEnabled: (agentId) => _isAgentEnabled({ agents: _settingsController.get("agents") }, agentId),
   shouldSyncAgentIntegration: (agentId) =>
     _shouldSyncAgentIntegration({ agents: _settingsController.get("agents") }, agentId),
+  getAgentIntegrationOptions: _getAgentIntegrationOptions,
   isAgentPermissionsEnabled: (agentId) => _isAgentPermissionsEnabled({ agents: _settingsController.get("agents") }, agentId),
   isAgentSubagentPermissionsEnabled: (agentId) => _isAgentSubagentPermissionsEnabled({ agents: _settingsController.get("agents") }, agentId),
   isCodexNativeNotificationSoundEnabled: () => _isCodexNativeNotificationSoundEnabled({ agents: _settingsController.get("agents") }),

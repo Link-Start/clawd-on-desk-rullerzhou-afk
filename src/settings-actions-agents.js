@@ -3,6 +3,8 @@
 const {
   AGENT_FLAGS,
   CODEX_PERMISSION_MODES,
+  normalizeOptionalHttpUrl,
+  normalizePathList,
 } = require("./prefs");
 const {
   getCodexPermissionMode,
@@ -54,6 +56,8 @@ const INSTALLABLE_AGENT_IDS = new Set([
   "qoderwork",
 ]);
 const SETTABLE_AGENT_FLAGS = AGENT_FLAGS.filter((flag) => flag !== "integrationInstalled");
+const CUSTOM_PERMISSION_URL_AGENT_IDS = new Set(["codebuddy"]);
+const CUSTOM_DISCOVERY_AGENT_IDS = new Set([...INSTALLABLE_AGENT_IDS, "custom"]);
 
 // setAgentFlag is atomic single-agent, single-flag toggle.
 // Payload `{ agentId, flag, value }` where flag is in AGENT_FLAGS.
@@ -110,7 +114,7 @@ function setAgentFlag(payload, deps) {
           isAgentIntegrationInstalled(snapshot, agentId)
           && typeof deps.syncIntegrationForAgent === "function"
         ) {
-          deps.syncIntegrationForAgent(agentId);
+          deps.syncIntegrationForAgent(agentId, buildAgentIntegrationOptions(snapshot, agentId));
         }
         if (typeof deps.startMonitorForAgent === "function") deps.startMonitorForAgent(agentId);
       }
@@ -143,6 +147,8 @@ const _validateUninstallAgentId = requireString("uninstallAgentIntegration.agent
 const _validateDismissInstallHintId = requireString("dismissAgentInstallHints.agentId");
 const _validateDismissCleanupHintId = requireString("dismissAgentCleanupHints.agentId");
 const _validateClearCleanupHintId = requireString("clearAgentCleanupHints.agentId");
+const _validateCustomPermissionUrlAgentId = requireString("setAgentCustomPermissionUrl.agentId");
+const _validateCustomDiscoveryPathsAgentId = requireString("setAgentCustomDiscoveryPaths.agentId");
 
 function setAgentPermissionMode(payload, deps) {
   if (!payload || typeof payload !== "object") {
@@ -223,6 +229,71 @@ function buildAgentCommit(snapshot, agentId, patch) {
   };
 }
 
+function buildAgentIntegrationOptions(snapshot, agentId) {
+  const entry = snapshot && snapshot.agents && snapshot.agents[agentId];
+  if (!entry || typeof entry !== "object") return {};
+  const options = {};
+  if (CUSTOM_PERMISSION_URL_AGENT_IDS.has(agentId)) {
+    const customPermissionUrl = normalizeOptionalHttpUrl(entry.customPermissionUrl);
+    if (customPermissionUrl) options.customPermissionUrl = customPermissionUrl;
+  }
+  return options;
+}
+
+function setAgentCustomPermissionUrl(payload, deps = {}) {
+  if (!payload || typeof payload !== "object") {
+    return { status: "error", message: "setAgentCustomPermissionUrl: payload must be an object" };
+  }
+  const idCheck = _validateCustomPermissionUrlAgentId(payload.agentId);
+  if (idCheck.status !== "ok") return idCheck;
+  if (!CUSTOM_PERMISSION_URL_AGENT_IDS.has(payload.agentId)) {
+    return {
+      status: "error",
+      message: `setAgentCustomPermissionUrl does not support ${payload.agentId}`,
+    };
+  }
+  if (typeof payload.value !== "string") {
+    return { status: "error", message: "setAgentCustomPermissionUrl.value must be a string" };
+  }
+  const value = normalizeOptionalHttpUrl(payload.value);
+  if (payload.value.trim() && !value) {
+    return { status: "error", message: "setAgentCustomPermissionUrl.value must be an http(s) URL" };
+  }
+  const snapshot = deps.snapshot || {};
+  const current = snapshot.agents && snapshot.agents[payload.agentId];
+  const currentValue = normalizeOptionalHttpUrl(current && current.customPermissionUrl);
+  if (currentValue === value) return { status: "ok", noop: true };
+  return {
+    status: "ok",
+    commit: buildAgentCommit(snapshot, payload.agentId, { customPermissionUrl: value }),
+  };
+}
+
+function setAgentCustomDiscoveryPaths(payload, deps = {}) {
+  if (!payload || typeof payload !== "object") {
+    return { status: "error", message: "setAgentCustomDiscoveryPaths: payload must be an object" };
+  }
+  const idCheck = _validateCustomDiscoveryPathsAgentId(payload.agentId);
+  if (idCheck.status !== "ok") return idCheck;
+  if (!CUSTOM_DISCOVERY_AGENT_IDS.has(payload.agentId)) {
+    return {
+      status: "error",
+      message: `setAgentCustomDiscoveryPaths does not support ${payload.agentId}`,
+    };
+  }
+  const paths = normalizePathList(payload.value);
+  const snapshot = deps.snapshot || {};
+  const current = snapshot.agents && snapshot.agents[payload.agentId];
+  const currentPaths = normalizePathList(current && current.customDiscoveryPaths);
+  if (paths.length === currentPaths.length && paths.every((value, index) => value === currentPaths[index])) {
+    return { status: "ok", noop: true };
+  }
+  return {
+    status: "ok",
+    commit: buildAgentCommit(snapshot, payload.agentId, { customDiscoveryPaths: paths }),
+  };
+}
+
 function withoutDismissedInstallHint(snapshot, agentId) {
   const current = snapshot && snapshot.dismissedAgentInstallHints;
   if (!current || typeof current !== "object" || Array.isArray(current)) return {};
@@ -266,7 +337,7 @@ async function installAgentIntegration(payload, deps = {}) {
   }
 
   try {
-    const result = await deps.syncIntegrationForAgent(agentId);
+    const result = await deps.syncIntegrationForAgent(agentId, buildAgentIntegrationOptions(snapshot, agentId));
     if (result === false) {
       return { status: "error", message: `No automatic integration install is available for ${agentId}` };
     }
@@ -407,6 +478,7 @@ async function repairAgentIntegration(payload, deps) {
 
   try {
     const result = await repairFn(agentId, {
+      ...buildAgentIntegrationOptions(snapshot, agentId),
       forceCodexHooksFeature: agentId === "codex" && forceCodexHooksFeature,
     });
     if (result === false) {
@@ -523,6 +595,8 @@ setAgentPermissionMode.lockKey = "agentIntegration";
 installAgentIntegration.lockKey = "agentIntegration";
 uninstallAgentIntegration.lockKey = "agentIntegration";
 repairAgentIntegration.lockKey = "agentIntegration";
+setAgentCustomPermissionUrl.lockKey = "agentIntegration";
+setAgentCustomDiscoveryPaths.lockKey = "agentIntegration";
 dismissAgentInstallHints.lockKey = "agentIntegration";
 dismissAgentCleanupHints.lockKey = "agentIntegration";
 clearAgentCleanupHints.lockKey = "agentIntegration";
@@ -591,7 +665,9 @@ module.exports = {
   dismissAgentInstallHints,
   installAgentIntegration,
   removeFromWsl,
+  setAgentCustomDiscoveryPaths,
   setAgentFlag,
+  setAgentCustomPermissionUrl,
   setAgentPermissionMode,
   uninstallAgentIntegration,
   repairAgentIntegration,

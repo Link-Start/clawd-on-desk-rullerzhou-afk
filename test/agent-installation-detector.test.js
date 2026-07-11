@@ -199,6 +199,50 @@ describe("agent installation detector", () => {
     assert.strictEqual(byId(report, "opencode").detectedInstalled, true);
   });
 
+  it("detects supported agents from custom discovery paths", () => {
+    const homeDir = makeHome();
+    const customConfigDir = path.join(homeDir, "custom-qwen-config");
+    mkdirp(customConfigDir);
+
+    const report = detectAgentInstallations({
+      homeDir,
+      now: 1,
+      snapshot: {
+        agents: {
+          "qwen-code": { customDiscoveryPaths: [customConfigDir] },
+        },
+      },
+    });
+    const qwen = byId(report, "qwen-code");
+
+    assert.strictEqual(qwen.detectedInstalled, true);
+    assert.strictEqual(qwen.confidence, "high");
+    assert.strictEqual(qwen.reason, "custom-path");
+    assert.match(qwen.detail, /custom-qwen-config/);
+  });
+
+  it("reports the shared custom tool discovery slot separately", () => {
+    const homeDir = makeHome();
+    const customExe = path.join(homeDir, "CustomAI.exe");
+    writeText(customExe, "");
+
+    const report = detectAgentInstallations({
+      homeDir,
+      now: 1,
+      snapshot: {
+        agents: {
+          custom: { customDiscoveryPaths: [customExe, path.join(homeDir, "missing")] },
+        },
+      },
+    });
+
+    assert.strictEqual(report.customTools.length, 2);
+    assert.strictEqual(report.customTools[0].detectedInstalled, true);
+    assert.strictEqual(report.customTools[0].reason, "custom-path");
+    assert.strictEqual(report.customTools[0].kind, "file");
+    assert.strictEqual(report.customTools[1].detectedInstalled, false);
+  });
+
   describe("kimi dual-generation detection (#563)", () => {
     it("detects an install when only ~/.kimi-code exists", () => {
       const homeDir = makeHome();

@@ -32,7 +32,7 @@ function makeRuntime(overrides = {}) {
     syncAntigravityHooksImpl: () => calls.push({ name: "antigravity" }),
     syncCursorHooksImpl: () => calls.push({ name: "cursor" }),
     syncCopilotHooksImpl: () => calls.push({ name: "copilot" }),
-    syncCodeBuddyHooksImpl: () => calls.push({ name: "codebuddy" }),
+    syncCodeBuddyHooksImpl: (options) => calls.push({ name: "codebuddy", options }),
     syncKiroHooksImpl: () => calls.push({ name: "kiro" }),
     syncKimiHooksImpl: () => calls.push({ name: "kimi" }),
     syncQwenHooksImpl: () => calls.push({ name: "qwen" }),
@@ -159,6 +159,37 @@ describe("integration sync runtime", () => {
 
     assert.ok(result === true || (result && typeof result === "object"));
     assert.deepStrictEqual(calls.map((entry) => entry.name), ["copilot"]);
+  });
+
+  it("passes custom integration options to CodeBuddy sync", () => {
+    const { runtime, calls } = makeRuntime();
+
+    runtime.syncIntegrationForAgent("codebuddy", {
+      customPermissionUrl: "https://approval.example.test/permission",
+    });
+
+    assert.deepStrictEqual(calls, [{
+      name: "codebuddy",
+      options: { customPermissionUrl: "https://approval.example.test/permission" },
+    }]);
+  });
+
+  it("reads saved custom integration options during startup sync", () => {
+    const { runtime, calls } = makeRuntime({
+      shouldSyncAgentIntegration: (agentId) => agentId === "codebuddy",
+      getAgentIntegrationOptions: (agentId) => (
+        agentId === "codebuddy"
+          ? { customPermissionUrl: "https://approval.example.test/permission" }
+          : {}
+      ),
+    });
+
+    runtime.syncEnabledStartupIntegrations();
+
+    assert.deepStrictEqual(calls, [{
+      name: "codebuddy",
+      options: { customPermissionUrl: "https://approval.example.test/permission" },
+    }]);
   });
 
   it("syncIntegrationForAgent treats count-style zero writes as a missing local integration", () => {

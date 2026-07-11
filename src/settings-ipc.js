@@ -91,6 +91,7 @@ function mapAgentMetadata(agent) {
   return {
     id: agent.id,
     name: agent.name,
+    category: agent.category,
     eventSource: agent.eventSource,
     capabilities: agent.capabilities || {},
   };
@@ -400,12 +401,13 @@ function registerSettingsIpc(options = {}) {
   handle("settings:detect-agent-installations", async (_ev, opts) => {
     try {
       const options = opts && typeof opts === "object" ? opts : {};
+      const detectorOptions = { fs, path, now, snapshot: settingsController.getSnapshot() };
       if (options.refreshWsl) {
         const { refreshWslDetection } = require("./agent-installation-detector");
-        await refreshWslDetection({ fs, path, now, skipDefaultIntegrations: false });
-        return detectAgentInstallations({ fs, path, now });
+        await refreshWslDetection({ ...detectorOptions, skipDefaultIntegrations: false });
+        return detectAgentInstallations(detectorOptions);
       }
-      return detectAgentInstallations({ fs, path, now });
+      return detectAgentInstallations(detectorOptions);
     } catch (err) {
       console.warn("Clawd: settings:detect-agent-installations failed:", err && err.message);
       return {

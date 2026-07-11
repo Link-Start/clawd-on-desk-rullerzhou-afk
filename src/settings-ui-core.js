@@ -171,6 +171,17 @@
     return "native";
   }
 
+  function readAgentCustomPermissionUrl(agentId) {
+    const entry = state.snapshot && state.snapshot.agents && state.snapshot.agents[agentId];
+    return entry && typeof entry.customPermissionUrl === "string" ? entry.customPermissionUrl : "";
+  }
+
+  function readAgentCustomDiscoveryPaths(agentId) {
+    const entry = state.snapshot && state.snapshot.agents && state.snapshot.agents[agentId];
+    const value = entry && entry.customDiscoveryPaths;
+    return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+  }
+
   function getShortcutValue(actionId) {
     const shortcuts = state.snapshot && state.snapshot.shortcuts;
     if (!shortcuts || typeof shortcuts !== "object") return null;
@@ -887,6 +898,7 @@
     const normalized = {
       checkedAt: Number.isFinite(source.checkedAt) ? source.checkedAt : null,
       agents: Array.isArray(source.agents) ? source.agents : [],
+      customTools: Array.isArray(source.customTools) ? source.customTools : [],
       skippedAgentIds: Array.isArray(source.skippedAgentIds) ? source.skippedAgentIds : [],
       wslAgents: Array.isArray(source.wslAgents) ? source.wslAgents : [],
       wslDistros: Array.isArray(source.wslDistros) ? source.wslDistros : [],
@@ -901,6 +913,7 @@
     const result = {
       checkedAt: null,
       agents: [],
+      customTools: [],
       skippedAgentIds: [],
       wslAgents: [],
       wslDistros: [],
@@ -1291,6 +1304,8 @@
     readAgentFlagValue,
     readAgentIntegrationInstalled,
     readAgentPermissionMode,
+    readAgentCustomPermissionUrl,
+    readAgentCustomDiscoveryPaths,
     getShortcutValue,
     getLang,
     readThemeOverrideMap,

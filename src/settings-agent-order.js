@@ -50,6 +50,12 @@ function buildSettingsAgentOrderExports() {
     return "eventSourceHook";
   }
 
+  function getAgentCategory(agent) {
+    const category = agent && typeof agent.category === "string" ? agent.category : "";
+    if (category === "work" || category === "office") return "work";
+    return "coding";
+  }
+
   function compareAgentNames(a, b) {
     return normalizeAgentName(a).localeCompare(normalizeAgentName(b), undefined, {
       sensitivity: "base",
@@ -98,6 +104,7 @@ function buildSettingsAgentOrderExports() {
     COLLAPSIBLE_AGENT_PRIORITY,
     NON_COLLAPSIBLE_AGENT_PRIORITY,
     getAgentEventSourceBadgeKey,
+    getAgentCategory,
     isAgentCollapsible,
     sortAgentMetadataForSettings,
   };

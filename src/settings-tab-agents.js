@@ -3,6 +3,7 @@
 (function initSettingsTabAgents(root) {
   const {
     getAgentEventSourceBadgeKey,
+    getAgentCategory,
     sortAgentMetadataForSettings,
   } = root.ClawdSettingsAgentOrder || {};
   let state = null;
@@ -15,6 +16,7 @@
     { id: "intercept", labelKey: "codexPermissionModeIntercept" },
   ];
   const INSTALL_HINT_CONFIDENCES = new Set(["high", "medium"]);
+  const CUSTOM_PERMISSION_URL_AGENT_IDS = new Set(["codebuddy"]);
   let agentHintActionPending = false;
   let agentInstallHintResetPending = false;
   let agentCleanupHintResetPending = false;
@@ -91,6 +93,8 @@
       parent.appendChild(buildAgentCleanupHintBanner(cleanupHints));
     }
 
+    parent.appendChild(buildCustomToolsSection());
+
     if (!runtime.agentMetadata || runtime.agentMetadata.length === 0) {
       const empty = document.createElement("div");
       empty.className = "placeholder";
@@ -158,19 +162,34 @@
     });
   }
 
-  function getInstallationHint(agentId) {
-    const hints = runtime.agentInstallationHints;
-    const entries = hints && Array.isArray(hints.agents) ? hints.agents : [];
-    return entries.find((entry) => entry && entry.agentId === agentId) || null;
+  function renderAgentSections(parent, agents) {
+    const categorized = categorizeAgentsForSections(agents);
+    const specs = [
+      ["connected", "agentSectionConnected", "agent-section-connected"],
+      ["recommended", "agentSectionRecommended", "agent-section-recommended"],
+      ["unavailable", "agentSectionUnavailable", "agent-section-unavailable"],
+    ];
+    for (const [key, titleKey, className] of specs) {
+      const sectionAgents = categorized[key];
+      if (!Array.isArray(sectionAgents) || sectionAgents.length === 0) continue;
+      const rows = buildCategoryGroupedAgentRows(sectionAgents);
+      const section = helpers.buildSection(t(titleKey), rows);
+      section.classList.add("agent-section", className);
+      parent.appendChild(section);
+    }
   }
 
-  function hasRecommendedLocalInstall(agentId) {
-    const entry = getInstallationHint(agentId);
-    return !!(
-      entry
-      && entry.detectedInstalled === true
-      && INSTALL_HINT_CONFIDENCES.has(entry.confidence)
-    );
+  function getCategory(agent) {
+    return typeof getAgentCategory === "function" ? getAgentCategory(agent) : "coding";
+  }
+
+  function categorizeAgentsByType(agents) {
+    const buckets = { coding: [], work: [] };
+    for (const agent of agents) {
+      const category = getCategory(agent) === "work" ? "work" : "coding";
+      buckets[category].push(agent);
+    }
+    return buckets;
   }
 
   function categorizeAgentsForSections(agents) {
@@ -192,21 +211,55 @@
     return sections;
   }
 
-  function renderAgentSections(parent, agents) {
-    const categorized = categorizeAgentsForSections(agents);
-    const specs = [
-      ["connected", "agentSectionConnected", "agent-section-connected"],
-      ["recommended", "agentSectionRecommended", "agent-section-recommended"],
-      ["unavailable", "agentSectionUnavailable", "agent-section-unavailable"],
-    ];
-    for (const [key, titleKey, className] of specs) {
-      const sectionAgents = categorized[key];
-      if (!Array.isArray(sectionAgents) || sectionAgents.length === 0) continue;
-      const groups = sectionAgents.map((agent) => buildAgentGroup(agent));
-      const section = helpers.buildSection(t(titleKey), groups);
-      section.classList.add("agent-section", className);
-      parent.appendChild(section);
+  function hasRecommendedLocalInstall(agentId) {
+    const entry = getInstallationHint(agentId);
+    return !!(
+      entry
+      && entry.detectedInstalled === true
+      && INSTALL_HINT_CONFIDENCES.has(entry.confidence)
+    );
+  }
+
+  function getInstallationHint(agentId) {
+    const hints = runtime.agentInstallationHints;
+    const entries = hints && Array.isArray(hints.agents) ? hints.agents : [];
+    return entries.find((entry) => entry && entry.agentId === agentId) || null;
+  }
+
+  function buildCategoryGroupedAgentRows(agents) {
+    const grouped = categorizeAgentsByType(agents);
+    const rows = [];
+    for (const [category, labelKey] of [
+      ["coding", "agentCategoryCoding"],
+      ["work", "agentCategoryWork"],
+    ]) {
+      const sectionAgents = grouped[category];
+      if (!sectionAgents || sectionAgents.length === 0) continue;
+      rows.push(buildAgentCategoryHeader(labelKey));
+      for (const agent of sectionAgents) rows.push(buildAgentGroup(agent));
     }
+    return rows;
+  }
+
+  function buildAgentCategoryHeader(labelKey) {
+    const row = document.createElement("div");
+    row.className = "agent-category-header";
+    row.textContent = t(labelKey);
+    return row;
+  }
+
+  function buildCustomToolsSection() {
+    const row = buildAgentTextInputRow({
+      agentId: "custom",
+      command: "setAgentCustomDiscoveryPaths",
+      labelKey: "rowCustomToolsDiscoveryPaths",
+      descKey: "rowCustomToolsDiscoveryPathsDesc",
+      placeholderKey: "rowCustomToolsDiscoveryPathsPlaceholder",
+      value: () => readers.readAgentCustomDiscoveryPaths("custom").join("; "),
+    });
+    const section = helpers.buildSection(t("agentCustomToolsSection"), [row]);
+    section.classList.add("agent-custom-tools-section");
+    return section;
   }
 
   function getRestoredCleanupDismissalAgentIds() {
@@ -720,6 +773,16 @@
         },
       }));
     }
+    if (CUSTOM_PERMISSION_URL_AGENT_IDS.has(agent.id) && caps.httpHook) {
+      rows.push(buildAgentTextInputRow({
+        agentId: agent.id,
+        command: "setAgentCustomPermissionUrl",
+        labelKey: "rowCodeBuddyCompatiblePermissionUrl",
+        descKey: "rowCodeBuddyCompatiblePermissionUrlDesc",
+        placeholderKey: "rowCodeBuddyCompatiblePermissionUrlPlaceholder",
+        value: () => readers.readAgentCustomPermissionUrl(agent.id),
+      }));
+    }
     // WSL instances: show detected agent installations across distros
     rows.push(...buildAgentInstanceRows(agent));
     return rows;
@@ -1150,6 +1213,76 @@
     ctrl.appendChild(sw);
     row.appendChild(ctrl);
     return row;
+  }
+
+  function buildAgentTextInputRow({
+    agentId,
+    command,
+    labelKey,
+    descKey,
+    placeholderKey,
+    value,
+  }) {
+    const row = document.createElement("div");
+    row.className = "row row-sub agent-text-input-row";
+
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t(labelKey);
+    text.appendChild(label);
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t(descKey);
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const ctrl = document.createElement("div");
+    ctrl.className = "row-control agent-text-input-control";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = typeof value === "function" ? value() : "";
+    input.placeholder = t(placeholderKey);
+    input.spellcheck = false;
+    input.addEventListener("click", (ev) => ev.stopPropagation());
+    input.addEventListener("keydown", (ev) => {
+      ev.stopPropagation();
+      if (ev.key === "Enter") input.blur();
+    });
+    input.addEventListener("change", () => {
+      saveAgentTextInput(input, { agentId, command });
+    });
+    ctrl.appendChild(input);
+    row.appendChild(ctrl);
+    return row;
+  }
+
+  function saveAgentTextInput(input, { agentId, command }) {
+    if (!window.settingsAPI || typeof window.settingsAPI.command !== "function") {
+      ops.showToast(t("toastSaveFailed") + "settings API unavailable", { error: true });
+      return;
+    }
+    const nextValue = input.value;
+    input.disabled = true;
+    window.settingsAPI.command(command, {
+      agentId,
+      value: nextValue,
+    }).then((result) => {
+      if (!result || result.status !== "ok") {
+        const msg = (result && result.message) || "unknown error";
+        ops.showToast(t("toastSaveFailed") + msg, { error: true });
+        return;
+      }
+      ops.showToast(t("toastAgentCustomSaved"));
+      if (command === "setAgentCustomDiscoveryPaths" && typeof ops.fetchAgentInstallationHints === "function") {
+        ops.fetchAgentInstallationHints({ force: true }).catch(() => {});
+      }
+    }).catch((err) => {
+      ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+    }).finally(() => {
+      input.disabled = false;
+    });
   }
 
   function patchInPlace(changes) {

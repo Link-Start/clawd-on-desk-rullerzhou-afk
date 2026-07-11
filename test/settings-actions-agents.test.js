@@ -17,6 +17,8 @@ test("settings agent actions expose the command surface", () => {
     "installAgentIntegration",
     "removeFromWsl",
     "repairAgentIntegration",
+    "setAgentCustomDiscoveryPaths",
+    "setAgentCustomPermissionUrl",
     "setAgentFlag",
     "setAgentPermissionMode",
     "uninstallAgentIntegration",
@@ -29,10 +31,50 @@ test("settings agent integration commands share a serialization lock", () => {
   assert.strictEqual(agentCommands.installAgentIntegration.lockKey, "agentIntegration");
   assert.strictEqual(agentCommands.uninstallAgentIntegration.lockKey, "agentIntegration");
   assert.strictEqual(agentCommands.repairAgentIntegration.lockKey, "agentIntegration");
+  assert.strictEqual(agentCommands.setAgentCustomPermissionUrl.lockKey, "agentIntegration");
+  assert.strictEqual(agentCommands.setAgentCustomDiscoveryPaths.lockKey, "agentIntegration");
   assert.strictEqual(agentCommands.dismissAgentInstallHints.lockKey, "agentIntegration");
   assert.strictEqual(agentCommands.dismissAgentCleanupHints.lockKey, "agentIntegration");
   assert.strictEqual(agentCommands.clearAgentCleanupHints.lockKey, "agentIntegration");
   assert.strictEqual(agentCommands.clearAgentInstallHints.lockKey, "agentIntegration");
+});
+
+test("settings agent actions save a CodeBuddy-compatible custom permission URL", () => {
+  const snapshot = prefs.getDefaults();
+  const result = agentCommands.setAgentCustomPermissionUrl({
+    agentId: "codebuddy",
+    value: " https://approval.example.test/permission ",
+  }, { snapshot });
+
+  assert.strictEqual(result.status, "ok");
+  assert.strictEqual(
+    result.commit.agents.codebuddy.customPermissionUrl,
+    "https://approval.example.test/permission"
+  );
+});
+
+test("settings agent actions reject non-http custom permission URLs", () => {
+  const result = agentCommands.setAgentCustomPermissionUrl({
+    agentId: "codebuddy",
+    value: "file:///tmp/permission",
+  }, { snapshot: prefs.getDefaults() });
+
+  assert.strictEqual(result.status, "error");
+  assert.match(result.message, /http/);
+});
+
+test("settings agent actions save custom discovery paths for the shared custom slot", () => {
+  const snapshot = prefs.getDefaults();
+  const result = agentCommands.setAgentCustomDiscoveryPaths({
+    agentId: "custom",
+    value: "C:\\Tools\\AI.exe; C:\\Tools\\AI.exe\nC:\\Tools\\AI\\config",
+  }, { snapshot });
+
+  assert.strictEqual(result.status, "ok");
+  assert.deepStrictEqual(result.commit.agents.custom.customDiscoveryPaths, [
+    "C:\\Tools\\AI.exe",
+    "C:\\Tools\\AI\\config",
+  ]);
 });
 
 test("settings agent actions enable an agent and preserve sibling flags", () => {
@@ -167,6 +209,27 @@ test("settings agent actions install an integration and enable ingress", async (
   assert.strictEqual(result.commit.agents["copilot-cli"].enabled, true);
   assert.deepStrictEqual(result.commit.dismissedAgentInstallHints, {});
   assert.deepStrictEqual(result.commit.dismissedAgentCleanupHints, {});
+});
+
+test("settings agent actions pass CodeBuddy custom hook URL during install", async () => {
+  const snapshot = prefs.getDefaults();
+  snapshot.agents.codebuddy.customPermissionUrl = "https://approval.example.test/permission";
+  const calls = [];
+  const deps = {
+    snapshot,
+    syncIntegrationForAgent: async (agentId, options) => {
+      calls.push({ agentId, options });
+      return { status: "ok", message: "installed" };
+    },
+  };
+
+  const result = await agentCommands.installAgentIntegration({ agentId: "codebuddy" }, deps);
+
+  assert.strictEqual(result.status, "ok");
+  assert.deepStrictEqual(calls, [{
+    agentId: "codebuddy",
+    options: { customPermissionUrl: "https://approval.example.test/permission" },
+  }]);
 });
 
 test("settings agent actions install reasonix integration and enable ingress", async () => {

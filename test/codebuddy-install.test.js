@@ -71,10 +71,43 @@ describe("CodeBuddy hook installer", () => {
     assert.ok(Array.isArray(permEntries));
     assert.strictEqual(permEntries.length, 1);
     const permHook = permEntries[0].hooks[0];
+    assert.strictEqual(permHook.name, "clawd");
     assert.strictEqual(permHook.type, "http");
     assert.ok(permHook.url.includes("127.0.0.1"));
     assert.ok(permHook.url.includes("/permission"));
     assert.strictEqual(permHook.timeout, 600);
+  });
+
+  it("registers a custom PermissionRequest HTTP hook URL", () => {
+    const settingsPath = makeTempSettingsFile({});
+    const result = registerCodeBuddyHooks({
+      silent: true,
+      settingsPath,
+      nodeBin: "/usr/local/bin/node",
+      customPermissionUrl: "https://approval.example.test/permission",
+    });
+
+    assert.strictEqual(result.added, 9);
+    const settings = readJson(settingsPath);
+    const permHook = settings.hooks.PermissionRequest[0].hooks[0];
+    assert.strictEqual(permHook.name, "clawd");
+    assert.strictEqual(permHook.type, "http");
+    assert.strictEqual(permHook.url, "https://approval.example.test/permission");
+    assert.strictEqual(permHook.timeout, 600);
+  });
+
+  it("rejects invalid custom PermissionRequest hook URLs", () => {
+    const settingsPath = makeTempSettingsFile({});
+
+    assert.throws(
+      () => registerCodeBuddyHooks({
+        silent: true,
+        settingsPath,
+        nodeBin: "/usr/local/bin/node",
+        customPermissionUrl: "file:///tmp/permission",
+      }),
+      /http\(s\) URL/
+    );
   });
 
   it("is idempotent on second run", () => {

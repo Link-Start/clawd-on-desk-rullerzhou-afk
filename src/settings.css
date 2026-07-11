@@ -914,8 +914,12 @@ html, body {
 }
 
 /* ── Agent badges ── */
-.agent-section + .agent-section {
+.agent-section + .agent-section,
+.agent-custom-tools-section + .agent-section {
   margin-top: 14px;
+}
+.agent-custom-tools-section {
+  margin-bottom: 14px;
 }
 .agent-section .section-title {
   display: flex;
@@ -924,6 +928,50 @@ html, body {
 }
 .agent-section-recommended .section-title {
   color: var(--accent);
+}
+.agent-category-header {
+  padding: 10px 16px 6px;
+  border-bottom: 1px solid var(--row-border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--panel-bg) 74%, var(--bg) 26%);
+}
+.agent-text-input-row {
+  align-items: flex-start;
+}
+.agent-text-input-control {
+  flex: 1 1 260px;
+  min-width: min(100%, 260px);
+}
+.agent-text-input-control input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+}
+.agent-text-input-control input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+@media (max-width: 720px) {
+  .agent-text-input-row {
+    flex-direction: column;
+    gap: 10px;
+  }
+  .agent-text-input-control {
+    width: 100%;
+    flex-basis: auto;
+  }
 }
 .agent-badges {
   display: inline-flex;

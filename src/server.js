@@ -105,6 +105,12 @@ function shouldSyncAgentIntegration(agentId) {
   return isAgentEnabled(agentId);
 }
 
+function getAgentIntegrationOptions(agentId) {
+  if (typeof ctx.getAgentIntegrationOptions !== "function") return {};
+  const result = ctx.getAgentIntegrationOptions(agentId);
+  return result && typeof result === "object" ? result : {};
+}
+
 function getHookServerPort() {
   return activeServerPort || readRuntimePortFn() || DEFAULT_SERVER_PORT;
 }
@@ -149,6 +155,7 @@ const integrationSync = createIntegrationSyncRuntime({
   shouldManageClaudeHooks,
   isAgentEnabled,
   shouldSyncAgentIntegration,
+  getAgentIntegrationOptions,
   startClaudeSettingsWatcher,
   stopClaudeSettingsWatcher,
 });
@@ -194,8 +201,8 @@ function clearClaudeHookGuardAfterClaudeSync(agentId, result) {
   return result;
 }
 
-function syncIntegrationForAgent(agentId) {
-  return clearClaudeHookGuardAfterClaudeSync(agentId, syncIntegrationForAgentBase(agentId));
+function syncIntegrationForAgent(agentId, options = {}) {
+  return clearClaudeHookGuardAfterClaudeSync(agentId, syncIntegrationForAgentBase(agentId, options));
 }
 
 function repairIntegrationForAgent(agentId, options = {}) {

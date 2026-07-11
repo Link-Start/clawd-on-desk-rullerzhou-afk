@@ -25,6 +25,7 @@ const {
 const MARKER = "codebuddy-hook.js";
 const DEFAULT_PARENT_DIR = path.join(os.homedir(), ".codebuddy");
 const DEFAULT_CONFIG_PATH = path.join(DEFAULT_PARENT_DIR, "settings.json");
+const CLAWD_PERMISSION_HOOK_NAME = "clawd";
 
 // CodeBuddy supported hook events (as of v1.16+)
 const CODEBUDDY_HOOK_EVENTS = [
@@ -37,6 +38,28 @@ const CODEBUDDY_HOOK_EVENTS = [
   "Notification",
   "PreCompact",
 ];
+
+function normalizeCustomPermissionUrl(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("customPermissionUrl must be a valid http(s) URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("customPermissionUrl must be a valid http(s) URL");
+  }
+  return trimmed;
+}
+
+function isManagedPermissionHook(hook) {
+  if (!hook || hook.type !== "http") return false;
+  if (hook.name === CLAWD_PERMISSION_HOOK_NAME) return true;
+  return isManagedPermissionUrl(hook.url);
+}
 
 /**
  * Register Clawd hooks into ~/.codebuddy/settings.json
@@ -139,7 +162,8 @@ function registerCodeBuddyHooks(options = {}) {
 
   // Register PermissionRequest HTTP hook (blocking, for permission bubble)
   const hookPort = readRuntimePort() || DEFAULT_SERVER_PORT;
-  const permissionUrl = buildPermissionUrl(hookPort);
+  const permissionUrl = normalizeCustomPermissionUrl(options.customPermissionUrl)
+    || buildPermissionUrl(hookPort);
   const permEvent = "PermissionRequest";
   if (!Array.isArray(settings.hooks[permEvent])) {
     settings.hooks[permEvent] = [];
@@ -154,14 +178,16 @@ function registerCodeBuddyHooks(options = {}) {
         if (!h || h.type !== "http" || typeof h.url !== "string") continue;
         // Only URLs we wrote ourselves are eligible for the in-place port
         // refresh; foreign endpoints are skipped and we append our own entry.
-        if (!isManagedPermissionUrl(h.url)) continue;
+        if (!isManagedPermissionHook(h)) continue;
         permFound = true;
+        if (h.name !== CLAWD_PERMISSION_HOOK_NAME) { h.name = CLAWD_PERMISSION_HOOK_NAME; changed = true; }
         if (h.url !== permissionUrl) { h.url = permissionUrl; updated++; changed = true; }
         break;
       }
     }
-    if (!permFound && entry.type === "http" && typeof entry.url === "string" && isManagedPermissionUrl(entry.url)) {
+    if (!permFound && entry.type === "http" && typeof entry.url === "string" && isManagedPermissionHook(entry)) {
       permFound = true;
+      if (entry.name !== CLAWD_PERMISSION_HOOK_NAME) { entry.name = CLAWD_PERMISSION_HOOK_NAME; changed = true; }
       if (entry.url !== permissionUrl) { entry.url = permissionUrl; updated++; changed = true; }
     }
     if (permFound) break;
@@ -169,7 +195,7 @@ function registerCodeBuddyHooks(options = {}) {
   if (!permFound) {
     settings.hooks[permEvent].push({
       matcher: "",
-      hooks: [{ type: "http", url: permissionUrl, timeout: 600 }],
+      hooks: [{ name: CLAWD_PERMISSION_HOOK_NAME, type: "http", url: permissionUrl, timeout: 600 }],
     });
     added++;
     changed = true;
@@ -217,7 +243,7 @@ function unregisterCodeBuddyHooks(options = {}) {
 
   if (Array.isArray(settings.hooks.PermissionRequest)) {
     const result = removeMatchingHttpHooks(settings.hooks.PermissionRequest, (hook) =>
-      hook && hook.type === "http" && isManagedPermissionUrl(hook.url)
+      isManagedPermissionHook(hook)
     );
     if (result.changed) {
       removed += result.removed;
@@ -241,7 +267,7 @@ module.exports = {
   registerCodeBuddyHooks,
   unregisterCodeBuddyHooks,
   CODEBUDDY_HOOK_EVENTS,
-  __test: { isManagedPermissionUrl },
+  __test: { isManagedPermissionUrl, normalizeCustomPermissionUrl },
 };
 
 if (require.main === module) {

@@ -275,7 +275,7 @@ const SCHEMA = {
       // antigravity branch). Default kept as false so legacy reads don't see a
       // stale "true" implying bubbles are enabled.
       "antigravity-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: false },
-      "codebuddy": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
+      "codebuddy": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true, customPermissionUrl: "", customDiscoveryPaths: [] },
       "kiro-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "kimi-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "qwen-code": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
@@ -288,7 +288,8 @@ const SCHEMA = {
       "qoder": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       "reasonix": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       // QoderWork is state-only (Phase 1) — permission bubbles default off.
-      "qoderwork": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
+      "qoderwork": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true, customDiscoveryPaths: [] },
+      "custom": { customDiscoveryPaths: [] },
     }),
     normalize: normalizeAgents,
   },
@@ -662,6 +663,32 @@ const AGENT_FLAGS = [
 ];
 const CODEX_PERMISSION_MODES = ["native", "intercept"];
 
+function normalizePathList(value) {
+  const raw = Array.isArray(value)
+    ? value
+    : (typeof value === "string" ? value.split(/[;\n]/g) : []);
+  const out = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const trimmed = entry.replace(/\0/g, "").trim();
+    if (!trimmed || out.includes(trimmed)) continue;
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function normalizeOptionalHttpUrl(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? trimmed : "";
+  } catch {
+    return "";
+  }
+}
+
 function normalizeDismissedUpdateVersions(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const out = {};
@@ -733,6 +760,23 @@ function normalizeAgents(value, defaultsValue) {
     if (id === "codex" && CODEX_PERMISSION_MODES.includes(entry.permissionMode)) {
       merged.permissionMode = entry.permissionMode;
       touched = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(base, "customPermissionUrl")) {
+      const customPermissionUrl = normalizeOptionalHttpUrl(entry.customPermissionUrl);
+      if (customPermissionUrl || typeof entry.customPermissionUrl === "string") {
+        merged.customPermissionUrl = customPermissionUrl;
+        touched = true;
+      }
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(base, "customDiscoveryPaths")
+      || Object.prototype.hasOwnProperty.call(entry, "customDiscoveryPaths")
+    ) {
+      const customDiscoveryPaths = normalizePathList(entry.customDiscoveryPaths);
+      if (customDiscoveryPaths.length > 0 || Object.prototype.hasOwnProperty.call(entry, "customDiscoveryPaths")) {
+        merged.customDiscoveryPaths = customDiscoveryPaths;
+        touched = true;
+      }
     }
     if (touched) out[id] = merged;
   }
@@ -1036,4 +1080,6 @@ module.exports = {
   mapLocaleToLang,
   normalizeThemeOverrides,
   normalizeShortcuts,
+  normalizeOptionalHttpUrl,
+  normalizePathList,
 };

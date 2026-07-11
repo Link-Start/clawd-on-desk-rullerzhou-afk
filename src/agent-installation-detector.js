@@ -5,7 +5,7 @@ const os = require("os");
 const path = require("path");
 
 const { getAgentDescriptors } = require("./doctor-detectors/agent-descriptors");
-const { DEFAULT_INTEGRATION_INSTALLED_IDS } = require("./prefs");
+const { DEFAULT_INTEGRATION_INSTALLED_IDS, normalizePathList } = require("./prefs");
 const copilot = require("../hooks/copilot-install");
 const hermes = require("../hooks/hermes-install");
 
@@ -43,6 +43,18 @@ function fileExists(fsImpl, filePath) {
     return fsImpl.statSync(filePath).isFile();
   } catch {
     return false;
+  }
+}
+
+function statPath(fsImpl, filePath) {
+  if (!filePath) return null;
+  try {
+    const stat = fsImpl.statSync(filePath);
+    if (stat.isDirectory()) return "dir";
+    if (stat.isFile()) return "file";
+    return "other";
+  } catch {
+    return null;
   }
 }
 
@@ -120,6 +132,7 @@ function resolveAgentPaths(descriptor, options) {
       parentDir,
       configPath: copilot.resolveCopilotHooksPath({ homeDir, env }),
       settingsPath: copilot.resolveCopilotSettingsPath({ homeDir, env }),
+      customDiscoveryPaths: customDiscoveryPathsForAgent(options, descriptor.agentId),
     };
   }
 
@@ -129,6 +142,7 @@ function resolveAgentPaths(descriptor, options) {
       parentDir: stateDir,
       stateDir,
       configPath,
+      customDiscoveryPaths: customDiscoveryPathsForAgent(options, descriptor.agentId),
     };
   }
 
@@ -140,6 +154,7 @@ function resolveAgentPaths(descriptor, options) {
       configPath: path.join(hermesHome, "plugins", hermes.PLUGIN_ID),
       configFilePath: path.join(hermesHome, "config.yaml"),
       commandPaths: hermesCommandPaths(hermesHome, platform, env),
+      customDiscoveryPaths: customDiscoveryPathsForAgent(options, descriptor.agentId),
     };
   }
 
@@ -155,7 +170,18 @@ function resolveAgentPaths(descriptor, options) {
       configPath: rebaseHomePath(target.configPath, homeDir),
     }));
   }
+  paths.customDiscoveryPaths = customDiscoveryPathsForAgent(options, descriptor.agentId);
   return paths;
+}
+
+function customDiscoveryPathsForAgent(options, agentId) {
+  const fromOption = options.customDiscoveryPaths && options.customDiscoveryPaths[agentId];
+  const agents = options.snapshot && options.snapshot.agents;
+  const fromPrefs = agents && agents[agentId] && agents[agentId].customDiscoveryPaths;
+  return normalizePathList([
+    ...normalizePathList(fromOption),
+    ...normalizePathList(fromPrefs),
+  ]);
 }
 
 function installationResult(detectedInstalled, confidence, reason, detail) {
@@ -266,6 +292,8 @@ function detectHermesInstallation(paths, options) {
 
 function detectInstallation(descriptor, paths, options) {
   const fsImpl = options.fs;
+  const custom = detectCustomDiscoveryPath(paths.customDiscoveryPaths, options);
+  if (custom) return custom;
   switch (descriptor.agentId) {
     case "gemini-cli":
       return detectGeminiInstallation(descriptor, paths, options);
@@ -311,6 +339,37 @@ function detectInstallation(descriptor, paths, options) {
       if (dirExists(fsImpl, paths.parentDir)) return installationResult(true, "medium", "parent-dir", `${paths.parentDir} exists`);
       return notFound();
   }
+}
+
+function detectCustomDiscoveryPath(paths, options) {
+  const fsImpl = options.fs;
+  for (const candidate of normalizePathList(paths)) {
+    const kind = statPath(fsImpl, candidate);
+    if (!kind) continue;
+    return installationResult(
+      true,
+      "high",
+      "custom-path",
+      `${candidate} exists (${kind})`
+    );
+  }
+  return null;
+}
+
+function detectCustomTools(options = {}) {
+  const fsImpl = options.fs || fs;
+  const paths = customDiscoveryPathsForAgent({ ...options, fs: fsImpl }, "custom");
+  return paths.map((candidate) => {
+    const kind = statPath(fsImpl, candidate);
+    return {
+      path: candidate,
+      detectedInstalled: !!kind,
+      confidence: kind ? "high" : LOW_CONFIDENCE,
+      reason: kind ? "custom-path" : "not-found",
+      detail: kind ? `${candidate} exists (${kind})` : `${candidate} was not found`,
+      kind: kind || null,
+    };
+  });
 }
 
 function markerInDirectoryFiles(fsImpl, dirPath, marker, options = {}) {
@@ -433,6 +492,7 @@ function detectAgentInstallations(options = {}) {
   return {
     checkedAt: checkedAtValue(options.now),
     agents,
+    customTools: detectCustomTools(options),
     skippedAgentIds,
     wslAgents: _cachedWslAgents,
     wslDistros: _cachedWslDistros,
