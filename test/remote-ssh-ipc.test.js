@@ -427,6 +427,45 @@ test("remoteSsh:deploy stamps via markDeployed (not full update) on success", as
   ipc.dispose();
 });
 
+test("remoteSsh:deploy expectedTarget carries every deploy-target field (chainStatusline false-drift regression)", async () => {
+  // Regression: expectedTarget is a hand-built field list. When
+  // chainStatusline joined DEPLOY_TARGET_FIELDS but not this list, every
+  // deploy of a chain-enabled profile false-positived as target drift
+  // ("deployed with previous settings — redeploy" on each run).
+  const { DEPLOY_TARGET_FIELDS, deployTargetFingerprint, deployTargetDrift } =
+    require("../src/remote-ssh-profile");
+  const profile = { ...baseProfile, chainStatusline: true };
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const settingsController = mockSettingsController([profile]);
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController,
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    deployFn: async () => ({ ok: true }),
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:deploy", "p1");
+
+  assert.equal(r.status, "ok");
+  assert.equal(r.warning, undefined, "unchanged profile must not report drift");
+  const args = settingsController._commandCalls[0].args;
+  for (const f of DEPLOY_TARGET_FIELDS) {
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(args.expectedTarget, f),
+      `expectedTarget missing deploy-target field: ${f}`
+    );
+  }
+  assert.equal(
+    deployTargetDrift(deployTargetFingerprint(args.expectedTarget), deployTargetFingerprint(profile)),
+    null,
+    "expectedTarget must fingerprint identically to the unchanged profile"
+  );
+  ipc.dispose();
+});
+
 test("runtime remote-node-detected event stamps profile node metadata", async () => {
   const ipcMain = mockIpcMain();
   const { BrowserWindow } = mockBrowserWindow();

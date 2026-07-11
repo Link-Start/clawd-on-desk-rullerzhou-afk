@@ -214,16 +214,19 @@ function registerRemoteSshIpc(options = {}) {
         // mutates lastDeployedAt.
         //
         // expectedTarget is a fingerprint captured at deploy start. If the
-        // user changed host / port / identityFile / remoteForwardPort /
-        // hostPrefix mid-deploy, the deploy ran against the old target —
-        // markDeployed no-ops in that case so we don't falsely claim the
-        // new (drifted) configuration is "deployed".
+        // user changed a deploy-target field mid-deploy, the deploy ran
+        // against the old target — markDeployed no-ops in that case so we
+        // don't falsely claim the new (drifted) configuration is
+        // "deployed". Must carry EVERY field in DEPLOY_TARGET_FIELDS
+        // (remote-ssh-profile.js), or profiles using the missing field
+        // false-positive as drifted on every deploy.
         const expectedTarget = {
           host: profile.host,
           port: profile.port,
           identityFile: profile.identityFile,
           remoteForwardPort: profile.remoteForwardPort,
           hostPrefix: profile.hostPrefix,
+          chainStatusline: profile.chainStatusline,
         };
         try {
           const stamp = await settingsController.applyCommand("remoteSsh.markDeployed", {
