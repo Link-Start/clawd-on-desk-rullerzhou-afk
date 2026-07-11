@@ -929,15 +929,46 @@ html, body {
 .agent-section-recommended .section-title {
   color: var(--accent);
 }
-.agent-category-header {
-  padding: 10px 16px 6px;
-  border-bottom: 1px solid var(--row-border);
+.agent-category-group {
+  align-items: stretch;
+  flex-direction: column;
+  padding: 0;
+  background: color-mix(in srgb, var(--panel-bg) 74%, var(--bg) 26%);
+}
+.agent-category-group + .agent-category-group {
+  border-top: 1px solid var(--row-border);
+}
+.agent-category-group > .collapsible-group-header {
+  min-height: 34px;
+  padding: 8px 14px;
+}
+.agent-category-group > .collapsible-group-header .row-label {
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  background: color-mix(in srgb, var(--panel-bg) 74%, var(--bg) 26%);
+}
+.agent-category-group > .collapsible-group-body {
+  padding: 0;
+}
+.agent-category-group > .collapsible-group-body > .row:last-child {
+  border-bottom: none;
+}
+.agent-category-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-bg) 70%, var(--bg) 30%);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 .agent-text-input-row {
   align-items: flex-start;

@@ -172,7 +172,7 @@
     for (const [key, titleKey, className] of specs) {
       const sectionAgents = categorized[key];
       if (!Array.isArray(sectionAgents) || sectionAgents.length === 0) continue;
-      const rows = buildCategoryGroupedAgentRows(sectionAgents);
+      const rows = buildCategoryGroupedAgentRows(key, sectionAgents);
       const section = helpers.buildSection(t(titleKey), rows);
       section.classList.add("agent-section", className);
       parent.appendChild(section);
@@ -226,7 +226,7 @@
     return entries.find((entry) => entry && entry.agentId === agentId) || null;
   }
 
-  function buildCategoryGroupedAgentRows(agents) {
+  function buildCategoryGroupedAgentRows(sectionKey, agents) {
     const grouped = categorizeAgentsByType(agents);
     const rows = [];
     for (const [category, labelKey] of [
@@ -235,17 +235,22 @@
     ]) {
       const sectionAgents = grouped[category];
       if (!sectionAgents || sectionAgents.length === 0) continue;
-      rows.push(buildAgentCategoryHeader(labelKey));
-      for (const agent of sectionAgents) rows.push(buildAgentGroup(agent));
+      rows.push(buildAgentCategoryGroup(sectionKey, category, labelKey, sectionAgents));
     }
     return rows;
   }
 
-  function buildAgentCategoryHeader(labelKey) {
-    const row = document.createElement("div");
-    row.className = "agent-category-header";
-    row.textContent = t(labelKey);
-    return row;
+  function buildAgentCategoryGroup(sectionKey, category, labelKey, agents) {
+    const count = document.createElement("span");
+    count.className = "agent-category-count";
+    count.textContent = String(agents.length);
+    return helpers.buildCollapsibleGroup({
+      id: `agents:${sectionKey}:${category}`,
+      title: t(labelKey),
+      summary: count,
+      children: agents.map((agent) => buildAgentGroup(agent)),
+      className: "agent-category-group",
+    });
   }
 
   function buildCustomToolsSection() {

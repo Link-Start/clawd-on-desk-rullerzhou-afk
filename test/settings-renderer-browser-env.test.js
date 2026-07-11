@@ -3930,6 +3930,18 @@ describe("settings renderer browser environment", () => {
     assert.ok(agentsSource.includes("function renderAgentSections("));
   });
 
+  it("renders Agent category groups as collapsible sections inside each status section", () => {
+    const agentsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-agents.js"), "utf8");
+    const css = fs.readFileSync(path.join(SRC_DIR, "settings.css"), "utf8");
+    assert.ok(agentsSource.includes("function buildAgentCategoryGroup("));
+    assert.ok(agentsSource.includes('id: `agents:${sectionKey}:${category}`'));
+    assert.ok(agentsSource.includes('className: "agent-category-group"'));
+    assert.ok(agentsSource.includes('count.className = "agent-category-count"'));
+    assert.ok(!agentsSource.includes("buildAgentCategoryHeader("));
+    assert.ok(css.includes(".agent-category-group > .collapsible-group-body"));
+    assert.ok(css.includes(".agent-category-count"));
+  });
+
   it("keeps Agent management capability-driven for Gemini wait-for-input alerts", () => {
     const agentsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-agents.js"), "utf8");
     assert.ok(agentsSource.includes("if (caps.notificationHook) {"));
