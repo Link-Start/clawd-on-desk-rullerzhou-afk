@@ -14,7 +14,7 @@
 // — same pattern as settings-changed broadcasts.
 
 const childProcess = require("child_process");
-const { deploy, startCodexMonitor, stopCodexMonitor } = require("./remote-ssh-deploy");
+const { deploy, startCodexMonitor, stopCodexMonitor, uninstallRemoteIntegrations } = require("./remote-ssh-deploy");
 const { buildSshArgs } = require("./remote-ssh-runtime");
 const {
   quoteForCmd,
@@ -59,6 +59,7 @@ function registerRemoteSshIpc(options = {}) {
   const deployFn = options.deployFn || deploy;
   const startCodexMonitorFn = options.startCodexMonitorFn || startCodexMonitor;
   const stopCodexMonitorFn = options.stopCodexMonitorFn || stopCodexMonitor;
+  const uninstallRemoteIntegrationsFn = options.uninstallRemoteIntegrationsFn || uninstallRemoteIntegrations;
 
   const disposers = [];
 
@@ -152,6 +153,43 @@ function registerRemoteSshIpc(options = {}) {
       return { status: "ok", state: remoteSshRuntime.getProfileStatus(id) };
     } catch (err) {
       return { status: "error", message: (err && err.message) || "disconnect threw" };
+    }
+  });
+
+  // ── Cleanup (profile deletion) ──
+  //
+  // Deleting a profile must not strand the remote's Clawd integrations: the
+  // deployed hooks and the registered statusline would otherwise keep firing
+  // into a dead forward port forever (and a chained third-party statusline
+  // would never be restored). The renderer fires this BEFORE the
+  // remoteSsh.delete settings command; everything here is best-effort — the
+  // host may already be unreachable — so the delete itself never blocks.
+  handle("remoteSsh:cleanup", async (_event, payload) => {
+    const id = typeof payload === "string" ? payload : (payload && payload.profileId);
+    if (typeof id !== "string" || !id) {
+      return { status: "error", message: "remoteSsh:cleanup requires { profileId }" };
+    }
+    const profile = findProfile(settingsController, id);
+    if (!profile) return { status: "error", message: "profile not found" };
+    try {
+      remoteSshRuntime.disconnect(id);
+      await stopCodexMonitorFn({ profile, runtime: remoteSshRuntime, deps: { spawn } })
+        .catch((err) => log("codex monitor stop failed:", err && err.message));
+      const result = await uninstallRemoteIntegrationsFn({
+        profile,
+        runtime: remoteSshRuntime,
+        deps: { spawn },
+      }).catch((err) => {
+        log("remote uninstall failed:", err && err.message);
+        return { ok: false };
+      });
+      if (result && result.ok === false) {
+        const stderr = (result.stderr || "").toString().trim();
+        log("remote uninstall incomplete for", profile.host, stderr.slice(0, 200));
+      }
+      return { status: "ok", uninstalled: !!(result && result.ok) };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || "cleanup threw" };
     }
   });
 

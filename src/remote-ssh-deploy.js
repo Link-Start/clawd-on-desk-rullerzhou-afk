@@ -61,6 +61,7 @@ const HOOK_FILES = [
   "state-payload-size.js",
   "clawd-hook.js",
   "install.js",
+  "uninstall.js",
   "codex-hook.js",
   "codex-assistant-output.js",
   "codex-install.js",
@@ -385,6 +386,47 @@ async function stopCodexMonitor({ profile, runtime = null, deps = {} }) {
   return { ok: true, stderr: r.stderr };
 }
 
+// Full remote cleanup for profile deletion: unregister the Claude hooks and
+// statusline (restoring a chained third-party statusline from its sidecar)
+// plus the Codex hooks, so nothing on the remote keeps firing into a dead
+// forward port after the profile is gone. Deliberately NOT run on mere
+// disconnect: installed hooks are harmless while the tunnel is down (their
+// POSTs die on an instant local connection refusal) and removing them would
+// force a full redeploy on every reconnect. Best-effort by design — the
+// host may already be unreachable at delete time.
+async function uninstallRemoteIntegrations({ profile, runtime = null, deps = {} }) {
+  const spawn = deps.spawn || childProcess.spawn;
+  let remoteNode = deps.nodeBin;
+  if (!remoteNode) {
+    const resolved = await resolveRemoteNodeBin({
+      profile,
+      spawn,
+      buildSshArgs,
+      runtime,
+      verifyCache: false,
+    });
+    if (!resolved.ok) {
+      return { ok: false, stderr: resolved.message || "Remote Node.js not found" };
+    }
+    remoteNode = resolved.nodeBin;
+  }
+  const steps = [
+    buildRemoteHookNodeCommand(remoteNode, "uninstall.js", []),
+    buildRemoteHookNodeCommand(remoteNode, "codex-install.js", ["--uninstall"]),
+  ];
+  let lastStderr = null;
+  let ok = true;
+  for (const cmd of steps) {
+    const args = buildSshArgs(profile).concat([cmd]);
+    const r = await spawnAndWait(spawn, "ssh", args, { timeoutMs: 30000, runtime });
+    if (r.code !== 0) {
+      ok = false;
+      lastStderr = r.stderr;
+    }
+  }
+  return { ok, stderr: lastStderr };
+}
+
 // ── Helpers ──
 
 function formatExit(r) {
@@ -404,4 +446,5 @@ module.exports = {
   deploy,
   startCodexMonitor,
   stopCodexMonitor,
+  uninstallRemoteIntegrations,
 };

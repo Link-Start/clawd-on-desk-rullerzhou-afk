@@ -148,6 +148,7 @@ FILES=(
   "$HOOKS_DIR/state-payload-size.js"
   "$HOOKS_DIR/clawd-hook.js"
   "$HOOKS_DIR/install.js"
+  "$HOOKS_DIR/uninstall.js"
   "$HOOKS_DIR/codex-hook.js"
   "$HOOKS_DIR/codex-assistant-output.js"
   "$HOOKS_DIR/codex-install.js"

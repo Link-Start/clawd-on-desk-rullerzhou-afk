@@ -316,7 +316,15 @@
     deleteBtn.addEventListener("click", () => {
       if (!confirm(t("remoteSshDeleteConfirm").replace("{label}", profile.label))) return;
       if (window.remoteSsh) {
-        window.remoteSsh.disconnect(profile.id);
+        // Fire-and-forget full cleanup (disconnect + stop monitor + remote
+        // hook/statusline unregister): the IPC handler captures the profile
+        // before the delete below removes it, and everything remote-side is
+        // best-effort, so the delete never waits on an unreachable host.
+        if (typeof window.remoteSsh.cleanup === "function") {
+          window.remoteSsh.cleanup(profile.id);
+        } else {
+          window.remoteSsh.disconnect(profile.id);
+        }
       }
       callCommand("remoteSsh.delete", profile.id).then((r) => {
         if (r && r.status === "ok") {

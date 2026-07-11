@@ -313,6 +313,71 @@ test("remoteSsh:disconnect calls runtime.disconnect with id", async () => {
   ipc.dispose();
 });
 
+// ── Cleanup (profile deletion) ──
+
+test("remoteSsh:cleanup disconnects, stops the monitor and uninstalls remote integrations", async () => {
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const rt = mockRuntime();
+  let disconnectId = null;
+  rt.disconnect = (id) => { disconnectId = id; return { profileId: id, status: "idle" }; };
+  const stopped = [];
+  const uninstalled = [];
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController([baseProfile]),
+    remoteSshRuntime: rt,
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    stopCodexMonitorFn: async ({ profile }) => { stopped.push(profile.id); return { ok: true }; },
+    uninstallRemoteIntegrationsFn: async ({ profile }) => { uninstalled.push(profile.id); return { ok: true }; },
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "p1");
+
+  assert.equal(r.status, "ok");
+  assert.equal(r.uninstalled, true);
+  assert.equal(disconnectId, "p1");
+  assert.deepEqual(stopped, ["p1"]);
+  assert.deepEqual(uninstalled, ["p1"]);
+  ipc.dispose();
+});
+
+test("remoteSsh:cleanup stays ok when the remote uninstall fails (best-effort)", async () => {
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController([baseProfile]),
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    stopCodexMonitorFn: async () => ({ ok: true }),
+    uninstallRemoteIntegrationsFn: async () => { throw new Error("host unreachable"); },
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "p1");
+
+  assert.equal(r.status, "ok");
+  assert.equal(r.uninstalled, false);
+  ipc.dispose();
+});
+
+test("remoteSsh:cleanup errors on unknown profile", async () => {
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController(),
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+  });
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "nope");
+  assert.equal(r.status, "error");
+  ipc.dispose();
+});
+
 // ── Deploy stamp ──
 
 test("remoteSsh:deploy stamps via markDeployed (not full update) on success", async () => {
@@ -792,8 +857,8 @@ test("dispose unregisters all handlers and detaches event listeners", () => {
     BrowserWindow,
     spawn: makeSucceedingSpawn().spawn,
   });
-  // Pre-dispose: 7 channels are registered.
-  assert.equal(ipcMain.handlers.size, 7);
+  // Pre-dispose: 8 channels are registered.
+  assert.equal(ipcMain.handlers.size, 8);
   ipc.dispose();
   assert.equal(ipcMain.handlers.size, 0);
   // After dispose, status-changed events should NOT broadcast.

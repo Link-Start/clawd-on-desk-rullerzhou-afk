@@ -13,6 +13,7 @@ const {
   deploy,
   startCodexMonitor,
   stopCodexMonitor,
+  uninstallRemoteIntegrations,
 } = require("../src/remote-ssh-deploy");
 const { clearRemoteNodeCache } = require("../src/remote-ssh-node");
 
@@ -450,6 +451,34 @@ test("stopCodexMonitor kills PID and removes pid file (best-effort)", async () =
   const cmd = calls[0].args[calls[0].args.length - 1];
   assert.match(cmd, /kill \$\(cat .*\.pid\)/);
   assert.match(cmd, /rm -f .*\.pid/);
+});
+
+test("uninstallRemoteIntegrations runs the Claude and Codex uninstallers over SSH", async () => {
+  const profile = { id: "p1", host: "pi", remoteForwardPort: 23335 };
+  const { spawn, calls } = makeRecordingSpawn([
+    { code: 0 },
+    { code: 0 },
+  ]);
+  const r = await uninstallRemoteIntegrations({ profile, deps: { spawn, nodeBin: "/usr/bin/node" } });
+
+  assert.equal(r.ok, true);
+  assert.equal(calls.length, 2);
+  const first = calls[0].args[calls[0].args.length - 1];
+  const second = calls[1].args[calls[1].args.length - 1];
+  assert.match(first, /uninstall\.js/);
+  assert.match(second, /codex-install\.js.*--uninstall/);
+});
+
+test("uninstallRemoteIntegrations reports failure but never throws when a step exits non-zero", async () => {
+  const profile = { id: "p1", host: "pi", remoteForwardPort: 23335 };
+  const { spawn } = makeRecordingSpawn([
+    { code: 1, stderr: "no route to host" },
+    { code: 0 },
+  ]);
+  const r = await uninstallRemoteIntegrations({ profile, deps: { spawn, nodeBin: "/usr/bin/node" } });
+
+  assert.equal(r.ok, false);
+  assert.match(r.stderr || "", /no route to host/);
 });
 
 test("deploy: registers each spawned child with runtime so cleanup can kill it", async () => {
