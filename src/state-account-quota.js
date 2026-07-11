@@ -43,15 +43,28 @@ const QUOTA_PROVIDER_KEYS = Object.keys(QUOTA_PROVIDER_FIELDS);
 const DEFAULT_PERSIST_PATH = path.join(os.homedir(), ".clawd", "account-quota.json");
 const PERSIST_DEBOUNCE_MS = 2000;
 
+// The host label is client-supplied (hooks read it from the deploy-written
+// prefix file, or fall back to the remote's hostname) and every tunnel
+// forwards into the same desktop port, so it cannot be origin-verified
+// here — the trust boundary is "machines the user deployed Clawd hooks to",
+// exactly as for the session cards' host grouping. Sanitize shape only:
+// control chars stripped, length capped, so a buggy reporter cannot pollute
+// the store/persist file with unbounded or unprintable keys.
+const SOURCE_HOST_MAX_LENGTH = 64;
+
 function normalizeSourceHost(host) {
-  return typeof host === "string" && host.trim() ? host.trim() : null;
+  if (typeof host !== "string") return null;
+  const cleaned = host.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  return cleaned ? cleaned.slice(0, SOURCE_HOST_MAX_LENGTH) : null;
 }
 
 function expireBuckets(group, nowMs) {
   const out = {};
   for (const [field, bucket] of Object.entries(group)) {
     if (Number.isFinite(bucket.resetAt) && bucket.resetAt <= nowMs) continue;
-    out[field] = bucket;
+    // Clone: snapshot consumers must never hold live references into the
+    // store, which doubles as the persistence source of truth.
+    out[field] = { ...bucket };
   }
   return Object.keys(out).length ? out : null;
 }
@@ -138,12 +151,17 @@ function createAccountQuotaStore(options = {}) {
       const group = normalizeQuotaGroup(quotas[providerKey], QUOTA_PROVIDER_FIELDS[providerKey]);
       if (!group) continue;
       const existing = record && record[providerKey];
-      if (existing && JSON.stringify(existing.group) === JSON.stringify(group)) continue;
+      // Per-bucket merge, never group replace: real payloads legitimately
+      // carry a single window (e.g. a Codex token_count with primary but no
+      // secondary), and a partial report must not evict a sibling bucket
+      // that is still valid — expiry, not omission, retires buckets.
+      const merged = existing ? { ...existing.group, ...group } : group;
+      if (existing && JSON.stringify(existing.group) === JSON.stringify(merged)) continue;
       if (!record) {
         record = { host: sourceHost };
         sources.set(key, record);
       }
-      record[providerKey] = { group, updatedAt: now() };
+      record[providerKey] = { group: merged, updatedAt: now() };
       changed = true;
     }
     if (changed) schedulePersist();

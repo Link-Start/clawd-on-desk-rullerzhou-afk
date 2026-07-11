@@ -58,6 +58,44 @@ describe("account quota store", () => {
     assert.strictEqual(snapshot[0].codexQuota, undefined, "fully expired provider disappears");
   });
 
+  it("merges partial reports per bucket instead of evicting siblings", () => {
+    const store = createAccountQuotaStore({ persistPath: null, now: () => 1000 });
+    store.update(null, {
+      codexQuota: {
+        codexFiveHour: { usedPercent: 4, resetAt: 999999 },
+        codexWeekly: { usedPercent: 43, resetAt: 999999 },
+      },
+    });
+    // Real Codex token_count payloads can legitimately carry only the
+    // primary window — the weekly bucket must survive the partial report.
+    store.update(null, { codexQuota: { codexFiveHour: { usedPercent: 9, resetAt: 999999 } } });
+
+    const group = store.snapshot()[0].codexQuota.group;
+    assert.strictEqual(group.codexFiveHour.usedPercent, 9);
+    assert.strictEqual(group.codexWeekly.usedPercent, 43, "partial report must not evict the sibling bucket");
+  });
+
+  it("shape-sanitizes the reporting host label (control chars stripped, length capped)", () => {
+    const store = createAccountQuotaStore({ persistPath: null, now: () => 1000 });
+    store.update(`evil\u0000host\n${"x".repeat(200)}`, {
+      claudeQuota: { claudeWeekly: { usedPercent: 1, resetAt: 999999 } },
+    });
+
+    const host = store.snapshot()[0].host;
+    assert.strictEqual(/[\x00-\x1f\x7f]/.test(host), false, "control chars must be stripped");
+    assert.ok(host.length <= 64, `host too long: ${host.length}`);
+    assert.ok(host.startsWith("evilhost"));
+  });
+
+  it("snapshot returns cloned buckets, not live references into the store", () => {
+    const store = createAccountQuotaStore({ persistPath: null, now: () => 1000 });
+    store.update(null, { claudeQuota: { claudeWeekly: { usedPercent: 41, resetAt: 999999 } } });
+
+    store.snapshot()[0].claudeQuota.group.claudeWeekly.usedPercent = 99;
+
+    assert.strictEqual(store.snapshot()[0].claudeQuota.group.claudeWeekly.usedPercent, 41);
+  });
+
   it("ignores unknown provider keys and invalid groups", () => {
     const store = createAccountQuotaStore({ persistPath: null, now: () => 1000 });
     assert.strictEqual(store.update("pi", {

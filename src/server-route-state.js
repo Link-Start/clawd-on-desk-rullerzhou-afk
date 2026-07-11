@@ -248,6 +248,10 @@ function handleStatePost(req, res, options) {
       // all ("check the remote's quota before starting work"), so it is
       // never gated on the session lookup that contextUsage annotation
       // performs. The source is the reporting host (null = this machine).
+      // `host` is client-supplied and cannot be origin-verified (every
+      // remote's reverse tunnel lands on the same local port) — same trust
+      // model as the session cards' host grouping: machines the user
+      // deployed Clawd hooks to. The store shape-sanitizes the label.
       if (typeof ctx.updateAccountQuota === "function"
         && (antigravityQuota || claudeQuota || codexQuota)) {
         ctx.updateAccountQuota(host, { antigravityQuota, claudeQuota, codexQuota });

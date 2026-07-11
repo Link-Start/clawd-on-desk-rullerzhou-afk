@@ -2262,6 +2262,10 @@ function getCurrentHitBox() { return currentHitBox; }
 function getStartupRecoveryActive() { return startupRecoveryActive; }
 
 function cleanup() {
+  // The persist debounce timer is unref'd, so a quota update inside the
+  // final debounce window before quit would otherwise never reach disk
+  // (main.js before-quit calls this cleanup).
+  accountQuota.flush();
   if (pendingTimer) clearTimeout(pendingTimer);
   pendingState = null;
   if (autoReturnTimer) clearTimeout(autoReturnTimer);

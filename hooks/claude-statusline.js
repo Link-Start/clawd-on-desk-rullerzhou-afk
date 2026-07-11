@@ -34,8 +34,11 @@ const STATE_POST_TIMEOUT_MS = 150;
 // statusline commands are arbitrarily-quoted shell one-liners).
 const CHAIN_SIDECAR_PATH = path.join(os.homedir(), ".claude", "hooks", "clawd-statusline-chain.json");
 // A hung chained script must not accumulate orphan processes across
-// statusline refreshes; well past any sane render time.
-const CHAIN_EXIT_CAP_MS = 10000;
+// statusline refreshes: Claude Code refreshes sub-second and nothing
+// serializes overlapping invocations, so the worst-case concurrent orphan
+// count is roughly cap / refresh-interval. 3s is still well past any sane
+// statusline render time while keeping that bound small.
+const CHAIN_EXIT_CAP_MS = 3000;
 
 function readChainedCommand(sidecarPath) {
   try {

@@ -1835,6 +1835,21 @@ describe("updateSession()", () => {
     assert.deepStrictEqual(snapshot.accountQuota, []);
   });
 
+  it("cleanup flushes pending account-quota writes to disk (before-quit path)", () => {
+    const persistPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "clawd-aq-")), "account-quota.json");
+    const localApi = require("../src/state")(makeCtx({ accountQuotaPersistPath: persistPath }));
+    localApi.updateAccountQuota("pi", {
+      claudeQuota: { claudeWeekly: { usedPercent: 41, resetAt: Date.now() + 3600000 } },
+    });
+    // The persist debounce has not fired yet — before-quit cleanup must not
+    // lose the final window of updates.
+    localApi.cleanup();
+
+    const persisted = JSON.parse(fs.readFileSync(persistPath, "utf8"));
+    assert.strictEqual(persisted.sources.length, 1);
+    assert.strictEqual(persisted.sources[0].host, "pi");
+  });
+
   it("snapshot accountQuota expires buckets whose resetAt has passed", () => {
     api.updateAccountQuota(null, {
       claudeQuota: {
