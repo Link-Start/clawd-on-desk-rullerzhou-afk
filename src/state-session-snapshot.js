@@ -342,6 +342,19 @@ function buildSessionSnapshot(sessions, options = {}) {
     // Session-independent per-source account quota (src/state-account-quota.js).
     // Injected by the caller so this module stays a pure sessions mapper.
     accountQuota: Array.isArray(options.accountQuota) ? options.accountQuota : [],
+    // Provider icons for the quota strip (same agent icons the session rows
+    // use, resolved via the injected accessor). Static per run — excluded
+    // from the snapshot signature.
+    quotaAgentIcons: (() => {
+      const iconFor = typeof options.getAgentIconUrl === "function"
+        ? options.getAgentIconUrl
+        : () => null;
+      return {
+        antigravityQuota: iconFor("antigravity-cli"),
+        claudeQuota: iconFor("claude-code"),
+        codexQuota: iconFor("codex"),
+      };
+    })(),
   };
 }
 

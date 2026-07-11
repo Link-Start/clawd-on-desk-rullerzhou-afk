@@ -27,11 +27,22 @@ describe("session HUD account-quota strip", () => {
     assert.match(sessionHudHtml, /\.quota-pill\s*\{/);
   });
 
-  it("drops expired buckets and labels quiet sources instead of posing as live", () => {
+  it("dims reset windows and labels quiet sources instead of posing as live", () => {
     assert.match(sessionHudRenderer, /liveQuotaBucket/);
     assert.match(sessionHudRenderer, /bucket\.resetAt <= now/);
+    // Expired = dimmed 0-ring, never the pre-reset high, never a vanished gauge.
+    assert.match(sessionHudRenderer, /usedPercent: 0, expired: true/);
+    assert.match(sessionHudRenderer, /sev-reset/);
+    assert.match(sessionHudHtml, /\.quota-donut-reset/);
     assert.match(sessionHudRenderer, /HUD_QUOTA_STALE_AFTER_MS/);
     assert.match(sessionHudRenderer, /quota-strip-stale/);
+  });
+
+  it("labels provider pills with agent icons, falling back to text", () => {
+    assert.match(sessionHudRenderer, /quotaAgentIcons/);
+    assert.match(sessionHudRenderer, /quota-pill-icon/);
+    assert.match(sessionHudRenderer, /quota-pill-label/);
+    assert.match(sessionHudHtml, /\.quota-pill-icon/);
   });
 
   it("hides the source label for a single local source (compact default)", () => {

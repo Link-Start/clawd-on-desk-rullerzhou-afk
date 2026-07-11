@@ -61,10 +61,16 @@ function normalizeSourceHost(host) {
 function expireBuckets(group, nowMs) {
   const out = {};
   for (const [field, bucket] of Object.entries(group)) {
-    if (Number.isFinite(bucket.resetAt) && bucket.resetAt <= nowMs) continue;
     // Clone: snapshot consumers must never hold live references into the
     // store, which doubles as the persistence source of truth.
-    out[field] = { ...bucket };
+    // A bucket whose window reset on wall clock is kept but FLAGGED: the
+    // pre-reset number would lie high, but hiding the gauge entirely reads
+    // as broken — renderers show expired buckets as a dimmed reset state.
+    if (Number.isFinite(bucket.resetAt) && bucket.resetAt <= nowMs) {
+      out[field] = { ...bucket, expired: true };
+    } else {
+      out[field] = { ...bucket };
+    }
   }
   return Object.keys(out).length ? out : null;
 }

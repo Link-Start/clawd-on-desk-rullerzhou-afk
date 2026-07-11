@@ -384,7 +384,12 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 function liveQuotaBucket(group, field, now) {
   const bucket = group && group[field];
   if (!bucket || typeof bucket !== "object") return null;
-  if (Number.isFinite(bucket.resetAt) && bucket.resetAt <= now) return null;
+  // Window reset on wall clock: the pre-reset number would lie high, but a
+  // vanished gauge reads as broken — show a dimmed 0 ("reset, nothing
+  // reported since") until the next live report replaces it.
+  if (bucket.expired === true || (Number.isFinite(bucket.resetAt) && bucket.resetAt <= now)) {
+    return { usedPercent: 0, expired: true };
+  }
   return bucket;
 }
 
@@ -396,9 +401,10 @@ function quotaSeverityClass(percent) {
 
 function createQuotaDonut(bucket, windowCap) {
   const percent = Math.max(0, Math.min(100, Number(bucket.usedPercent) || 0));
+  const expired = bucket.expired === true;
   const wrap = document.createElement("div");
-  wrap.className = "quota-donut-wrap";
-  wrap.title = `${windowCap} · ${percent}%`;
+  wrap.className = expired ? "quota-donut-wrap quota-donut-reset" : "quota-donut-wrap";
+  wrap.title = expired ? `${windowCap} · reset` : `${windowCap} · ${percent}%`;
 
   const size = QUOTA_DONUT_SIZE;
   const half = size / 2;
@@ -421,7 +427,7 @@ function createQuotaDonut(bucket, windowCap) {
   svg.appendChild(track);
 
   const arc = document.createElementNS(SVG_NS, "circle");
-  arc.setAttribute("class", `arc ${quotaSeverityClass(percent)}`);
+  arc.setAttribute("class", `arc ${expired ? "sev-reset" : quotaSeverityClass(percent)}`);
   arc.setAttribute("cx", String(half));
   arc.setAttribute("cy", String(half));
   arc.setAttribute("r", String(radius));
@@ -473,10 +479,20 @@ function buildQuotaStrip(now) {
 
       const pill = document.createElement("div");
       pill.className = "quota-pill";
-      const label = document.createElement("span");
-      label.className = "quota-pill-label";
-      label.textContent = def.label;
-      pill.appendChild(label);
+      pill.title = def.label;
+      const iconUrl = snapshot.quotaAgentIcons && snapshot.quotaAgentIcons[def.key];
+      if (iconUrl) {
+        const icon = document.createElement("img");
+        icon.className = "quota-pill-icon";
+        icon.src = iconUrl;
+        icon.alt = def.label;
+        pill.appendChild(icon);
+      } else {
+        const label = document.createElement("span");
+        label.className = "quota-pill-label";
+        label.textContent = def.label;
+        pill.appendChild(label);
+      }
       if (fiveHour) pill.appendChild(createQuotaDonut(fiveHour, "5h"));
       if (weekly) pill.appendChild(createQuotaDonut(weekly, "7d"));
       pills.appendChild(pill);

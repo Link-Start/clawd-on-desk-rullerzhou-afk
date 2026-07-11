@@ -187,25 +187,25 @@ const HUD_QUOTA_ROW_HEIGHT = 54;
 const HUD_QUOTA_STRIP_PADDING_Y = 14;
 const HUD_QUOTA_MIN_WIDTH = 300;
 
-function hasLiveQuotaBucket(providerEntry, now) {
+function hasLiveQuotaBucket(providerEntry) {
   const group = providerEntry && providerEntry.group;
   if (!group || typeof group !== "object") return false;
+  // Expired buckets still render (as a dimmed reset state), so any bucket
+  // at all means the strip will draw a row for this provider.
   for (const bucket of Object.values(group)) {
-    if (!bucket || typeof bucket !== "object") continue;
-    if (Number.isFinite(bucket.resetAt) && bucket.resetAt <= now) continue;
-    return true;
+    if (bucket && typeof bucket === "object") return true;
   }
   return false;
 }
 
-function countQuotaSources(snapshot, showQuota, now = Date.now()) {
+function countQuotaSources(snapshot, showQuota) {
   if (showQuota === false) return 0;
   const sources = snapshot && Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [];
   let count = 0;
   for (const source of sources) {
     if (!source || typeof source !== "object") continue;
     if ([source.antigravityQuota, source.claudeQuota, source.codexQuota]
-      .some((entry) => hasLiveQuotaBucket(entry, now))) {
+      .some((entry) => hasLiveQuotaBucket(entry))) {
       count += 1;
     }
   }

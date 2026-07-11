@@ -370,17 +370,19 @@ describe("session HUD layout", () => {
     assert.strictEqual(computeQuotaStripHeight(0), 0);
   });
 
-  it("counts quota sources with the renderer's live-bucket rules", () => {
+  it("counts quota sources with the renderer's draw rules (expired still renders)", () => {
     const future = Date.now() + 3600000;
     const past = Date.now() - 60000;
     const snapshot = {
       sessions: [],
       accountQuota: [
         { host: "pi", claudeQuota: { group: { claudeWeekly: { usedPercent: 41, resetAt: future } }, updatedAt: 1 } },
-        { host: "expired", codexQuota: { group: { codexFiveHour: { usedPercent: 9, resetAt: past } }, updatedAt: 1 } },
+        { host: "expired", codexQuota: { group: { codexFiveHour: { usedPercent: 9, resetAt: past, expired: true } }, updatedAt: 1 } },
       ],
     };
-    assert.strictEqual(countQuotaSources(snapshot, true), 1, "expired-only source must not count");
+    // Expired buckets render as a dimmed reset ring, so their source still
+    // needs a row in the window-height math.
+    assert.strictEqual(countQuotaSources(snapshot, true), 2);
     assert.strictEqual(countQuotaSources(snapshot, false), 0, "hudShowQuota off disables the strip");
   });
 

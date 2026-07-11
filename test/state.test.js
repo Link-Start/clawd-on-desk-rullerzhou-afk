@@ -1850,7 +1850,7 @@ describe("updateSession()", () => {
     assert.strictEqual(persisted.sources[0].host, "pi");
   });
 
-  it("snapshot accountQuota expires buckets whose resetAt has passed", () => {
+  it("snapshot accountQuota flags buckets whose resetAt has passed", () => {
     api.updateAccountQuota(null, {
       claudeQuota: {
         claudeFiveHour: { usedPercent: 80, resetAt: Date.now() - 60000 },
@@ -1861,8 +1861,10 @@ describe("updateSession()", () => {
     const { snapshot } = api.emitSessionSnapshot({ force: true });
     const group = snapshot.accountQuota[0].claudeQuota.group;
     // The five-hour window reset on wall clock: showing the pre-reset 80%
-    // would mislead high, so the bucket is dropped rather than displayed.
-    assert.strictEqual(group.claudeFiveHour, undefined);
+    // would mislead high, so the bucket is flagged and renderers draw a
+    // dimmed reset state instead of the stale number or a vanished gauge.
+    assert.strictEqual(group.claudeFiveHour.expired, true);
+    assert.strictEqual(group.claudeWeekly.expired, undefined);
     assert.strictEqual(group.claudeWeekly.usedPercent, 41);
   });
 
@@ -2131,7 +2133,11 @@ describe("buildSessionSnapshot", () => {
 
   it("returns a JSON-serializable empty snapshot", () => {
     const snapshot = api.buildSessionSnapshot();
-    assert.deepStrictEqual(snapshot, {
+    // Icon URLs are absolute file:// paths (machine-dependent) — assert the
+    // shape, then compare the rest exactly.
+    const { quotaAgentIcons, ...rest } = snapshot;
+    assert.deepStrictEqual(Object.keys(quotaAgentIcons).sort(), ["antigravityQuota", "claudeQuota", "codexQuota"]);
+    assert.deepStrictEqual(rest, {
       sessions: [],
       groups: [],
       orderedIds: [],

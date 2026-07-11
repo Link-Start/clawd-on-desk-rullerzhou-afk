@@ -111,7 +111,10 @@ function isExpiredBucket(bucket) {
 function liveBucket(group, field) {
   const bucket = group && group[field];
   if (!bucket || typeof bucket !== "object") return null;
-  return isExpiredBucket(bucket) ? null : bucket;
+  // Window reset on wall clock: render as 0% (nothing reported since the
+  // reset) rather than the pre-reset high or a vanished bar.
+  if (bucket.expired === true || isExpiredBucket(bucket)) return { usedPercent: 0 };
+  return bucket;
 }
 
 // renderQuotaSummary can run once a second (see the setInterval(render, 1000)

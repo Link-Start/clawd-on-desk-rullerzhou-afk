@@ -38,7 +38,7 @@ describe("account quota store", () => {
     assert.deepStrictEqual(store.snapshot().map((e) => e.host), [null, "alpha", "zeta"]);
   });
 
-  it("drops expired buckets at snapshot time and whole providers when nothing survives", () => {
+  it("flags expired buckets at snapshot time instead of hiding them", () => {
     let nowMs = 1000;
     const store = createAccountQuotaStore({ persistPath: null, now: () => nowMs });
     store.update(null, {
@@ -46,16 +46,16 @@ describe("account quota store", () => {
         claudeFiveHour: { usedPercent: 80, resetAt: 2000 },
         claudeWeekly: { usedPercent: 41, resetAt: 999999 },
       },
-      codexQuota: { codexFiveHour: { usedPercent: 12, resetAt: 2000 } },
     });
 
-    nowMs = 3000; // both five-hour windows have reset on wall clock
-    const snapshot = store.snapshot();
-    assert.strictEqual(snapshot.length, 1);
-    assert.deepStrictEqual(snapshot[0].claudeQuota.group, {
-      claudeWeekly: { usedPercent: 41, resetAt: 999999 },
-    });
-    assert.strictEqual(snapshot[0].codexQuota, undefined, "fully expired provider disappears");
+    nowMs = 3000; // the five-hour window has reset on wall clock
+    const group = store.snapshot()[0].claudeQuota.group;
+    // Kept but flagged: renderers draw a dimmed reset state, never the
+    // pre-reset high (which would lie) and never a vanished gauge (which
+    // reads as broken).
+    assert.strictEqual(group.claudeFiveHour.expired, true);
+    assert.strictEqual(group.claudeWeekly.expired, undefined);
+    assert.strictEqual(group.claudeWeekly.usedPercent, 41);
   });
 
   it("merges partial reports per bucket instead of evicting siblings", () => {
