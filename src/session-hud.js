@@ -169,9 +169,51 @@ function computeHudLayout(snapshot, options = {}) {
   return { expanded, folded, rowCount };
 }
 
-function computeHudHeight(rowCount) {
-  if (!Number.isFinite(rowCount) || rowCount <= 0) return HUD_ROW_HEIGHT;
-  return rowCount * HUD_ROW_HEIGHT + HUD_BORDER_Y;
+// ── Account-quota strip sizing ──
+// The strip renders ABOVE session rows inside a window whose height was
+// historically derived from row count alone; without these terms the strip
+// pushes the session rows below the card's overflow clip and they vanish.
+// Row height must match the renderer CSS (36px ring + caption + pill padding
+// + row padding), and the source-count logic must mirror the renderer's
+// "would this source draw anything" rules (expired buckets drop).
+const HUD_QUOTA_ROW_HEIGHT = 54;
+const HUD_QUOTA_STRIP_PADDING_Y = 12;
+const HUD_QUOTA_MIN_WIDTH = 300;
+
+function hasLiveQuotaBucket(providerEntry, now) {
+  const group = providerEntry && providerEntry.group;
+  if (!group || typeof group !== "object") return false;
+  for (const bucket of Object.values(group)) {
+    if (!bucket || typeof bucket !== "object") continue;
+    if (Number.isFinite(bucket.resetAt) && bucket.resetAt <= now) continue;
+    return true;
+  }
+  return false;
+}
+
+function countQuotaSources(snapshot, showQuota, now = Date.now()) {
+  if (showQuota === false) return 0;
+  const sources = snapshot && Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [];
+  let count = 0;
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    if ([source.antigravityQuota, source.claudeQuota, source.codexQuota]
+      .some((entry) => hasLiveQuotaBucket(entry, now))) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function computeQuotaStripHeight(quotaSourceRows) {
+  if (!Number.isFinite(quotaSourceRows) || quotaSourceRows <= 0) return 0;
+  return quotaSourceRows * HUD_QUOTA_ROW_HEIGHT + HUD_QUOTA_STRIP_PADDING_Y;
+}
+
+function computeHudHeight(rowCount, quotaStripHeight = 0) {
+  const strip = Number.isFinite(quotaStripHeight) && quotaStripHeight > 0 ? quotaStripHeight : 0;
+  if (!Number.isFinite(rowCount) || rowCount <= 0) return HUD_ROW_HEIGHT + strip;
+  return rowCount * HUD_ROW_HEIGHT + strip + HUD_BORDER_Y;
 }
 
 function computeHudReservedOffset(cardHeight) {
@@ -351,12 +393,14 @@ module.exports = function initSessionHud(ctx) {
       ? ctx.getNearestWorkArea(cx, cy)
       : { x: 0, y: 0, width: 1280, height: 800 };
     const layout = computeHudLayout(snapshot, { showStateLabels: ctx.sessionHudShowStateLabels !== false });
-    const height = computeHudHeight(layout.rowCount);
-    const width = getHudWidth(
+    const quotaRows = countQuotaSources(snapshot, ctx.sessionHudShowQuota !== false);
+    const height = computeHudHeight(layout.rowCount, computeQuotaStripHeight(quotaRows));
+    let width = getHudWidth(
       ctx.sessionHudShowElapsed !== false,
       ctx.sessionHudShowStateLabels !== false,
       ctx.sessionHudShowContextUsage !== false
     );
+    if (quotaRows > 0) width = Math.max(width, HUD_QUOTA_MIN_WIDTH);
     const widthScale = getHudWidthScale(scale);
     // Must carry the SAME scale the visible HUD was laid out with — an
     // unscaled expectation makes the auto-hide hot zone smaller than the
@@ -637,12 +681,14 @@ module.exports = function initSessionHud(ctx) {
       ? ctx.getNearestWorkArea(cx, cy)
       : { x: 0, y: 0, width: 1280, height: 800 };
     const layout = computeHudLayout(snapshot, { showStateLabels: ctx.sessionHudShowStateLabels !== false });
-    const height = computeHudHeight(layout.rowCount);
-    const width = getHudWidth(
+    const quotaRows = countQuotaSources(snapshot, ctx.sessionHudShowQuota !== false);
+    const height = computeHudHeight(layout.rowCount, computeQuotaStripHeight(quotaRows));
+    let width = getHudWidth(
       ctx.sessionHudShowElapsed !== false,
       ctx.sessionHudShowStateLabels !== false,
       ctx.sessionHudShowContextUsage !== false
     );
+    if (quotaRows > 0) width = Math.max(width, HUD_QUOTA_MIN_WIDTH);
     const widthScale = getHudWidthScale(scale);
     lastHudHeight = height;
     return computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale, widthScale });
@@ -753,6 +799,8 @@ module.exports.__test = {
   computeHudLayout,
   getHudMaxExpandedRows,
   computeHudHeight,
+  countQuotaSources,
+  computeQuotaStripHeight,
   computeHudReservedOffset,
   isHudSession,
   getHudWidth,
@@ -772,6 +820,9 @@ module.exports.__test = {
     HUD_LABELS_ONLY_WIDTH_TRIM,
     HUD_HEIGHT,
     HUD_ROW_HEIGHT,
+    HUD_QUOTA_ROW_HEIGHT,
+    HUD_QUOTA_STRIP_PADDING_Y,
+    HUD_QUOTA_MIN_WIDTH,
     HUD_MAX_EXPANDED_ROWS,
     HUD_MAX_EXPANDED_ROWS_LABELS,
     HUD_WINDOW_SHELL,

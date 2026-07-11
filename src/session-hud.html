@@ -221,7 +221,8 @@ body { padding: 2px 3px 8px; }
    pill per provider, above the session rows. At-a-glance only — the
    Dashboard owns the detailed view. */
 .quota-strip {
-  padding: 5px 10px 4px;
+  /* right padding clears the absolutely-positioned pin button corner */
+  padding: 6px 26px 5px 10px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.08);
   display: flex;
   flex-direction: column;
@@ -233,7 +234,8 @@ body { padding: 2px 3px 8px; }
 .quota-strip-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  min-height: 54px;
   white-space: nowrap;
   overflow: hidden;
 }
@@ -245,9 +247,10 @@ body { padding: 2px 3px 8px; }
   flex: 0 1 auto;
 }
 .quota-strip-host {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 600;
   opacity: 0.78;
+  max-width: 92px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -257,23 +260,22 @@ body { padding: 2px 3px 8px; }
 }
 .quota-pills {
   display: flex;
-  gap: 6px;
-  margin-left: auto;
+  gap: 7px;
   flex: 0 0 auto;
 }
 .quota-pill {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 7px 3px 6px;
-  border-radius: 10px;
+  gap: 6px;
+  padding: 4px 9px 3px 8px;
+  border-radius: 12px;
   background: rgba(0, 0, 0, 0.045);
 }
 @media (prefers-color-scheme: dark) {
   .quota-pill { background: rgba(255, 255, 255, 0.07); }
 }
 .quota-pill-label {
-  font-size: 8px;
+  font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.05em;
   opacity: 0.6;
@@ -301,14 +303,14 @@ body { padding: 2px 3px 8px; }
 .quota-donut .arc.sev-warn { stroke: #f59e0b; }
 .quota-donut .arc.sev-hot { stroke: #ef4444; }
 .quota-donut text {
-  font-size: 8px;
+  font-size: 11px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   fill: var(--text, currentColor);
 }
 .quota-donut-cap {
-  font-size: 7px;
-  line-height: 1.1;
+  font-size: 8px;
+  line-height: 1.2;
   opacity: 0.5;
 }
 

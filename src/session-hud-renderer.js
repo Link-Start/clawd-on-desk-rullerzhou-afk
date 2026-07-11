@@ -377,8 +377,8 @@ const HUD_QUOTA_PROVIDERS = [
   { key: "claudeQuota", label: "CC", fiveHour: "claudeFiveHour", weekly: "claudeWeekly" },
   { key: "codexQuota", label: "CX", fiveHour: "codexFiveHour", weekly: "codexWeekly" },
 ];
-const QUOTA_DONUT_SIZE = 24;
-const QUOTA_DONUT_STROKE = 3;
+const QUOTA_DONUT_SIZE = 36;
+const QUOTA_DONUT_STROKE = 4.5;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 function liveQuotaBucket(group, field, now) {
