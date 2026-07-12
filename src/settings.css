@@ -999,6 +999,18 @@ html, body {
 .custom-tool-scan {
   flex: 0 0 auto;
 }
+.custom-tool-scan-status {
+  flex: 1 1 100%;
+  min-height: 18px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.custom-tool-scan-status.pending {
+  color: var(--accent);
+}
+.custom-tool-scan-status.failed {
+  color: var(--toast-error);
+}
 .custom-tool-result-row {
   gap: 16px;
   padding-left: 16px;

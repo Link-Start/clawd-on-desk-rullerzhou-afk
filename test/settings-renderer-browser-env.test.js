@@ -786,6 +786,11 @@ function loadAgentsTabForTest({
           agentSectionUnavailable: "Not detected locally",
           agentCategoryCoding: "Coding AI",
           agentCategoryWork: "Office AI",
+          customToolRescan: "Rescan",
+          customToolScanStatusIdle: "Not scanned",
+          customToolScanStatusScanning: "Scanning...",
+          customToolScanStatusComplete: "Last scanned at {time}",
+          customToolScanStatusFailed: "Scan failed",
           rowAgentIdleAlerts: "Idle alerts",
           rowAgentIdleAlertsDesc: "Idle alert desc",
           rowAgentPermissions: "Permissions",
@@ -4015,6 +4020,50 @@ describe("settings renderer browser environment", () => {
     assert.ok(agentsSource.includes('labelKey: "rowAgentDiscoveryPaths"'));
     assert.ok(agentsSource.includes('await ops.fetchAgentInstallationHints({ force: true })'));
     assert.ok(css.includes(".custom-tool-result-status"));
+  });
+
+  it("shows custom AI scan state and forces a rescan", async () => {
+    let resolveScan;
+    let scanCalls = 0;
+    const harness = loadAgentsTabForTest({
+      snapshot: { lang: "en", agents: {}, customToolDiscoveryPaths: [] },
+      agentMetadata: [],
+      settingsAPI: {
+        detectAgentInstallations: () => {
+          scanCalls += 1;
+          return new Promise((resolve) => { resolveScan = resolve; });
+        },
+      },
+    });
+    harness.core.runtime.agentInstallationHints = {
+      checkedAt: 1700000000000,
+      agents: [],
+      customTools: [],
+      skippedAgentIds: [],
+    };
+    harness.core.runtime.agentInstallationHintsFetched = true;
+    harness.core.ops.requestRender({ content: true });
+    harness.raf.flush();
+
+    const button = harness.content.querySelector(".custom-tool-scan");
+    const status = harness.content.querySelector(".custom-tool-scan-status");
+    assert.strictEqual(button.textContent, "Rescan");
+    assert.match(status.textContent, /^Last scanned at /);
+
+    button.dispatchEvent({ type: "click", bubbles: false });
+    assert.strictEqual(status.textContent, "Scanning...");
+    assert.strictEqual(button.disabled, true);
+    assert.strictEqual(scanCalls, 1);
+
+    resolveScan({
+      checkedAt: 1700000005000,
+      agents: [],
+      customTools: [],
+      skippedAgentIds: [],
+    });
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.match(status.textContent, /^Last scanned at /);
+    assert.strictEqual(button.disabled, false);
   });
 
   it("adds a picked custom executable, persists it, and waits for a fresh path scan", async () => {

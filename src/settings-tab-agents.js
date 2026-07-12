@@ -277,24 +277,49 @@
     const scanButton = document.createElement("button");
     scanButton.type = "button";
     scanButton.className = "soft-btn custom-tool-scan";
-    scanButton.textContent = t("customToolScan");
+    scanButton.textContent = t("customToolRescan");
+    const scanStatus = document.createElement("span");
+    scanStatus.className = "custom-tool-scan-status";
+    scanStatus.textContent = getCustomToolScanStatusText();
     scanButton.addEventListener("click", async () => {
       scanButton.disabled = true;
-      scanButton.textContent = t("agentInstanceScanning");
+      scanStatus.classList.remove("failed");
+      scanStatus.classList.add("pending");
+      scanStatus.textContent = t("customToolScanStatusScanning");
       try {
         if (ops && typeof ops.fetchAgentInstallationHints === "function") {
           await ops.fetchAgentInstallationHints({ force: true });
         }
+        scanStatus.textContent = getCustomToolScanStatusText();
+      } catch (err) {
+        scanStatus.classList.add("failed");
+        scanStatus.textContent = t("customToolScanStatusFailed");
       } finally {
+        scanStatus.classList.remove("pending");
         scanButton.disabled = false;
-        scanButton.textContent = t("customToolScan");
       }
     });
     control.appendChild(scanButton);
+    control.appendChild(scanStatus);
     const rows = [row, ...buildCustomToolResultRows()];
     const section = helpers.buildSection(t("agentCustomToolsSection"), rows);
     section.classList.add("agent-custom-tools-section");
     return section;
+  }
+
+  function getCustomToolScanStatusText() {
+    if (runtime.agentInstallationHintsPending) return t("customToolScanStatusScanning");
+    const checkedAt = runtime.agentInstallationHints && runtime.agentInstallationHints.checkedAt;
+    if (!Number.isFinite(checkedAt)) return t("customToolScanStatusIdle");
+    let time = new Date(checkedAt).toLocaleTimeString();
+    try {
+      time = new Intl.DateTimeFormat((state.snapshot && state.snapshot.lang) || "en", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      }).format(new Date(checkedAt));
+    } catch {}
+    return t("customToolScanStatusComplete").replace("{time}", time);
   }
 
   async function addPickedCustomDiscoveryPath(input, button, kind) {
