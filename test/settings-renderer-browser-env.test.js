@@ -4020,7 +4020,12 @@ describe("settings renderer browser environment", () => {
     assert.ok(preloadSource.includes('ipcRenderer.invoke("settings:pick-agent-discovery-path"'));
     assert.ok(agentsSource.includes('labelKey: "rowAgentDiscoveryPaths"'));
     assert.ok(agentsSource.includes('await ops.fetchAgentInstallationHints({ force: true })'));
+    assert.ok(agentsSource.includes("function buildWslScanControl("));
+    assert.ok(agentsSource.includes('control.className = "custom-tool-wsl-scan"'));
+    assert.ok(!agentsSource.includes('toolbar.className = "agent-scan-toolbar"'));
     assert.ok(css.includes(".custom-tool-result-status"));
+    assert.match(css, /\.agent-custom-tools-section \.agent-text-input-row\s*\{[^}]*flex-direction:\s*column;/s);
+    assert.match(css, /\.custom-tool-path-picker\s*\{[^}]*width:\s*100%;/s);
   });
 
   it("shows custom AI scan state and forces a rescan", async () => {

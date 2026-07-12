@@ -42,48 +42,6 @@
     subtitle.textContent = t("agentsSubtitle");
     parent.appendChild(subtitle);
 
-    // Scan toolbar — always available on Windows (wslSupported) so a failed
-    // auto scan still leaves the user a manual retry path.
-    const hints = runtime.agentInstallationHints;
-    const wslDistros = hints && Array.isArray(hints.wslDistros) ? hints.wslDistros : [];
-    const wslPending = !!(hints && hints.wslPending);
-    const wslSupported = !!(hints && hints.wslSupported);
-    if (wslSupported || wslDistros.length > 0 || wslPending) {
-      const toolbar = document.createElement("div");
-      toolbar.className = "agent-scan-toolbar";
-
-      const scanBtn = document.createElement("button");
-      scanBtn.type = "button";
-      scanBtn.className = "soft-btn agent-instance-scan-btn";
-      scanBtn.textContent = t("agentInstanceScanWsl");
-      scanBtn.title = t("agentInstanceScanWslDesc");
-      scanBtn.addEventListener("click", async () => {
-        scanBtn.disabled = true;
-        scanBtn.textContent = t("agentInstanceScanning");
-        try {
-          if (ops && typeof ops.fetchAgentInstallationHints === "function") {
-            await ops.fetchAgentInstallationHints({ refreshWsl: true });
-          }
-          ops.requestRender({ content: true });
-        } catch (err) {
-          console.warn("WSL scan failed:", err && err.message);
-        } finally {
-          scanBtn.disabled = false;
-          scanBtn.textContent = t("agentInstanceScanWsl");
-        }
-      });
-      toolbar.appendChild(scanBtn);
-
-      if (wslPending) {
-        const status = document.createElement("span");
-        status.className = "agent-scan-status";
-        status.textContent = t("agentInstanceScanning") + "...";
-        toolbar.appendChild(status);
-      }
-
-      parent.appendChild(toolbar);
-    }
-
     const recommendedHints = getRecommendedInstallHints();
     if (recommendedHints.length > 0) {
       parent.appendChild(buildAgentInstallHintBanner(recommendedHints));
@@ -307,10 +265,52 @@
     });
     control.appendChild(scanButton);
     control.appendChild(scanStatus);
+    const wslScanControl = buildWslScanControl();
+    if (wslScanControl) control.appendChild(wslScanControl);
     const rows = [row, ...buildCustomToolResultRows()];
     const section = helpers.buildSection(t("agentCustomToolsSection"), rows);
     section.classList.add("agent-custom-tools-section");
     return section;
+  }
+
+  function buildWslScanControl() {
+    const hints = runtime.agentInstallationHints;
+    const wslDistros = hints && Array.isArray(hints.wslDistros) ? hints.wslDistros : [];
+    const wslPending = !!(hints && hints.wslPending);
+    const wslSupported = !!(hints && hints.wslSupported);
+    if (!(wslSupported || wslDistros.length > 0 || wslPending)) return null;
+
+    const control = document.createElement("div");
+    control.className = "custom-tool-wsl-scan";
+    const scanButton = document.createElement("button");
+    scanButton.type = "button";
+    scanButton.className = "soft-btn agent-instance-scan-btn";
+    scanButton.textContent = t("agentInstanceScanWsl");
+    scanButton.title = t("agentInstanceScanWslDesc");
+    scanButton.addEventListener("click", async () => {
+      scanButton.disabled = true;
+      scanButton.textContent = t("agentInstanceScanning");
+      try {
+        if (ops && typeof ops.fetchAgentInstallationHints === "function") {
+          await ops.fetchAgentInstallationHints({ refreshWsl: true });
+        }
+        ops.requestRender({ content: true });
+      } catch (err) {
+        console.warn("WSL scan failed:", err && err.message);
+      } finally {
+        scanButton.disabled = false;
+        scanButton.textContent = t("agentInstanceScanWsl");
+      }
+    });
+    control.appendChild(scanButton);
+
+    if (wslPending) {
+      const status = document.createElement("span");
+      status.className = "agent-scan-status";
+      status.textContent = t("agentInstanceScanning") + "...";
+      control.appendChild(status);
+    }
+    return control;
   }
 
   function getCustomToolScanStatusText() {

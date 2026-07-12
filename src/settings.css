@@ -531,13 +531,6 @@ html, body {
 .agent-subgroup .collapsible-group-body .row:last-child {
   border-bottom: none;
 }
-.agent-scan-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
-  padding: 6px 0;
-}
 .agent-instance-scan-btn {
   font-size: 10px;
   padding: 2px 8px;
@@ -921,6 +914,10 @@ html, body {
 .agent-custom-tools-section {
   margin-bottom: 14px;
 }
+.agent-custom-tools-section .section-title {
+  color: var(--text-primary);
+  font-weight: 700;
+}
 .agent-section .section-title {
   display: flex;
   align-items: center;
@@ -978,32 +975,86 @@ html, body {
   min-width: min(100%, 260px);
 }
 .agent-custom-tools-section .agent-text-input-row {
-  gap: 24px;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: color-mix(in srgb, var(--panel-bg) 94%, var(--accent) 6%);
 }
 .agent-custom-tools-section .row-text {
-  flex: 0 0 150px;
+  flex: 0 0 auto;
+  width: 100%;
 }
 .agent-custom-tools-section .row-label {
-  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: normal;
+}
+.agent-custom-tools-section .row-desc {
+  max-width: 620px;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 .agent-custom-tools-section .agent-text-input-control {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  align-items: stretch;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
   min-width: 0;
 }
 .agent-custom-tools-section .agent-text-input-control input {
-  flex: 1 1 100%;
-}
-.custom-tool-path-picker,
-.custom-tool-scan {
   flex: 0 0 auto;
+  min-height: 40px;
+}
+.agent-custom-tools-section .custom-tool-path-picker {
+  width: 100%;
+  min-height: 40px;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+  font-weight: 700;
+}
+.agent-custom-tools-section .custom-tool-path-picker:hover:not(:disabled) {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+}
+.custom-tool-scan {
+  width: 100%;
+  min-height: 38px;
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  color: var(--accent);
+  font-weight: 600;
+}
+.custom-tool-scan:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bg) 90%, var(--accent) 10%);
+}
+.custom-tool-wsl-scan {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding-top: 10px;
+  border-top: 1px solid var(--row-border);
+}
+.custom-tool-wsl-scan .agent-instance-scan-btn {
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 10px;
+  border-color: var(--border);
+  font-size: 12px;
+  font-weight: 600;
 }
 .custom-tool-scan-status {
-  flex: 1 1 100%;
+  flex: 0 0 auto;
   min-height: 18px;
   color: var(--text-secondary);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 .custom-tool-scan-status.pending {
   color: var(--accent);
