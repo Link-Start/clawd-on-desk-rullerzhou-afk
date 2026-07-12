@@ -53,6 +53,47 @@ test("settings agent actions save a CodeBuddy-compatible custom permission URL",
   );
 });
 
+test("settings agent actions sync an installed custom permission URL change immediately", () => {
+  const snapshot = prefs.getDefaults();
+  snapshot.agents.codebuddy.integrationInstalled = true;
+  const calls = [];
+  const result = agentCommands.setAgentCustomPermissionUrl({
+    agentId: "codebuddy",
+    value: "https://approval.example.test/permission",
+  }, {
+    snapshot,
+    syncIntegrationForAgent: (agentId, options) => calls.push({ agentId, options }),
+  });
+
+  assert.strictEqual(result.status, "ok");
+  assert.deepStrictEqual(calls, [{
+    agentId: "codebuddy",
+    options: { customPermissionUrl: "https://approval.example.test/permission" },
+  }]);
+  assert.strictEqual(
+    result.commit.agents.codebuddy.customPermissionUrl,
+    "https://approval.example.test/permission"
+  );
+});
+
+test("settings agent actions sync clearing an installed custom permission URL immediately", () => {
+  const snapshot = prefs.getDefaults();
+  snapshot.agents.codebuddy.integrationInstalled = true;
+  snapshot.agents.codebuddy.customPermissionUrl = "https://approval.example.test/permission";
+  const calls = [];
+  const result = agentCommands.setAgentCustomPermissionUrl({
+    agentId: "codebuddy",
+    value: "",
+  }, {
+    snapshot,
+    syncIntegrationForAgent: (agentId, options) => calls.push({ agentId, options }),
+  });
+
+  assert.strictEqual(result.status, "ok");
+  assert.deepStrictEqual(calls, [{ agentId: "codebuddy", options: {} }]);
+  assert.strictEqual(result.commit.agents.codebuddy.customPermissionUrl, "");
+});
+
 test("settings agent actions reject non-http custom permission URLs", () => {
   const result = agentCommands.setAgentCustomPermissionUrl({
     agentId: "codebuddy",

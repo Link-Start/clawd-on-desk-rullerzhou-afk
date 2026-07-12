@@ -182,6 +182,12 @@
     return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
   }
 
+  function readCustomToolDetectionResults() {
+    const hints = runtime.agentInstallationHints;
+    const value = hints && hints.customTools;
+    return Array.isArray(value) ? value.filter((item) => item && typeof item.path === "string") : [];
+  }
+
   function getShortcutValue(actionId) {
     const shortcuts = state.snapshot && state.snapshot.shortcuts;
     if (!shortcuts || typeof shortcuts !== "object") return null;
@@ -1306,6 +1312,7 @@
     readAgentPermissionMode,
     readAgentCustomPermissionUrl,
     readAgentCustomDiscoveryPaths,
+    readCustomToolDetectionResults,
     getShortcutValue,
     getLang,
     readThemeOverrideMap,

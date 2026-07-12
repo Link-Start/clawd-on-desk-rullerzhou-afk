@@ -133,7 +133,7 @@ const {
 } = require("./session-focus");
 const { focusCodexThreadTarget } = require("./session-focus-handoff");
 const { isSessionInProgress } = require("./state-session-snapshot");
-const { getAllAgents } = require("../agents/registry");
+const { getAllAgents, getAgent } = require("../agents/registry");
 // ── Autoplay policy: allow sound playback without user gesture ──
 // MUST be set before any BrowserWindow is created (before app.whenReady)
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
@@ -281,7 +281,9 @@ function _getAgentIntegrationOptions(agentId) {
   const entry = agents && agents[agentId];
   if (!entry || typeof entry !== "object") return {};
   const options = {};
-  if (agentId === "codebuddy") {
+  const agent = getAgent(agentId);
+  const capabilities = (agent && agent.capabilities) || {};
+  if (capabilities.httpHook && capabilities.customPermissionUrl) {
     const customPermissionUrl = prefsModule.normalizeOptionalHttpUrl(entry.customPermissionUrl);
     if (customPermissionUrl) options.customPermissionUrl = customPermissionUrl;
   }

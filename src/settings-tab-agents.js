@@ -16,7 +16,6 @@
     { id: "intercept", labelKey: "codexPermissionModeIntercept" },
   ];
   const INSTALL_HINT_CONFIDENCES = new Set(["high", "medium"]);
-  const CUSTOM_PERMISSION_URL_AGENT_IDS = new Set(["codebuddy"]);
   let agentHintActionPending = false;
   let agentInstallHintResetPending = false;
   let agentCleanupHintResetPending = false;
@@ -262,9 +261,55 @@
       placeholderKey: "rowCustomToolsDiscoveryPathsPlaceholder",
       value: () => readers.readAgentCustomDiscoveryPaths("custom").join("; "),
     });
-    const section = helpers.buildSection(t("agentCustomToolsSection"), [row]);
+    const rows = [row, ...buildCustomToolResultRows()];
+    const section = helpers.buildSection(t("agentCustomToolsSection"), rows);
     section.classList.add("agent-custom-tools-section");
     return section;
+  }
+
+  function buildCustomToolResultRows() {
+    const configuredPaths = readers.readAgentCustomDiscoveryPaths("custom");
+    const results = typeof readers.readCustomToolDetectionResults === "function"
+      ? readers.readCustomToolDetectionResults()
+      : [];
+    if (configuredPaths.length === 0 && results.length === 0) return [];
+    if (results.length === 0) {
+      return [buildCustomToolResultRow({
+        path: configuredPaths.join("; "),
+        detectedInstalled: null,
+        detail: t("customToolDetectionPending"),
+      })];
+    }
+    return results.map(buildCustomToolResultRow);
+  }
+
+  function buildCustomToolResultRow(result) {
+    const row = document.createElement("div");
+    row.className = "row-sub custom-tool-result-row";
+    row.classList.toggle("custom-tool-result-found", result.detectedInstalled === true);
+    row.classList.toggle("custom-tool-result-missing", result.detectedInstalled === false);
+
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label custom-tool-result-path";
+    label.textContent = result.path || "";
+    text.appendChild(label);
+    const desc = document.createElement("span");
+    desc.className = "row-desc custom-tool-result-detail";
+    desc.textContent = result.detail || "";
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const status = document.createElement("span");
+    status.className = "custom-tool-result-status";
+    status.textContent = result.detectedInstalled === true
+      ? t("customToolDetectionFound")
+      : result.detectedInstalled === false
+        ? t("customToolDetectionMissing")
+        : t("customToolDetectionPendingShort");
+    row.appendChild(status);
+    return row;
   }
 
   function getRestoredCleanupDismissalAgentIds() {
@@ -778,7 +823,7 @@
         },
       }));
     }
-    if (CUSTOM_PERMISSION_URL_AGENT_IDS.has(agent.id) && caps.httpHook) {
+    if (caps.httpHook && caps.customPermissionUrl) {
       rows.push(buildAgentTextInputRow({
         agentId: agent.id,
         command: "setAgentCustomPermissionUrl",

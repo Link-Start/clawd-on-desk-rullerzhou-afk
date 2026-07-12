@@ -3942,6 +3942,19 @@ describe("settings renderer browser environment", () => {
     assert.ok(css.includes(".agent-category-count"));
   });
 
+  it("renders Custom AI tool detection results under the manual discovery input", () => {
+    const agentsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-agents.js"), "utf8");
+    const coreSource = fs.readFileSync(path.join(SRC_DIR, "settings-ui-core.js"), "utf8");
+    const css = fs.readFileSync(path.join(SRC_DIR, "settings.css"), "utf8");
+
+    assert.ok(coreSource.includes("function readCustomToolDetectionResults("));
+    assert.ok(coreSource.includes("hints.customTools"));
+    assert.ok(agentsSource.includes("function buildCustomToolResultRows("));
+    assert.ok(agentsSource.includes("readCustomToolDetectionResults"));
+    assert.ok(agentsSource.includes('className = "row-sub custom-tool-result-row"'));
+    assert.ok(css.includes(".custom-tool-result-status"));
+  });
+
   it("keeps Agent management capability-driven for Gemini wait-for-input alerts", () => {
     const agentsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-agents.js"), "utf8");
     assert.ok(agentsSource.includes("if (caps.notificationHook) {"));

@@ -88,13 +88,16 @@ function rememberRuntimeSoundOverrideFile({ getActiveTheme }, themeId, soundName
 }
 
 function mapAgentMetadata(agent) {
-  return {
+  const metadata = {
     id: agent.id,
     name: agent.name,
-    category: agent.category,
     eventSource: agent.eventSource,
     capabilities: agent.capabilities || {},
   };
+  if (typeof agent.category === "string" && agent.category) {
+    metadata.category = agent.category;
+  }
+  return metadata;
 }
 
 function registerSettingsIpc(options = {}) {

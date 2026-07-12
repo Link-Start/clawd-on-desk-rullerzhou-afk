@@ -15,6 +15,7 @@ const {
   requireBoolean,
   requireString,
 } = require("./settings-validators");
+const { getAgent } = require("../agents/registry");
 
 const AUTO_REPAIRABLE_AGENT_IDS = new Set([
   "claude-code",
@@ -56,7 +57,6 @@ const INSTALLABLE_AGENT_IDS = new Set([
   "qoderwork",
 ]);
 const SETTABLE_AGENT_FLAGS = AGENT_FLAGS.filter((flag) => flag !== "integrationInstalled");
-const CUSTOM_PERMISSION_URL_AGENT_IDS = new Set(["codebuddy"]);
 const CUSTOM_DISCOVERY_AGENT_IDS = new Set([...INSTALLABLE_AGENT_IDS, "custom"]);
 
 // setAgentFlag is atomic single-agent, single-flag toggle.
@@ -233,11 +233,38 @@ function buildAgentIntegrationOptions(snapshot, agentId) {
   const entry = snapshot && snapshot.agents && snapshot.agents[agentId];
   if (!entry || typeof entry !== "object") return {};
   const options = {};
-  if (CUSTOM_PERMISSION_URL_AGENT_IDS.has(agentId)) {
+  if (agentSupportsCustomPermissionUrl(agentId)) {
     const customPermissionUrl = normalizeOptionalHttpUrl(entry.customPermissionUrl);
     if (customPermissionUrl) options.customPermissionUrl = customPermissionUrl;
   }
   return options;
+}
+
+function agentSupportsCustomPermissionUrl(agentId) {
+  const agent = getAgent(agentId);
+  return !!(
+    agent
+    && agent.capabilities
+    && agent.capabilities.httpHook
+    && agent.capabilities.customPermissionUrl
+  );
+}
+
+function buildAgentIntegrationOptionsWithPatch(snapshot, agentId, patch) {
+  const currentAgents = (snapshot && snapshot.agents) || {};
+  const currentEntry = currentAgents[agentId] && typeof currentAgents[agentId] === "object"
+    ? currentAgents[agentId]
+    : {};
+  return buildAgentIntegrationOptions({
+    ...snapshot,
+    agents: {
+      ...currentAgents,
+      [agentId]: {
+        ...currentEntry,
+        ...patch,
+      },
+    },
+  }, agentId);
 }
 
 function setAgentCustomPermissionUrl(payload, deps = {}) {
@@ -246,7 +273,7 @@ function setAgentCustomPermissionUrl(payload, deps = {}) {
   }
   const idCheck = _validateCustomPermissionUrlAgentId(payload.agentId);
   if (idCheck.status !== "ok") return idCheck;
-  if (!CUSTOM_PERMISSION_URL_AGENT_IDS.has(payload.agentId)) {
+  if (!agentSupportsCustomPermissionUrl(payload.agentId)) {
     return {
       status: "error",
       message: `setAgentCustomPermissionUrl does not support ${payload.agentId}`,
@@ -263,6 +290,22 @@ function setAgentCustomPermissionUrl(payload, deps = {}) {
   const current = snapshot.agents && snapshot.agents[payload.agentId];
   const currentValue = normalizeOptionalHttpUrl(current && current.customPermissionUrl);
   if (currentValue === value) return { status: "ok", noop: true };
+  try {
+    if (
+      isAgentIntegrationInstalled(snapshot, payload.agentId)
+      && typeof deps.syncIntegrationForAgent === "function"
+    ) {
+      deps.syncIntegrationForAgent(
+        payload.agentId,
+        buildAgentIntegrationOptionsWithPatch(snapshot, payload.agentId, { customPermissionUrl: value })
+      );
+    }
+  } catch (err) {
+    return {
+      status: "error",
+      message: `setAgentCustomPermissionUrl side effect threw: ${err && err.message}`,
+    };
+  }
   return {
     status: "ok",
     commit: buildAgentCommit(snapshot, payload.agentId, { customPermissionUrl: value }),

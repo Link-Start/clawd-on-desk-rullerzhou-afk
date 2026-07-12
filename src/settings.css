@@ -989,6 +989,39 @@ html, body {
 .agent-custom-tools-section .agent-text-input-control {
   min-width: 0;
 }
+.custom-tool-result-row {
+  gap: 16px;
+  padding-left: 16px;
+}
+.custom-tool-result-row .row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.custom-tool-result-path,
+.custom-tool-result-detail {
+  overflow-wrap: anywhere;
+}
+.custom-tool-result-status {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--row-border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.custom-tool-result-found .custom-tool-result-status {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-bg));
+  color: var(--accent);
+}
+.custom-tool-result-missing .custom-tool-result-status {
+  border-color: color-mix(in srgb, var(--toast-error) 35%, transparent);
+  background: color-mix(in srgb, var(--toast-error) 10%, var(--panel-bg));
+  color: var(--toast-error);
+}
 .agent-text-input-control input {
   width: 100%;
   min-width: 0;
