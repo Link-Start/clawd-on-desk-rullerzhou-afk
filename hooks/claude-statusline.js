@@ -58,22 +58,36 @@ function readChainedCommand(sidecarPath) {
 // (a broken chained script must not bleed error text into the status line
 // area). Resolves on child exit so our process outlives the pipe the child
 // renders through.
+//
+// Resolution: "ok" (child exited), "timeout" (cap hit — it may already have
+// rendered, so the caller must stay silent), "spawn-failed" (nothing ever
+// ran — the caller renders the plain fallback line instead of leaving the
+// status line blank).
 function runChainedStatusLine(command, stdinText, deps = {}) {
   const spawnFn = deps.spawn || spawn;
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawnFn("sh", ["-c", command], { stdio: ["pipe", "inherit", "ignore"] });
+      // detached: the chained command runs in its own POSIX process group
+      // (chain mode is POSIX-remote-only), so the timeout below can kill the
+      // whole tree — SIGKILLing only the sh wrapper would orphan whatever it
+      // spawned, and a hung statusline invoked on every sub-second refresh
+      // accumulates exactly the orphans the cap exists to prevent.
+      child = spawnFn("sh", ["-c", command], { stdio: ["pipe", "inherit", "ignore"], detached: true });
     } catch {
-      resolve(false);
+      resolve("spawn-failed");
       return;
     }
     const cap = setTimeout(() => {
-      try { child.kill("SIGKILL"); } catch {}
-      resolve(false);
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        try { child.kill("SIGKILL"); } catch {}
+      }
+      resolve("timeout");
     }, Number.isFinite(deps.chainCapMs) ? deps.chainCapMs : CHAIN_EXIT_CAP_MS);
-    child.on("error", () => { clearTimeout(cap); resolve(false); });
-    child.on("close", () => { clearTimeout(cap); resolve(true); });
+    child.on("error", () => { clearTimeout(cap); resolve("spawn-failed"); });
+    child.on("close", () => { clearTimeout(cap); resolve("ok"); });
     try {
       child.stdin.on("error", () => {});
       child.stdin.end(stdinText || "");
@@ -165,6 +179,7 @@ async function main(deps = {}) {
     }
   }
 
+  let chainResult = null;
   try {
     const remote = !!env.CLAWD_REMOTE;
     const body = buildStateBody(payload, quota, {
@@ -172,16 +187,19 @@ async function main(deps = {}) {
       host: remote && deps.readHostPrefix ? deps.readHostPrefix() : undefined,
     });
     const postPromise = postStateBody(body, deps, env);
-    if (chainPromise) await Promise.all([chainPromise, postPromise]);
+    if (chainPromise) [chainResult] = await Promise.all([chainPromise, postPromise]);
     else await postPromise;
   } catch {
     // Never let a failed/slow POST take down the visible status line.
-    if (chainPromise) { try { await chainPromise; } catch {} }
+    if (chainPromise) { try { chainResult = await chainPromise; } catch {} }
   }
 
   // In chain mode the chained script owns stdout - writing our own line too
-  // would corrupt theirs.
-  if (!chainPromise) writeStdout(`${text}\n`);
+  // would corrupt theirs. Exception: a chain that never ran ("spawn-failed",
+  // e.g. the command's binary is gone) rendered nothing, so falling back to
+  // our plain line beats a permanently blank status line. A "timeout" chain
+  // may have already rendered before hanging - stay silent there.
+  if (!chainPromise || chainResult === "spawn-failed") writeStdout(`${text}\n`);
 }
 
 if (require.main === module) {

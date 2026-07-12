@@ -3475,12 +3475,13 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(contextUsage.tabIndex, 0);
     assert.strictEqual(cleanup.classList.contains("disabled"), false);
     assert.strictEqual(cleanup.tabIndex, 0);
-    assert.strictEqual(summary.children.length, 4);
+    assert.strictEqual(summary.children.length, 5);
     assert.strictEqual(summary.classList.contains("compact"), false);
     assert.strictEqual(summary.children[0].textContent, "Labels: on");
     assert.strictEqual(summary.children[1].textContent, "Time: on");
     assert.strictEqual(summary.children[2].textContent, "Context: on");
-    assert.strictEqual(summary.children[3].textContent, "Auto-clear: on");
+    assert.strictEqual(summary.children[3].textContent, "Quota: on");
+    assert.strictEqual(summary.children[4].textContent, "Auto-clear: on");
 
     assert.ok(
       elapsed.eventListeners.click && elapsed.eventListeners.click.length > 0,

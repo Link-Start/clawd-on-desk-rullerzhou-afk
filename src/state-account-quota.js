@@ -12,8 +12,9 @@
 // Buckets keep the absolute-resetAt convention from hooks/quota-bucket.js.
 // The rate-limit windows reset on wall clock regardless of CLI activity, so
 // a stored bucket whose resetAt has passed is not merely stale - it is
-// wrong (it would keep showing the pre-reset high). snapshot() drops
-// expired buckets and always reports the per-group updatedAt so the UI can
+// wrong (it would keep showing the pre-reset high). snapshot() flags
+// expired buckets (renderers dim them) and reports per-provider updatedAt
+// (last value change) plus lastSeenAt (last confirmation) so the UI can
 // label quiet sources ("as of N minutes ago") instead of presenting old
 // numbers as live.
 //
@@ -52,25 +53,88 @@ const PERSIST_DEBOUNCE_MS = 2000;
 // the store/persist file with unbounded or unprintable keys.
 const SOURCE_HOST_MAX_LENGTH = 64;
 
+// Hard cap on distinct reporting sources. The label cannot be
+// origin-verified (see above), so without a cap a single buggy or hostile
+// reporter cycling host names would grow the store, the persist file, and
+// every snapshot/IPC payload without bound. 12 is far above any realistic
+// personal fleet; reports for a NEW host beyond it are dropped (existing
+// sources keep updating normally).
+const MAX_SOURCES = 12;
+
+// resetAt plausibility ceiling: the longest real window is 7 days, so a
+// reset more than 45 days out is not a quota window — it is a corrupt or
+// hostile timestamp that would otherwise pin a bucket as "live" forever.
+const MAX_RESET_AHEAD_MS = 45 * 24 * 60 * 60 * 1000;
+
+// Expired buckets render as a dimmed reset state so the gauge does not
+// vanish mid-glance, but they must not be immortal: once the window reset
+// this long ago with no fresh report, the source is dead and the bucket is
+// dropped (and pruned from the store/persist file).
+const EXPIRED_BUCKET_DROP_AFTER_MS = 48 * 60 * 60 * 1000;
+
+// A provider record nothing has confirmed for this long is retired outright
+// — covers buckets that carry no resetAt (e.g. some Antigravity windows)
+// and would otherwise never age out.
+const PROVIDER_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+
+// lastSeenAt is quantized to whole minutes in snapshots so that an actively
+// confirming reporter (statuslines refresh sub-second) changes the snapshot
+// at most once a minute — freshness stays honest without re-opening the
+// broadcast storm that value-change dedup exists to close.
+const SEEN_QUANTUM_MS = 60 * 1000;
+
 function normalizeSourceHost(host) {
   if (typeof host !== "string") return null;
   const cleaned = host.replace(/[\x00-\x1f\x7f]/g, "").trim();
   return cleaned ? cleaned.slice(0, SOURCE_HOST_MAX_LENGTH) : null;
 }
 
+// Change detection must ignore capturedAt: it advances on every report even
+// when the numbers are identical, and treating that as a change would
+// broadcast on every token_count line.
+function comparableGroup(group) {
+  const out = {};
+  for (const field of Object.keys(group)) {
+    const { capturedAt, ...rest } = group[field];
+    out[field] = rest;
+  }
+  return JSON.stringify(out);
+}
+
 function expireBuckets(group, nowMs) {
   const out = {};
   for (const [field, bucket] of Object.entries(group)) {
-    // Clone: snapshot consumers must never hold live references into the
-    // store, which doubles as the persistence source of truth.
+    // Clone (capturedAt stripped — it is store-internal write-ordering
+    // metadata, not display data): snapshot consumers must never hold live
+    // references into the store, which doubles as the persistence source of
+    // truth.
     // A bucket whose window reset on wall clock is kept but FLAGGED: the
     // pre-reset number would lie high, but hiding the gauge entirely reads
     // as broken — renderers show expired buckets as a dimmed reset state.
+    const { capturedAt, ...cloned } = bucket;
     if (Number.isFinite(bucket.resetAt) && bucket.resetAt <= nowMs) {
-      out[field] = { ...bucket, expired: true };
+      out[field] = { ...cloned, expired: true };
     } else {
-      out[field] = { ...bucket };
+      out[field] = cloned;
     }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// Drop incoming buckets the store must never accept: a window that already
+// reset (the number is wrong, not merely stale), an implausibly-distant
+// resetAt (would pin the bucket live forever), and observations older than
+// what the store already holds (two live sessions replaying each other's
+// past — write order must follow observation time, not arrival time).
+function sanitizeIncomingGroup(group, existingGroup, nowMs) {
+  const out = {};
+  for (const [field, bucket] of Object.entries(group)) {
+    if (Number.isFinite(bucket.resetAt)
+      && (bucket.resetAt <= nowMs || bucket.resetAt > nowMs + MAX_RESET_AHEAD_MS)) continue;
+    const existing = existingGroup && existingGroup[field];
+    if (existing && Number.isFinite(existing.capturedAt) && Number.isFinite(bucket.capturedAt)
+      && bucket.capturedAt < existing.capturedAt) continue;
+    out[field] = bucket;
   }
   return Object.keys(out).length ? out : null;
 }
@@ -81,7 +145,11 @@ function createAccountQuotaStore(options = {}) {
   const persistPath = options.persistPath === undefined ? DEFAULT_PERSIST_PATH : options.persistPath;
   const logWarn = typeof options.logWarn === "function" ? options.logWarn : () => {};
 
-  // Map<hostKey, { host, [providerKey]: { group, updatedAt } }>  ("" = local)
+  // Map<hostKey, { host, [providerKey]: { group, updatedAt, lastSeenAt } }>
+  // ("" = local). updatedAt = last VALUE change (drives display of the
+  // numbers); lastSeenAt = last accepted report of any kind (drives
+  // staleness and merge arbitration — an identical confirmation proves the
+  // reporter is alive even though nothing changed).
   const sources = new Map();
   let persistTimer = null;
 
@@ -94,9 +162,11 @@ function createAccountQuotaStore(options = {}) {
     } catch {
       return; // missing or corrupt -> empty store
     }
+    const nowMs = now();
     const entries = raw && Array.isArray(raw.sources) ? raw.sources : [];
     for (const entry of entries) {
       if (!entry || typeof entry !== "object") continue;
+      if (sources.size >= MAX_SOURCES) break;
       const host = normalizeSourceHost(entry.host);
       const record = { host };
       let hasAny = false;
@@ -106,14 +176,58 @@ function createAccountQuotaStore(options = {}) {
         const group = normalizeQuotaGroup(stored.group, QUOTA_PROVIDER_FIELDS[providerKey]);
         if (!group) continue;
         const updatedAt = Number(stored.updatedAt);
+        const lastSeenAt = Number(stored.lastSeenAt);
         record[providerKey] = {
           group,
-          updatedAt: Number.isFinite(updatedAt) ? updatedAt : now(),
+          updatedAt: Number.isFinite(updatedAt) ? updatedAt : nowMs,
+          // Older persist files predate lastSeenAt — fall back to updatedAt
+          // (strictly older-or-equal, so nothing looks fresher than it is).
+          lastSeenAt: Number.isFinite(lastSeenAt)
+            ? lastSeenAt
+            : (Number.isFinite(updatedAt) ? updatedAt : nowMs),
         };
         hasAny = true;
       }
       if (hasAny) sources.set(host || "", record);
     }
+    pruneStale(nowMs);
+  }
+
+  // Retire data nothing will ever refresh: buckets whose window reset long
+  // ago, providers unconfirmed past retention, and sources left empty.
+  // Mutates the store (so the persist file shrinks too, on the next write).
+  function pruneStale(nowMs) {
+    let pruned = false;
+    for (const [key, record] of sources) {
+      let hasProvider = false;
+      for (const providerKey of QUOTA_PROVIDER_KEYS) {
+        const stored = record[providerKey];
+        if (!stored) continue;
+        if (stored.lastSeenAt + PROVIDER_RETENTION_MS <= nowMs) {
+          delete record[providerKey];
+          pruned = true;
+          continue;
+        }
+        for (const [field, bucket] of Object.entries(stored.group)) {
+          if (Number.isFinite(bucket.resetAt)
+            && bucket.resetAt + EXPIRED_BUCKET_DROP_AFTER_MS <= nowMs) {
+            delete stored.group[field];
+            pruned = true;
+          }
+        }
+        if (!Object.keys(stored.group).length) {
+          delete record[providerKey];
+          pruned = true;
+          continue;
+        }
+        hasProvider = true;
+      }
+      if (!hasProvider) {
+        sources.delete(key);
+        pruned = true;
+      }
+    }
+    return pruned;
   }
 
   function persistNow() {
@@ -144,34 +258,53 @@ function createAccountQuotaStore(options = {}) {
     if (typeof persistTimer.unref === "function") persistTimer.unref();
   }
 
-  // Record a quota report from one source. Returns true when anything
-  // actually changed (callers broadcast only then). updatedAt is stamped
-  // per provider and only on change, mirroring updateSessionMetadata's
-  // discipline - an identical statusline refresh must not look "fresher".
+  // Record a quota report from one source. Returns true when the snapshot
+  // callers would broadcast actually changes: either a VALUE changed
+  // (updatedAt stamped, mirroring updateSessionMetadata's discipline — an
+  // identical statusline refresh must not make the numbers look fresher),
+  // or lastSeenAt crossed a minute boundary (so freshness labels stay
+  // honest for a reporter that keeps confirming the same numbers, at a
+  // bounded ≤1 broadcast/min instead of one per statusline tick).
   function update(host, quotas = {}) {
+    const nowMs = now();
     const sourceHost = normalizeSourceHost(host);
     const key = sourceHost || "";
     let record = sources.get(key);
+    if (!record && sources.size >= MAX_SOURCES) {
+      logWarn("Clawd: account-quota source cap reached, dropping report from:", key || "(local)");
+      return false;
+    }
     let changed = false;
+    let seenAdvanced = false;
     for (const providerKey of QUOTA_PROVIDER_KEYS) {
       const group = normalizeQuotaGroup(quotas[providerKey], QUOTA_PROVIDER_FIELDS[providerKey]);
       if (!group) continue;
       const existing = record && record[providerKey];
+      const accepted = sanitizeIncomingGroup(group, existing && existing.group, nowMs);
+      if (!accepted) continue;
       // Per-bucket merge, never group replace: real payloads legitimately
       // carry a single window (e.g. a Codex token_count with primary but no
       // secondary), and a partial report must not evict a sibling bucket
       // that is still valid — expiry, not omission, retires buckets.
-      const merged = existing ? { ...existing.group, ...group } : group;
-      if (existing && JSON.stringify(existing.group) === JSON.stringify(merged)) continue;
+      const merged = existing ? { ...existing.group, ...accepted } : accepted;
       if (!record) {
         record = { host: sourceHost };
         sources.set(key, record);
       }
-      record[providerKey] = { group: merged, updatedAt: now() };
-      changed = true;
+      const valueChanged = !existing || comparableGroup(existing.group) !== comparableGroup(merged);
+      if (!valueChanged
+        && Math.floor(nowMs / SEEN_QUANTUM_MS) > Math.floor(existing.lastSeenAt / SEEN_QUANTUM_MS)) {
+        seenAdvanced = true;
+      }
+      record[providerKey] = {
+        group: merged,
+        updatedAt: valueChanged ? nowMs : existing.updatedAt,
+        lastSeenAt: nowMs,
+      };
+      if (valueChanged) changed = true;
     }
-    if (changed) schedulePersist();
-    return changed;
+    if (changed || seenAdvanced) schedulePersist();
+    return changed || seenAdvanced;
   }
 
   // Renderer-facing view: expired buckets dropped (wall-clock window reset),
@@ -185,6 +318,7 @@ function createAccountQuotaStore(options = {}) {
   // which is why the per-source shape exists in the first place.
   function snapshot(options = {}) {
     const nowMs = now();
+    pruneStale(nowMs);
     const out = [];
     for (const record of sources.values()) {
       const entry = { host: record.host };
@@ -194,7 +328,13 @@ function createAccountQuotaStore(options = {}) {
         if (!stored) continue;
         const group = expireBuckets(stored.group, nowMs);
         if (!group) continue;
-        entry[providerKey] = { group, updatedAt: stored.updatedAt };
+        entry[providerKey] = {
+          group,
+          updatedAt: stored.updatedAt,
+          // Minute-quantized so an actively-confirming reporter changes the
+          // snapshot (and its signature) at most once a minute.
+          lastSeenAt: Math.floor(stored.lastSeenAt / SEEN_QUANTUM_MS) * SEEN_QUANTUM_MS,
+        };
         hasAny = true;
       }
       if (hasAny) out.push(entry);
@@ -210,10 +350,22 @@ function createAccountQuotaStore(options = {}) {
     let hasAny = false;
     for (const providerKey of QUOTA_PROVIDER_KEYS) {
       let best = null;
+      let bestLive = false;
       for (const entry of out) {
         const candidate = entry[providerKey];
         if (!candidate) continue;
-        if (!best || Number(candidate.updatedAt) > Number(best.updatedAt)) best = candidate;
+        // Arbitrate by lastSeenAt (an alive reporter confirming unchanged
+        // numbers must keep winning over a machine that changed a value
+        // once, long ago), and prefer candidates that still have a live
+        // bucket — a source whose windows all reset says "nothing", not
+        // "zero", and must not mask a source with real current numbers.
+        const live = Object.values(candidate.group).some((bucket) => bucket.expired !== true);
+        if (!best
+          || (live && !bestLive)
+          || (live === bestLive && Number(candidate.lastSeenAt) > Number(best.lastSeenAt))) {
+          best = candidate;
+          bestLive = live;
+        }
       }
       if (best) {
         merged[providerKey] = best;
@@ -240,4 +392,9 @@ module.exports = {
   createAccountQuotaStore,
   QUOTA_PROVIDER_KEYS,
   DEFAULT_PERSIST_PATH,
+  MAX_SOURCES,
+  MAX_RESET_AHEAD_MS,
+  EXPIRED_BUCKET_DROP_AFTER_MS,
+  PROVIDER_RETENTION_MS,
+  SEEN_QUANTUM_MS,
 };

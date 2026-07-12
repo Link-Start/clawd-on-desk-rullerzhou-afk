@@ -439,22 +439,30 @@ describe("state-session-snapshot builder", () => {
 
     assert.deepStrictEqual(withQuota.accountQuota, accountQuota);
     assert.deepStrictEqual(withoutQuota.accountQuota, []);
+    // Cloned at the boundary: a caller mutating the array it passed in must
+    // not reach into the completed snapshot.
+    accountQuota[0].claudeQuota.group.claudeWeekly.usedPercent = 99;
+    assert.strictEqual(withQuota.accountQuota[0].claudeQuota.group.claudeWeekly.usedPercent, 41);
   });
 
-  it("snapshot signature tracks accountQuota groups but not their updatedAt stamps", () => {
+  it("snapshot signature tracks accountQuota groups + lastSeenAt, not updatedAt stamps", () => {
     const base = { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null };
     const group = { claudeWeekly: { usedPercent: 41 } };
     const a = buildSessionSnapshot(new Map(), {
       ...base,
-      accountQuota: [{ host: "pi", claudeQuota: { group, updatedAt: 1 } }],
+      accountQuota: [{ host: "pi", claudeQuota: { group, updatedAt: 1, lastSeenAt: 60000 } }],
     });
     const sameGroupNewStamp = buildSessionSnapshot(new Map(), {
       ...base,
-      accountQuota: [{ host: "pi", claudeQuota: { group, updatedAt: 2 } }],
+      accountQuota: [{ host: "pi", claudeQuota: { group, updatedAt: 2, lastSeenAt: 60000 } }],
     });
     const changedGroup = buildSessionSnapshot(new Map(), {
       ...base,
-      accountQuota: [{ host: "pi", claudeQuota: { group: { claudeWeekly: { usedPercent: 55 } }, updatedAt: 2 } }],
+      accountQuota: [{ host: "pi", claudeQuota: { group: { claudeWeekly: { usedPercent: 55 } }, updatedAt: 2, lastSeenAt: 60000 } }],
+    });
+    const newerSeen = buildSessionSnapshot(new Map(), {
+      ...base,
+      accountQuota: [{ host: "pi", claudeQuota: { group, updatedAt: 1, lastSeenAt: 120000 } }],
     });
 
     assert.strictEqual(
@@ -463,6 +471,9 @@ describe("state-session-snapshot builder", () => {
       "a bare stamp change must not re-broadcast"
     );
     assert.notStrictEqual(sessionSnapshotSignature(a), sessionSnapshotSignature(changedGroup));
+    // lastSeenAt is minute-quantized in the store snapshot; when it moves,
+    // the freshness labels changed and the broadcast must go out.
+    assert.notStrictEqual(sessionSnapshotSignature(a), sessionSnapshotSignature(newerSeen));
   });
 
   it("marks detached ended idle sessions hidden from HUD only when cleanup is enabled and pid is dead", () => {

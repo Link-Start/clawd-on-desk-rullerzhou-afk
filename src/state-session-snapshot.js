@@ -341,7 +341,12 @@ function buildSessionSnapshot(sessions, options = {}) {
     lastTitle: lastSession ? lastSession.displayTitle : null,
     // Session-independent per-source account quota (src/state-account-quota.js).
     // Injected by the caller so this module stays a pure sessions mapper.
-    accountQuota: Array.isArray(options.accountQuota) ? options.accountQuota : [],
+    // Deep-cloned at this boundary: the snapshot must stay immutable even if
+    // a caller retains and mutates the array it passed in (the store's own
+    // snapshot() already clones, but this API must not depend on that).
+    accountQuota: Array.isArray(options.accountQuota)
+      ? JSON.parse(JSON.stringify(options.accountQuota))
+      : [],
     // Provider icons for the quota strip (same agent icons the session rows
     // use, resolved via the injected accessor). Static per run — excluded
     // from the snapshot signature.
@@ -381,15 +386,23 @@ function sessionSnapshotSignature(snapshot) {
     hudLastTitle: snapshot.hudLastTitle,
     lastSessionId: snapshot.lastSessionId,
     lastTitle: snapshot.lastTitle,
-    // Account quota participates as groups only: the per-provider updatedAt
-    // stamp moves exactly when its group changes (change-detected in the
-    // store), so including it would be redundant, and the renderer's own
-    // minute tick covers the "as of" label refresh.
+    // Account quota participates as groups + lastSeenAt: updatedAt moves
+    // exactly when its group changes (change-detected in the store) so it
+    // would be redundant, but lastSeenAt is minute-quantized in the store
+    // snapshot and is what keeps freshness labels honest for a reporter
+    // that confirms unchanged numbers — its once-a-minute move must reach
+    // the renderers, so it must move the signature too.
     accountQuota: (snapshot.accountQuota || []).map((entry) => ({
       host: entry.host,
-      antigravityQuota: entry.antigravityQuota ? entry.antigravityQuota.group : null,
-      claudeQuota: entry.claudeQuota ? entry.claudeQuota.group : null,
-      codexQuota: entry.codexQuota ? entry.codexQuota.group : null,
+      antigravityQuota: entry.antigravityQuota
+        ? { group: entry.antigravityQuota.group, lastSeenAt: entry.antigravityQuota.lastSeenAt }
+        : null,
+      claudeQuota: entry.claudeQuota
+        ? { group: entry.claudeQuota.group, lastSeenAt: entry.claudeQuota.lastSeenAt }
+        : null,
+      codexQuota: entry.codexQuota
+        ? { group: entry.codexQuota.group, lastSeenAt: entry.codexQuota.lastSeenAt }
+        : null,
     })),
     sessions: snapshot.sessions.map((entry) => ({
       id: entry.id,

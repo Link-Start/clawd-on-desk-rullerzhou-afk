@@ -159,6 +159,8 @@ describe("Claude Code statusline chain mode", () => {
     assert.strictEqual(spawns[0].cmd, "sh");
     assert.deepStrictEqual(spawns[0].args, ["-c", "bash -c 'my statusline \"quoted\"'"]);
     assert.deepStrictEqual(spawns[0].opts.stdio, ["pipe", "inherit", "ignore"]);
+    // Own process group, so the exit cap can kill the whole tree.
+    assert.strictEqual(spawns[0].opts.detached, true);
     assert.deepStrictEqual(JSON.parse(child.stdin.written.join("")), payload);
     // The chained script owns the visible line - our own render never fires.
     assert.deepStrictEqual(writes, []);
@@ -187,15 +189,67 @@ describe("Claude Code statusline chain mode", () => {
     child.stdin.end = () => {}; // never closes on its own
     let killed = null;
     child.kill = (signal) => { killed = signal; };
+    const writes = [];
     await main({
       payload,
       argv: ["--chain"],
       chainCapMs: 20,
-      writeStdout: () => true,
+      writeStdout: (chunk) => { writes.push(chunk); return true; },
       readChainedCommand: () => "sleep 9999",
       spawn: () => child,
       postState: (body, options, callback) => callback(true),
     });
     assert.strictEqual(killed, "SIGKILL");
+    // A timed-out chain may already have rendered before hanging — writing
+    // our own line too could corrupt theirs. Stay silent.
+    assert.deepStrictEqual(writes, []);
   });
+
+  it("--chain falls back to plain rendering when the chained command never spawns", async () => {
+    // spawn() returned a child but it died before executing anything
+    // (ENOENT etc. arrives as an async 'error' event) — nothing rendered,
+    // so a silent exit would leave the status line permanently blank.
+    const child = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.end = () => { setImmediate(() => child.emit("error", new Error("spawn sh ENOENT"))); };
+    child.kill = () => {};
+    const writes = [];
+    await main({
+      payload,
+      argv: ["--chain"],
+      writeStdout: (chunk) => { writes.push(chunk); return true; },
+      readChainedCommand: () => "gone-binary",
+      spawn: () => child,
+      postState: (body, options, callback) => callback(true),
+    });
+    assert.strictEqual(writes.length, 1, "spawn failure must fall back to the plain line");
+    assert.ok(String(writes[0]).includes("ChainMarkerModel"));
+  });
+
+  it("SIGKILLs the chained command's whole process group, not just the sh wrapper",
+    { skip: process.platform === "win32" }, async () => {
+      const { runChainedStatusLine } = __test;
+      const realSpawn = require("node:child_process").spawn;
+      let spawned = null;
+      // A pipeline forces real descendants under the sh wrapper — killing
+      // only sh would leave both sleeps running.
+      const result = await runChainedStatusLine("sleep 30 | sleep 30", "", {
+        spawn: (...args) => { spawned = realSpawn(...args); return spawned; },
+        chainCapMs: 100,
+      });
+      assert.strictEqual(result, "timeout");
+      assert.ok(spawned && spawned.pid > 0);
+      // The group must be gone: signal 0 to -pgid throws ESRCH once every
+      // member is dead. SIGKILL is not instantaneous — poll briefly.
+      let alive = true;
+      for (let i = 0; i < 100 && alive; i++) {
+        try {
+          process.kill(-spawned.pid, 0);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        } catch {
+          alive = false;
+        }
+      }
+      assert.strictEqual(alive, false, "process group members survived the cap kill");
+    });
 });

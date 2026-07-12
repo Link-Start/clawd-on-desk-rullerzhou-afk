@@ -563,12 +563,13 @@ describe("CodexLogMonitor", () => {
 
   it("carries token_count subscription quota with a fresh line timestamp", () => {
     const testFile = path.join(dateDir, TEST_FILENAME);
+    const lineTimestamp = new Date().toISOString();
     fs.writeFileSync(testFile, [
       '{"type":"session_meta","payload":{"cwd":"/tmp"}}',
       '{"type":"event_msg","payload":{"type":"task_started"}}',
       JSON.stringify({
         type: "event_msg",
-        timestamp: new Date().toISOString(),
+        timestamp: lineTimestamp,
         payload: {
           type: "token_count",
           rate_limits: {
@@ -589,9 +590,12 @@ describe("CodexLogMonitor", () => {
 
     const tokenEvent = events.find((entry) => entry.event === "event_msg:token_count");
     assert.ok(tokenEvent, "quota-only token_count must still emit a metadata event");
+    // capturedAt = the line's own timestamp: the account store orders writes
+    // by observation time, not receive time.
+    const capturedAt = Date.parse(lineTimestamp);
     assert.deepStrictEqual(tokenEvent.extra.codexQuota, {
-      codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
-      codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+      codexFiveHour: { usedPercent: 1, resetAt: 1783669570000, capturedAt },
+      codexWeekly: { usedPercent: 43, resetAt: 1784256370000, capturedAt },
     });
   });
 

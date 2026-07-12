@@ -454,6 +454,41 @@ function createQuotaDonut(bucket, windowCap) {
   return wrap;
 }
 
+// Last confirmation from the reporter (lastSeenAt), falling back to the
+// last value change (updatedAt) for snapshots that predate lastSeenAt.
+// Staleness must follow confirmations, not changes: a reporter confirming
+// the same 41% every minute is alive, not stale.
+function quotaProviderSeenAt(provider) {
+  const lastSeenAt = Number(provider && provider.lastSeenAt);
+  if (Number.isFinite(lastSeenAt)) return lastSeenAt;
+  const updatedAt = Number(provider && provider.updatedAt);
+  return Number.isFinite(updatedAt) ? updatedAt : null;
+}
+
+// Display-state digest of everything time flips WITHOUT a new snapshot:
+// bucket expiry and source staleness. The 1s tick recomputes this and
+// re-renders on change — otherwise a pinned HUD with no incoming snapshots
+// would show a pre-reset high forever and never age its sources.
+function computeQuotaDisplayFingerprint(now) {
+  if (snapshot.hudShowQuota === false) return "";
+  const sources = Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [];
+  const parts = [];
+  for (const source of sources) {
+    for (const def of HUD_QUOTA_PROVIDERS) {
+      const provider = source[def.key];
+      const group = provider && provider.group;
+      if (!group) continue;
+      for (const field of [def.fiveHour, def.weekly]) {
+        const bucket = liveQuotaBucket(group, field, now);
+        if (bucket) parts.push(`${source.host || ""}:${field}:${bucket.expired === true ? 1 : 0}`);
+      }
+      const seenAt = quotaProviderSeenAt(provider);
+      parts.push(`${source.host || ""}:${def.key}:${seenAt !== null && now - seenAt > HUD_QUOTA_STALE_AFTER_MS ? 1 : 0}`);
+    }
+  }
+  return parts.join("|");
+}
+
 function buildQuotaStrip(now) {
   if (snapshot.hudShowQuota === false) return null;
   const sources = Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [];
@@ -467,7 +502,7 @@ function buildQuotaStrip(now) {
   for (const source of sources) {
     const pills = document.createElement("div");
     pills.className = "quota-pills";
-    let oldestUpdatedAt = null;
+    let oldestSeenAt = null;
 
     for (const def of HUD_QUOTA_PROVIDERS) {
       const provider = source[def.key];
@@ -479,7 +514,13 @@ function buildQuotaStrip(now) {
 
       const pill = document.createElement("div");
       pill.className = "quota-pill";
-      pill.title = def.label;
+      // Providers age independently under one source (Claude confirmed just
+      // now, Codex quiet since yesterday) — a stale provider carries its own
+      // age in the tooltip so the row-level age (the OLDEST provider) does
+      // not tar the fresh gauges.
+      const seenAt = quotaProviderSeenAt(provider);
+      const providerStale = seenAt !== null && now - seenAt > HUD_QUOTA_STALE_AFTER_MS;
+      pill.title = providerStale ? `${def.label} · ${formatElapsed(now - seenAt)}` : def.label;
       const iconUrl = snapshot.quotaAgentIcons && snapshot.quotaAgentIcons[def.key];
       if (iconUrl) {
         const icon = document.createElement("img");
@@ -497,9 +538,8 @@ function buildQuotaStrip(now) {
       if (weekly) pill.appendChild(createQuotaDonut(weekly, "7d"));
       pills.appendChild(pill);
 
-      const updatedAt = Number(provider.updatedAt);
-      if (Number.isFinite(updatedAt)) {
-        oldestUpdatedAt = oldestUpdatedAt === null ? updatedAt : Math.min(oldestUpdatedAt, updatedAt);
+      if (seenAt !== null) {
+        oldestSeenAt = oldestSeenAt === null ? seenAt : Math.min(oldestSeenAt, seenAt);
       }
     }
     if (!pills.childElementCount) continue;
@@ -507,18 +547,25 @@ function buildQuotaStrip(now) {
 
     const row = document.createElement("div");
     row.className = "quota-strip-row";
-    const isStale = oldestUpdatedAt !== null && now - oldestUpdatedAt > HUD_QUOTA_STALE_AFTER_MS;
+    const isStale = oldestSeenAt !== null && now - oldestSeenAt > HUD_QUOTA_STALE_AFTER_MS;
     if (multiSource || source.host || isStale) {
       const sourceEl = document.createElement("div");
       sourceEl.className = "quota-strip-source";
-      const host = document.createElement("span");
-      host.className = "quota-strip-host";
-      host.textContent = source.host || t("dashboardQuotaSourceLocal");
-      sourceEl.appendChild(host);
+      // A lone local source going stale shows only the compact age badge:
+      // the window was sized without a label column (see session-hud.js
+      // computeQuotaStripMinWidth), and "This machine" adds nothing when
+      // there is exactly one unlabeled source.
+      if (multiSource || source.host) {
+        const host = document.createElement("span");
+        host.className = "quota-strip-host";
+        host.textContent = source.host || t("dashboardQuotaSourceLocal");
+        sourceEl.appendChild(host);
+      }
       if (isStale) {
         const stale = document.createElement("span");
         stale.className = "quota-strip-stale";
-        stale.textContent = formatElapsed(now - oldestUpdatedAt);
+        stale.dataset.seenAt = String(oldestSeenAt);
+        stale.textContent = formatElapsed(now - oldestSeenAt);
         sourceEl.appendChild(stale);
       }
       row.appendChild(sourceEl);
@@ -530,6 +577,8 @@ function buildQuotaStrip(now) {
   return hasAny ? strip : null;
 }
 
+let lastQuotaFingerprint = "";
+
 function render() {
   const sessions = orderedHudSessions(snapshot);
   updateUnread(sessions);
@@ -537,6 +586,7 @@ function render() {
   hudEl.classList.add("has-pin");
 
   const now = Date.now();
+  lastQuotaFingerprint = computeQuotaDisplayFingerprint(now);
   const quotaStrip = buildQuotaStrip(now);
   if (quotaStrip) hudEl.appendChild(quotaStrip);
   if (!sessions.length) {
@@ -559,10 +609,24 @@ function render() {
 
 function updateElapsedLabels() {
   const now = Date.now();
+  // Quota expiry / staleness flip on wall clock, not on snapshots — a
+  // pinned HUD receives no snapshot while nothing changes, so the tick owns
+  // these transitions (full re-render on fingerprint change; cheap: the
+  // digest is a few string ops over a handful of buckets).
+  const quotaFingerprint = computeQuotaDisplayFingerprint(now);
+  if (quotaFingerprint !== lastQuotaFingerprint) {
+    render();
+    return;
+  }
   for (const elapsed of document.querySelectorAll(".elapsed[data-updated-at]")) {
     const updatedAt = Number(elapsed.dataset.updatedAt);
     if (!Number.isFinite(updatedAt)) continue;
     elapsed.textContent = formatElapsed(now - updatedAt);
+  }
+  for (const stale of document.querySelectorAll(".quota-strip-stale[data-seen-at]")) {
+    const seenAt = Number(stale.dataset.seenAt);
+    if (!Number.isFinite(seenAt)) continue;
+    stale.textContent = formatElapsed(now - seenAt);
   }
 }
 

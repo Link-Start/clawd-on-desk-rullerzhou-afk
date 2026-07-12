@@ -1850,9 +1850,13 @@ describe("updateSession()", () => {
     assert.strictEqual(persisted.sources[0].host, "pi");
   });
 
-  it("snapshot accountQuota flags buckets whose resetAt has passed", () => {
+  it("rejects incoming buckets whose resetAt already passed, keeps live siblings", () => {
     api.updateAccountQuota(null, {
       claudeQuota: {
+        // Already expired at write time: the number is wrong, not stale —
+        // the store refuses it outright. (Buckets that expire AFTER being
+        // stored are flagged instead; covered with a mocked clock in
+        // test/state-account-quota.test.js.)
         claudeFiveHour: { usedPercent: 80, resetAt: Date.now() - 60000 },
         claudeWeekly: { usedPercent: 41, resetAt: Date.now() + 3600000 },
       },
@@ -1860,10 +1864,7 @@ describe("updateSession()", () => {
 
     const { snapshot } = api.emitSessionSnapshot({ force: true });
     const group = snapshot.accountQuota[0].claudeQuota.group;
-    // The five-hour window reset on wall clock: showing the pre-reset 80%
-    // would mislead high, so the bucket is flagged and renderers draw a
-    // dimmed reset state instead of the stale number or a vanished gauge.
-    assert.strictEqual(group.claudeFiveHour.expired, true);
+    assert.strictEqual(group.claudeFiveHour, undefined);
     assert.strictEqual(group.claudeWeekly.expired, undefined);
     assert.strictEqual(group.claudeWeekly.usedPercent, 41);
   });

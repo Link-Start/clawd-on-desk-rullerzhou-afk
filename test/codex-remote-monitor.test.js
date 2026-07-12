@@ -180,9 +180,10 @@ describe("Codex remote monitor", () => {
       secondary: { used_percent: 42.6, window_minutes: 10080, resets_at: 1784256370 },
     };
 
+    const lineTimestamp = new Date().toISOString();
     __test.processLine(JSON.stringify({
       type: "event_msg",
-      timestamp: new Date().toISOString(),
+      timestamp: lineTimestamp,
       payload: { type: "token_count", rate_limits: rateLimits },
     }), entry, options);
     __test.processLine(JSON.stringify({
@@ -194,10 +195,11 @@ describe("Codex remote monitor", () => {
 
     // token_count is telemetry: no lifecycle post either way.
     assert.strictEqual(stateCalls.length, 0);
+    const capturedAt = Date.parse(lineTimestamp);
     assert.deepStrictEqual(quotaCalls, [
       ["codex:s1", {
-        codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
-        codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+        codexFiveHour: { usedPercent: 1, resetAt: 1783669570000, capturedAt },
+        codexWeekly: { usedPercent: 43, resetAt: 1784256370000, capturedAt },
       }],
     ]);
   });

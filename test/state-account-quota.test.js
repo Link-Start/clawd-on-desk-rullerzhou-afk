@@ -148,4 +148,147 @@ describe("account quota store", () => {
     fs.writeFileSync(persistPath, "{not json");
     assert.deepStrictEqual(createAccountQuotaStore({ persistPath, now: () => 1 }).snapshot(), []);
   });
+
+  it("rejects out-of-order capturedAt per bucket (two-session oscillation)", () => {
+    let nowMs = 1000;
+    const store = createAccountQuotaStore({ persistPath: null, now: () => nowMs });
+    // Session A observed 10% at t=500, session B observed 20% at t=800.
+    store.update(null, { codexQuota: { codexWeekly: { usedPercent: 10, resetAt: 999999, capturedAt: 500 } } });
+    nowMs = 2000;
+    store.update(null, { codexQuota: { codexWeekly: { usedPercent: 20, resetAt: 999999, capturedAt: 800 } } });
+    // Session A replays its cached (older) observation later — must lose.
+    nowMs = 3000;
+    assert.strictEqual(
+      store.update(null, { codexQuota: { codexWeekly: { usedPercent: 10, resetAt: 999999, capturedAt: 500 } } }),
+      false
+    );
+    assert.strictEqual(store.snapshot()[0].codexQuota.group.codexWeekly.usedPercent, 20);
+  });
+
+  it("strips capturedAt from snapshots and keeps it out of change detection", () => {
+    let nowMs = 1000;
+    const store = createAccountQuotaStore({ persistPath: null, now: () => nowMs });
+    store.update(null, { codexQuota: { codexWeekly: { usedPercent: 10, resetAt: 999999, capturedAt: 500 } } });
+    // Same numbers, newer observation, same minute: neither a value change
+    // nor a seen-quantum advance — no broadcast, or every token_count line
+    // would re-broadcast the full snapshot.
+    nowMs = 1500;
+    assert.strictEqual(
+      store.update(null, { codexQuota: { codexWeekly: { usedPercent: 10, resetAt: 999999, capturedAt: 900 } } }),
+      false
+    );
+    assert.strictEqual(store.snapshot()[0].codexQuota.group.codexWeekly.capturedAt, undefined);
+  });
+
+  it("caps distinct sources and keeps accepting updates for existing ones", () => {
+    const { MAX_SOURCES } = require("../src/state-account-quota");
+    const store = createAccountQuotaStore({ persistPath: null, now: () => 1000 });
+    const group = { claudeQuota: { claudeWeekly: { usedPercent: 1, resetAt: 999999 } } };
+    for (let i = 0; i < MAX_SOURCES; i++) {
+      assert.strictEqual(store.update(`host-${i}`, group), true);
+    }
+    // A hostile/buggy reporter cycling names must not grow the store further.
+    assert.strictEqual(store.update("host-overflow", group), false);
+    assert.strictEqual(store.snapshot().length, MAX_SOURCES);
+    // Existing sources are unaffected by the cap.
+    assert.strictEqual(
+      store.update("host-0", { claudeQuota: { claudeWeekly: { usedPercent: 50, resetAt: 999999 } } }),
+      true
+    );
+  });
+
+  it("rejects already-expired and implausibly-distant resetAt at write time", () => {
+    const { MAX_RESET_AHEAD_MS } = require("../src/state-account-quota");
+    const store = createAccountQuotaStore({ persistPath: null, now: () => 1000000 });
+    assert.strictEqual(store.update(null, {
+      claudeQuota: {
+        claudeFiveHour: { usedPercent: 80, resetAt: 999000 }, // already reset: wrong, not stale
+        claudeWeekly: { usedPercent: 41, resetAt: 1000000 + MAX_RESET_AHEAD_MS + 1 }, // never-expiring pin
+      },
+    }), false);
+    assert.deepStrictEqual(store.snapshot(), []);
+  });
+
+  it("advances lastSeenAt on identical confirmations (bounded to minute quanta)", () => {
+    let nowMs = 60000;
+    const store = createAccountQuotaStore({ persistPath: null, now: () => nowMs });
+    const group = { claudeQuota: { claudeWeekly: { usedPercent: 41, resetAt: 99999999 } } };
+    store.update("pi", group);
+    // Identical confirmation in the same minute: silent.
+    nowMs = 90000;
+    assert.strictEqual(store.update("pi", group), false);
+    // Identical confirmation in a NEW minute: the reporter is alive and the
+    // freshness label must say so — one broadcast per minute at most.
+    nowMs = 121000;
+    assert.strictEqual(store.update("pi", group), true);
+    const provider = store.snapshot()[0].claudeQuota;
+    assert.strictEqual(provider.lastSeenAt, 120000, "snapshot lastSeenAt is minute-quantized");
+    assert.strictEqual(provider.updatedAt, 60000, "identical numbers never bump updatedAt");
+  });
+
+  it("merge arbitration follows lastSeenAt and prefers live buckets over expired ones", () => {
+    let nowMs = 60000;
+    const store = createAccountQuotaStore({ persistPath: null, now: () => nowMs });
+    // Local changed a value once, then went quiet.
+    store.update(null, { codexQuota: { codexWeekly: { usedPercent: 9, resetAt: 99999999 } } });
+    // Remote keeps confirming the same number long after.
+    nowMs = 120000;
+    store.update("pi", { codexQuota: { codexWeekly: { usedPercent: 41, resetAt: 99999999 } } });
+    nowMs = 600000;
+    store.update("pi", { codexQuota: { codexWeekly: { usedPercent: 41, resetAt: 99999999 } } });
+    assert.strictEqual(
+      store.snapshot({ mergeSources: true })[0].codexQuota.group.codexWeekly.usedPercent,
+      41,
+      "the actively-confirming reporter wins, not the last value-changer"
+    );
+
+    // A freshly-seen source whose buckets ALL expired says "nothing", not
+    // "zero" — an older source with live buckets must win the merge.
+    nowMs = 700000;
+    store.update("mini", { claudeQuota: { claudeFiveHour: { usedPercent: 90, resetAt: 800000 } } });
+    nowMs = 750000;
+    store.update(null, { claudeQuota: { claudeWeekly: { usedPercent: 30, resetAt: 99999999 } } });
+    nowMs = 900000; // mini's only bucket has now reset; mini keeps confirming
+    store.update("mini", { claudeQuota: { claudeFiveHour: { usedPercent: 91, resetAt: 850000 } } });
+    const mergedClaude = store.snapshot({ mergeSources: true })[0].claudeQuota.group;
+    assert.strictEqual(mergedClaude.claudeWeekly.usedPercent, 30);
+    assert.strictEqual(mergedClaude.claudeFiveHour, undefined);
+  });
+
+  it("prunes long-expired buckets, unconfirmed providers, and emptied sources", () => {
+    const { EXPIRED_BUCKET_DROP_AFTER_MS, PROVIDER_RETENTION_MS } = require("../src/state-account-quota");
+    let nowMs = 1000000;
+    const store = createAccountQuotaStore({ persistPath: null, now: () => nowMs });
+    store.update("pi", {
+      claudeQuota: {
+        claudeFiveHour: { usedPercent: 80, resetAt: 2000000 },
+        claudeWeekly: { usedPercent: 41 }, // no resetAt: only retention can retire it
+      },
+    });
+
+    // Freshly expired: kept, flagged (dimmed reset ring).
+    nowMs = 2000001;
+    assert.strictEqual(store.snapshot()[0].claudeQuota.group.claudeFiveHour.expired, true);
+
+    // Expired past the drop window: the bucket is gone, the sibling stays.
+    nowMs = 2000000 + EXPIRED_BUCKET_DROP_AFTER_MS;
+    const group = store.snapshot()[0].claudeQuota.group;
+    assert.strictEqual(group.claudeFiveHour, undefined);
+    assert.strictEqual(group.claudeWeekly.usedPercent, 41);
+
+    // Nothing confirmed the provider within retention: source disappears.
+    nowMs = 1000000 + PROVIDER_RETENTION_MS;
+    assert.deepStrictEqual(store.snapshot(), []);
+  });
+
+  it("prunes at load so a dead persist file does not resurrect zombie sources", () => {
+    const { PROVIDER_RETENTION_MS } = require("../src/state-account-quota");
+    const persistPath = tempPersistPath();
+    const store = createAccountQuotaStore({ persistPath, now: () => 1000 });
+    store.update("pi", { claudeQuota: { claudeWeekly: { usedPercent: 41, resetAt: 99999999999 } } });
+    store.flush();
+
+    const reloaded = createAccountQuotaStore({ persistPath, now: () => 1000 + PROVIDER_RETENTION_MS });
+    assert.deepStrictEqual(reloaded.snapshot(), []);
+  });
 });

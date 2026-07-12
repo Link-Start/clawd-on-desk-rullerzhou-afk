@@ -81,4 +81,25 @@ describe("Codex quota capture freshness gate", () => {
     assert.strictEqual(isFreshCodexQuotaTimestamp(undefined), false);
     assert.strictEqual(isFreshCodexQuotaTimestamp("not-a-date"), false);
   });
+
+  it("tolerates small forward clock skew but rejects far-future timestamps", () => {
+    const nowMs = Date.parse("2026-07-10T12:00:00.000Z");
+    // Writer and monitor share a machine but not a scheduler tick.
+    assert.strictEqual(isFreshCodexQuotaTimestamp("2026-07-10T12:01:00.000Z", nowMs), true);
+    // A clock correction or corrupt line dated ahead would otherwise be
+    // re-accepted as "fresh" on every restart, forever.
+    assert.strictEqual(isFreshCodexQuotaTimestamp("2026-07-10T12:10:00.000Z", nowMs), false);
+    assert.strictEqual(isFreshCodexQuotaTimestamp("2027-07-10T12:00:00.000Z", nowMs), false);
+  });
+
+  it("stamps options.capturedAt onto every bucket for store-side write ordering", () => {
+    const quota = resolveCodexRateLimitQuota({
+      rate_limits: {
+        primary: { used_percent: 1.0, window_minutes: 300, resets_at: 1783669570 },
+        secondary: { used_percent: 42.6, window_minutes: 10080, resets_at: 1784256370 },
+      },
+    }, { capturedAt: 1783669000000 });
+    assert.strictEqual(quota.codexFiveHour.capturedAt, 1783669000000);
+    assert.strictEqual(quota.codexWeekly.capturedAt, 1783669000000);
+  });
 });

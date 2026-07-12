@@ -15,6 +15,7 @@ const {
   evaluateShouldShow,
   countQuotaSources,
   computeQuotaStripHeight,
+  computeQuotaStripMinWidth,
   pointInExpandedRect,
   computeAutoHideHotZone,
   pointInHotZone,
@@ -368,6 +369,52 @@ describe("session HUD layout", () => {
     // Quota with zero sessions: no phantom session row in the height.
     assert.strictEqual(computeHudHeight(0, strip), strip + constants.HUD_BORDER_Y);
     assert.strictEqual(computeQuotaStripHeight(0), 0);
+  });
+
+  it("counts the CSS row gap between multiple quota source rows", () => {
+    // .quota-strip { gap: 3px } — without the gap terms every row past the
+    // first clips 3px of the strip out of the window.
+    assert.strictEqual(
+      computeQuotaStripHeight(3),
+      constants.HUD_QUOTA_ROW_HEIGHT * 3
+        + constants.HUD_QUOTA_ROW_GAP * 2
+        + constants.HUD_QUOTA_STRIP_PADDING_Y
+    );
+  });
+
+  it("computes the strip min width from the widest row's real content", () => {
+    const future = Date.now() + 3600000;
+    const bucket = { usedPercent: 41, resetAt: future };
+    const local2x2 = {
+      sessions: [],
+      accountQuota: [{
+        host: null,
+        claudeQuota: { group: { claudeFiveHour: bucket, claudeWeekly: bucket }, updatedAt: 1 },
+        codexQuota: { group: { codexFiveHour: bucket, codexWeekly: bucket }, updatedAt: 1 },
+      }],
+    };
+    // Single unlabeled local source: chrome + stale badge allowance + two
+    // 2-donut pills + pill gap. The old flat 300 floor clipped this row.
+    const pill2 = 33 + 2 * (36 + 6);
+    assert.strictEqual(
+      computeQuotaStripMinWidth(local2x2, true),
+      Math.max(constants.HUD_QUOTA_STRIP_CHROME_W + constants.HUD_QUOTA_STALE_BADGE_W + pill2 * 2 + 7, 300)
+    );
+    // A second source adds the host label column to every row.
+    const twoSources = {
+      sessions: [],
+      accountQuota: [
+        local2x2.accountQuota[0],
+        { host: "pi", claudeQuota: { group: { claudeWeekly: bucket }, updatedAt: 1 } },
+      ],
+    };
+    const pill1 = 33 + (36 + 6);
+    const expectedWide = constants.HUD_QUOTA_STRIP_CHROME_W + constants.HUD_QUOTA_SOURCE_LABEL_W + pill2 * 2 + 7;
+    assert.strictEqual(computeQuotaStripMinWidth(twoSources, true), expectedWide);
+    assert.ok(expectedWide > constants.HUD_QUOTA_STRIP_CHROME_W + constants.HUD_QUOTA_SOURCE_LABEL_W + pill1);
+    // Disabled or empty: no width demand.
+    assert.strictEqual(computeQuotaStripMinWidth(local2x2, false), 0);
+    assert.strictEqual(computeQuotaStripMinWidth({ sessions: [], accountQuota: [] }, true), 0);
   });
 
   it("counts quota sources with the renderer's draw rules (expired still renders)", () => {

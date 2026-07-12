@@ -21,6 +21,12 @@ function normalizeQuotaBucket(value) {
   const out = { usedPercent: Math.max(0, Math.min(100, Math.round(usedPercent))) };
   const resetAt = Number(value.resetAt);
   if (Number.isFinite(resetAt)) out.resetAt = Math.round(resetAt);
+  // capturedAt (epoch-ms): when the reporter actually observed this number
+  // (a rollout line's own timestamp, not receive time). The account store
+  // uses it to reject out-of-order writes — two live sessions replaying
+  // cached values must not let an older observation overwrite a newer one.
+  const capturedAt = Number(value.capturedAt);
+  if (Number.isFinite(capturedAt)) out.capturedAt = Math.round(capturedAt);
   return out;
 }
 

@@ -29,7 +29,14 @@ const RATE_LIMIT_KEYS = {
 // cross-host skew is involved.
 const CODEX_QUOTA_MAX_AGE_MS = 10 * 60 * 1000;
 
-function convertCodexRateLimitsPayload(rateLimits, nowMs) {
+// Far-future envelope timestamps must not pass as "fresh" either: a clock
+// correction or malformed rollout line dated years ahead would otherwise be
+// re-accepted on every restart for an unbounded period. Small forward skew
+// is legitimate (rollout writer and monitor share a machine but not a
+// scheduler tick).
+const CODEX_QUOTA_MAX_FUTURE_SKEW_MS = 2 * 60 * 1000;
+
+function convertCodexRateLimitsPayload(rateLimits, nowMs, capturedAt) {
   const out = {};
   for (const [key, field] of Object.entries(RATE_LIMIT_KEYS)) {
     const bucket = rateLimits[key];
@@ -44,6 +51,7 @@ function convertCodexRateLimitsPayload(rateLimits, nowMs) {
       const resetAt = anchorRelativeResetAt(bucket.resets_in_seconds, nowMs);
       if (resetAt !== null) entry.resetAt = resetAt;
     }
+    if (Number.isFinite(capturedAt)) entry.capturedAt = capturedAt;
     out[field] = entry;
   }
   return out;
@@ -53,14 +61,22 @@ function resolveCodexRateLimitQuota(payload, options = {}) {
   const rateLimits = payload && typeof payload.rate_limits === "object" ? payload.rate_limits : null;
   if (!rateLimits) return null;
   const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
-  return normalizeQuotaGroup(convertCodexRateLimitsPayload(rateLimits, nowMs), CODEX_QUOTA_FIELDS);
+  // options.capturedAt: the rollout line's own timestamp (epoch-ms), stamped
+  // onto every bucket so the account store can order writes by observation
+  // time instead of receive time (see quota-bucket.js normalizeQuotaBucket).
+  const capturedAt = Number(options.capturedAt);
+  return normalizeQuotaGroup(
+    convertCodexRateLimitsPayload(rateLimits, nowMs, capturedAt),
+    CODEX_QUOTA_FIELDS
+  );
 }
 
 // Freshness gate for the rollout line's own envelope timestamp.
 function isFreshCodexQuotaTimestamp(timestamp, nowMs = Date.now()) {
   const capturedAt = Date.parse(timestamp);
   if (!Number.isFinite(capturedAt)) return false;
-  return nowMs - capturedAt <= CODEX_QUOTA_MAX_AGE_MS;
+  const age = nowMs - capturedAt;
+  return age <= CODEX_QUOTA_MAX_AGE_MS && age >= -CODEX_QUOTA_MAX_FUTURE_SKEW_MS;
 }
 
 module.exports = {
@@ -68,4 +84,5 @@ module.exports = {
   isFreshCodexQuotaTimestamp,
   CODEX_QUOTA_FIELDS,
   CODEX_QUOTA_MAX_AGE_MS,
+  CODEX_QUOTA_MAX_FUTURE_SKEW_MS,
 };

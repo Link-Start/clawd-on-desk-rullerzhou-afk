@@ -176,8 +176,10 @@ function processLine(line, entry, options = {}) {
   // replayed line's quota posted now would stamp fresh arbitration
   // metadata (metadataUpdatedAt) on stale data.
   if (key === "event_msg:token_count") {
+    // capturedAt = the line's own timestamp: lets the desktop's account
+    // store order this report by observation time, not tunnel arrival time.
     const codexQuota = isFreshCodexQuotaTimestamp(obj.timestamp)
-      ? resolveCodexRateLimitQuota(payload)
+      ? resolveCodexRateLimitQuota(payload, { capturedAt: Date.parse(obj.timestamp) })
       : null;
     if (codexQuota) {
       const postQuotaFn = typeof options.postQuota === "function" ? options.postQuota : postQuota;

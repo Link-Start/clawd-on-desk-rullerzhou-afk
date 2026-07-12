@@ -149,9 +149,13 @@ function buildQuotaSourceHeader(sourceEntry, providerEntry, baseLabel) {
     parts.push(sourceEntry.host || t("dashboardQuotaSourceLocal"));
   }
   if (baseLabel) parts.push(baseLabel);
-  const age = Date.now() - Number(providerEntry.updatedAt || 0);
+  // lastSeenAt (last confirmation), not updatedAt (last value change): a
+  // reporter confirming the same numbers every minute is alive, not stale.
+  // Fallback covers snapshots that predate lastSeenAt.
+  const seenAt = Number(providerEntry.lastSeenAt ?? providerEntry.updatedAt ?? 0);
+  const age = Date.now() - seenAt;
   if (Number.isFinite(age) && age > QUOTA_STALE_AFTER_MS) {
-    const asOf = formatAsOf(providerEntry.updatedAt);
+    const asOf = formatAsOf(seenAt);
     if (asOf) parts.push(asOf);
   }
   return parts.length ? parts.join(" · ") : null;

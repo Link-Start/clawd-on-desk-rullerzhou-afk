@@ -182,10 +182,35 @@ function computeHudLayout(snapshot, options = {}) {
 // pushes the session rows below the card's overflow clip and they vanish.
 // Row height must match the renderer CSS (36px ring + caption + pill padding
 // + row padding), and the source-count logic must mirror the renderer's
-// "would this source draw anything" rules (expired buckets drop).
+// "would this source draw anything" rules (expired buckets still draw, as a
+// dimmed reset ring).
 const HUD_QUOTA_ROW_HEIGHT = 54;
+const HUD_QUOTA_ROW_GAP = 3; // .quota-strip { gap }
 const HUD_QUOTA_STRIP_PADDING_Y = 14;
 const HUD_QUOTA_MIN_WIDTH = 300;
+
+// Width mirror of the renderer CSS (session-hud.html): the window is sized
+// here in the main process before the strip renders, so a row's real width
+// must be computed from the same data the renderer will draw — a flat floor
+// clips donuts as soon as a source label or a third provider appears
+// (.quota-pills does not wrap and the row clips overflow).
+const HUD_QUOTA_DONUT_W = 36; // QUOTA_DONUT_SIZE
+const HUD_QUOTA_PILL_CHROME_W = 33; // pill padding 8+9 + 16px icon
+const HUD_QUOTA_PILL_ITEM_GAP = 6; // .quota-pill { gap } (icon→donut, donut→donut)
+const HUD_QUOTA_PILL_GAP = 7; // .quota-pills { gap }
+const HUD_QUOTA_SOURCE_LABEL_W = 102; // .quota-strip-host max-width 92 + row gap 10
+const HUD_QUOTA_STALE_BADGE_W = 40; // compact age badge on a single local source
+// borders 2 + body padding 6 + strip margins 16 + strip padding 36
+const HUD_QUOTA_STRIP_CHROME_W = 60;
+
+// Mirrors HUD_QUOTA_PROVIDERS in session-hud-renderer.js (browser file, no
+// require) — the renderer draws exactly these two windows per provider,
+// regardless of what else the provider's field list carries.
+const HUD_QUOTA_PROVIDER_BUCKETS = {
+  antigravityQuota: ["geminiFiveHour", "geminiWeekly"],
+  claudeQuota: ["claudeFiveHour", "claudeWeekly"],
+  codexQuota: ["codexFiveHour", "codexWeekly"],
+};
 
 function hasLiveQuotaBucket(providerEntry) {
   const group = providerEntry && providerEntry.group;
@@ -214,7 +239,46 @@ function countQuotaSources(snapshot, showQuota) {
 
 function computeQuotaStripHeight(quotaSourceRows) {
   if (!Number.isFinite(quotaSourceRows) || quotaSourceRows <= 0) return 0;
-  return quotaSourceRows * HUD_QUOTA_ROW_HEIGHT + HUD_QUOTA_STRIP_PADDING_Y;
+  return quotaSourceRows * HUD_QUOTA_ROW_HEIGHT
+    + (quotaSourceRows - 1) * HUD_QUOTA_ROW_GAP
+    + HUD_QUOTA_STRIP_PADDING_Y;
+}
+
+// Minimum window width that fits the widest strip row un-clipped. Mirrors
+// the renderer's drawing rules: one pill per provider that has any bucket,
+// one 36px donut per present window, a source label column when the row can
+// carry one (multi-source or named host), and a small allowance for the
+// compact stale badge otherwise.
+function computeQuotaStripMinWidth(snapshot, showQuota) {
+  if (showQuota === false) return 0;
+  const sources = snapshot && Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [];
+  const drawable = sources.filter((source) => source && typeof source === "object"
+    && [source.antigravityQuota, source.claudeQuota, source.codexQuota]
+      .some((entry) => hasLiveQuotaBucket(entry)));
+  if (!drawable.length) return 0;
+  const multiSource = drawable.length > 1;
+  let widest = 0;
+  for (const source of drawable) {
+    const pillWidths = [];
+    for (const [providerKey, bucketFields] of Object.entries(HUD_QUOTA_PROVIDER_BUCKETS)) {
+      const entry = source[providerKey];
+      if (!hasLiveQuotaBucket(entry)) continue;
+      const donuts = bucketFields
+        .filter((field) => entry.group[field] && typeof entry.group[field] === "object")
+        .length;
+      if (!donuts) continue;
+      pillWidths.push(HUD_QUOTA_PILL_CHROME_W + donuts * (HUD_QUOTA_DONUT_W + HUD_QUOTA_PILL_ITEM_GAP));
+    }
+    if (!pillWidths.length) continue;
+    const labelW = multiSource || source.host
+      ? HUD_QUOTA_SOURCE_LABEL_W
+      : HUD_QUOTA_STALE_BADGE_W;
+    const rowW = HUD_QUOTA_STRIP_CHROME_W + labelW
+      + pillWidths.reduce((sum, w) => sum + w, 0)
+      + (pillWidths.length - 1) * HUD_QUOTA_PILL_GAP;
+    widest = Math.max(widest, rowW);
+  }
+  return widest ? Math.max(widest, HUD_QUOTA_MIN_WIDTH) : 0;
 }
 
 function computeHudHeight(rowCount, quotaStripHeight = 0) {
@@ -411,7 +475,7 @@ module.exports = function initSessionHud(ctx) {
       ctx.sessionHudShowStateLabels !== false,
       ctx.sessionHudShowContextUsage !== false
     );
-    if (quotaRows > 0) width = Math.max(width, HUD_QUOTA_MIN_WIDTH);
+    if (quotaRows > 0) width = Math.max(width, computeQuotaStripMinWidth(snapshot, ctx.sessionHudShowQuota !== false));
     const widthScale = getHudWidthScale(scale);
     // Must carry the SAME scale the visible HUD was laid out with — an
     // unscaled expectation makes the auto-hide hot zone smaller than the
@@ -700,7 +764,7 @@ module.exports = function initSessionHud(ctx) {
       ctx.sessionHudShowStateLabels !== false,
       ctx.sessionHudShowContextUsage !== false
     );
-    if (quotaRows > 0) width = Math.max(width, HUD_QUOTA_MIN_WIDTH);
+    if (quotaRows > 0) width = Math.max(width, computeQuotaStripMinWidth(snapshot, ctx.sessionHudShowQuota !== false));
     const widthScale = getHudWidthScale(scale);
     lastHudHeight = height;
     return computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale, widthScale });
@@ -813,6 +877,7 @@ module.exports.__test = {
   computeHudHeight,
   countQuotaSources,
   computeQuotaStripHeight,
+  computeQuotaStripMinWidth,
   computeHudReservedOffset,
   isHudSession,
   getHudWidth,
@@ -833,8 +898,12 @@ module.exports.__test = {
     HUD_HEIGHT,
     HUD_ROW_HEIGHT,
     HUD_QUOTA_ROW_HEIGHT,
+    HUD_QUOTA_ROW_GAP,
     HUD_QUOTA_STRIP_PADDING_Y,
     HUD_QUOTA_MIN_WIDTH,
+    HUD_QUOTA_SOURCE_LABEL_W,
+    HUD_QUOTA_STALE_BADGE_W,
+    HUD_QUOTA_STRIP_CHROME_W,
     HUD_MAX_EXPANDED_ROWS,
     HUD_MAX_EXPANDED_ROWS_LABELS,
     HUD_WINDOW_SHELL,
