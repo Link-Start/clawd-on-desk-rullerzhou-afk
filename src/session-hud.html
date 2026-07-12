@@ -222,10 +222,11 @@ body { padding: 2px 3px 8px; }
    Dashboard owns the detailed view. */
 .quota-strip {
   /* Its own block, not part of the session-list rhythm: inset margins make
-     the separator a floating hairline, and the right inset keeps the pills
-     clear of the card-level pin button corner. */
+     the separator a floating hairline. Rows center, so the horizontal
+     padding must be symmetric or the visual center drifts; 18px per side
+     also keeps a full row clear of the card-level pin button corner. */
   margin: 5px 8px 2px;
-  padding: 2px 18px 4px 2px;
+  padding: 2px 18px 4px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.08);
   display: flex;
   flex-direction: column;
@@ -237,6 +238,7 @@ body { padding: 2px 3px 8px; }
 .quota-strip-row {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   min-height: 54px;
   white-space: nowrap;
