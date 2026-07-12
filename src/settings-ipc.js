@@ -14,6 +14,14 @@ const SOUND_OVERRIDE_DIALOG_STRINGS = {
   ja: { title: "音声ファイルを選択", filterName: "音声" },
 };
 
+const AGENT_DISCOVERY_DIALOG_STRINGS = {
+  en: { file: "Choose a tool executable", directory: "Choose a tool installation folder" },
+  zh: { file: "选择工具可执行文件", directory: "选择工具安装目录" },
+  "zh-TW": { file: "選擇工具執行檔", directory: "選擇工具安裝目錄" },
+  ko: { file: "도구 실행 파일 선택", directory: "도구 설치 폴더 선택" },
+  ja: { file: "ツールの実行ファイルを選択", directory: "ツールのインストールフォルダーを選択" },
+};
+
 const REMOVE_THEME_DIALOG_STRINGS = {
   en: {
     delete: "Delete",
@@ -401,6 +409,27 @@ function registerSettingsIpc(options = {}) {
     }
   });
 
+  handle("settings:pick-agent-discovery-path", async (event, payload) => {
+    const kind = payload && payload.kind;
+    if (kind !== "file" && kind !== "directory") {
+      return { status: "error", message: "pickAgentDiscoveryPath.kind must be file or directory" };
+    }
+    const lang = getLang();
+    const strings = AGENT_DISCOVERY_DIALOG_STRINGS[lang] || AGENT_DISCOVERY_DIALOG_STRINGS.en;
+    try {
+      const result = await dialog.showOpenDialog(getDialogParent(event), {
+        title: strings[kind],
+        properties: [kind === "file" ? "openFile" : "openDirectory"],
+      });
+      if (!result || result.canceled || !Array.isArray(result.filePaths) || !result.filePaths[0]) {
+        return { status: "cancel" };
+      }
+      return { status: "ok", path: result.filePaths[0] };
+    } catch (err) {
+      return { status: "error", message: `agent discovery path picker failed: ${err && err.message}` };
+    }
+  });
+
   handle("settings:detect-agent-installations", async (_ev, opts) => {
     try {
       const options = opts && typeof opts === "object" ? opts : {};
@@ -416,6 +445,7 @@ function registerSettingsIpc(options = {}) {
       return {
         checkedAt: now(),
         agents: [],
+        customTools: [],
         skippedAgentIds: [],
         wslAgents: [],
         wslDistros: [],

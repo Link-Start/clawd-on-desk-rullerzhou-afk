@@ -275,7 +275,7 @@ const SCHEMA = {
       // antigravity branch). Default kept as false so legacy reads don't see a
       // stale "true" implying bubbles are enabled.
       "antigravity-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: false },
-      "codebuddy": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true, customPermissionUrl: "", customDiscoveryPaths: [] },
+      "codebuddy": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true, customPermissionUrl: "" },
       "kiro-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "kimi-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "qwen-code": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
@@ -288,10 +288,14 @@ const SCHEMA = {
       "qoder": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       "reasonix": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       // QoderWork is state-only (Phase 1) — permission bubbles default off.
-      "qoderwork": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true, customDiscoveryPaths: [] },
-      "custom": { customDiscoveryPaths: [] },
+      "qoderwork": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
     }),
     normalize: normalizeAgents,
+  },
+  customToolDiscoveryPaths: {
+    type: "array",
+    defaultFactory: () => [],
+    normalize: normalizePathList,
   },
   dismissedAgentInstallHints: {
     type: "object",
@@ -419,6 +423,7 @@ function getDefaults() {
 
 function isValidValue(field, value) {
   if (value === undefined || value === null) return false;
+  if (field.type === "array") return Array.isArray(value);
   if (field.type === "object") {
     return typeof value === "object" && !Array.isArray(value);
   }
@@ -441,13 +446,17 @@ function validate(raw) {
     // off across restarts even if a value somehow landed on disk.
     if (field.ephemeral) continue;
     let value = raw[key];
-    if (field.type === "object" && typeof field.normalize === "function") {
+    if ((field.type === "object" || field.type === "array") && typeof field.normalize === "function") {
       value = field.normalize(value, out[key]);
     }
     if (isValidValue(field, value)) {
       out[key] = value;
     }
     // else: keep default already in `out`
+  }
+  if (!("customToolDiscoveryPaths" in raw)) {
+    const legacy = raw.agents && raw.agents.custom && raw.agents.custom.customDiscoveryPaths;
+    out.customToolDiscoveryPaths = normalizePathList(legacy);
   }
   normalizeStaleTriple(out);
   return out;
@@ -739,6 +748,9 @@ function normalizeAgents(value, defaultsValue) {
   if (!value || typeof value !== "object") return defaultsValue;
   const out = { ...defaultsValue };
   for (const id of Object.keys(value)) {
+    // Early #652 builds stored shared path checks as a phantom agent. The
+    // dedicated top-level field now owns that data; never rehydrate this id.
+    if (id === "custom") continue;
     const entry = value[id];
     if (!entry || typeof entry !== "object") continue;
     const base = (defaultsValue && defaultsValue[id])

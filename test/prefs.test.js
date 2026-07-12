@@ -497,6 +497,20 @@ describe("prefs.validate", () => {
     }
   });
 
+  it("keeps custom tool discovery paths outside the registered agent map", () => {
+    const direct = prefs.validate({
+      customToolDiscoveryPaths: [" C:\\Tools\\AI.exe ", "C:\\Tools\\AI.exe", "C:\\Tools\\AI"],
+    });
+    assert.deepStrictEqual(direct.customToolDiscoveryPaths, ["C:\\Tools\\AI.exe", "C:\\Tools\\AI"]);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(direct.agents, "custom"), false);
+
+    const legacy = prefs.validate({
+      agents: { custom: { customDiscoveryPaths: ["C:\\Legacy\\AI.exe"] } },
+    });
+    assert.deepStrictEqual(legacy.customToolDiscoveryPaths, ["C:\\Legacy\\AI.exe"]);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(legacy.agents, "custom"), false);
+  });
+
   it("normalizes agents: preserves valid Codex permissionMode", () => {
     const v = prefs.validate({
       agents: {

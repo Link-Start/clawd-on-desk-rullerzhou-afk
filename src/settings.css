@@ -987,7 +987,17 @@ html, body {
   white-space: nowrap;
 }
 .agent-custom-tools-section .agent-text-input-control {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   min-width: 0;
+}
+.agent-custom-tools-section .agent-text-input-control input {
+  flex: 1 1 100%;
+}
+.custom-tool-path-picker,
+.custom-tool-scan {
+  flex: 0 0 auto;
 }
 .custom-tool-result-row {
   gap: 16px;

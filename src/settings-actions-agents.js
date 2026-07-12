@@ -327,14 +327,18 @@ function setAgentCustomDiscoveryPaths(payload, deps = {}) {
   const paths = normalizePathList(payload.value);
   const snapshot = deps.snapshot || {};
   const current = snapshot.agents && snapshot.agents[payload.agentId];
-  const currentPaths = normalizePathList(current && current.customDiscoveryPaths);
+  const currentPaths = payload.agentId === "custom"
+    ? normalizePathList(snapshot.customToolDiscoveryPaths)
+    : normalizePathList(current && current.customDiscoveryPaths);
   if (paths.length === currentPaths.length && paths.every((value, index) => value === currentPaths[index])) {
     return { status: "ok", noop: true };
   }
-  return {
-    status: "ok",
-    commit: buildAgentCommit(snapshot, payload.agentId, { customDiscoveryPaths: paths }),
-  };
+  return payload.agentId === "custom"
+    ? { status: "ok", commit: { customToolDiscoveryPaths: paths } }
+    : {
+      status: "ok",
+      commit: buildAgentCommit(snapshot, payload.agentId, { customDiscoveryPaths: paths }),
+    };
 }
 
 function withoutDismissedInstallHint(snapshot, agentId) {

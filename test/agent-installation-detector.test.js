@@ -216,9 +216,10 @@ describe("agent installation detector", () => {
     const qwen = byId(report, "qwen-code");
 
     assert.strictEqual(qwen.detectedInstalled, true);
-    assert.strictEqual(qwen.confidence, "high");
+    assert.strictEqual(qwen.confidence, "medium");
     assert.strictEqual(qwen.reason, "custom-path");
     assert.match(qwen.detail, /custom-qwen-config/);
+    assert.match(qwen.detail, /User-provided path/);
   });
 
   it("reports the shared custom tool discovery slot separately", () => {
@@ -230,16 +231,16 @@ describe("agent installation detector", () => {
       homeDir,
       now: 1,
       snapshot: {
-        agents: {
-          custom: { customDiscoveryPaths: [customExe, path.join(homeDir, "missing")] },
-        },
+        customToolDiscoveryPaths: [customExe, path.join(homeDir, "missing")],
       },
     });
 
     assert.strictEqual(report.customTools.length, 2);
     assert.strictEqual(report.customTools[0].detectedInstalled, true);
+    assert.strictEqual(report.customTools[0].confidence, "medium");
     assert.strictEqual(report.customTools[0].reason, "custom-path");
     assert.strictEqual(report.customTools[0].kind, "file");
+    assert.strictEqual(report.customTools[0].detail, "Path exists (file)");
     assert.strictEqual(report.customTools[1].detectedInstalled, false);
   });
 

@@ -261,10 +261,64 @@
       placeholderKey: "rowCustomToolsDiscoveryPathsPlaceholder",
       value: () => readers.readAgentCustomDiscoveryPaths("custom").join("; "),
     });
+    const input = row._settingsInput;
+    const control = row._settingsControl;
+    for (const [kind, labelKey] of [
+      ["file", "customToolAddExecutable"],
+      ["directory", "customToolAddFolder"],
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "soft-btn custom-tool-path-picker";
+      button.textContent = t(labelKey);
+      button.addEventListener("click", () => addPickedCustomDiscoveryPath(input, button, kind));
+      control.appendChild(button);
+    }
+    const scanButton = document.createElement("button");
+    scanButton.type = "button";
+    scanButton.className = "soft-btn custom-tool-scan";
+    scanButton.textContent = t("customToolScan");
+    scanButton.addEventListener("click", async () => {
+      scanButton.disabled = true;
+      scanButton.textContent = t("agentInstanceScanning");
+      try {
+        if (ops && typeof ops.fetchAgentInstallationHints === "function") {
+          await ops.fetchAgentInstallationHints({ force: true });
+        }
+      } finally {
+        scanButton.disabled = false;
+        scanButton.textContent = t("customToolScan");
+      }
+    });
+    control.appendChild(scanButton);
     const rows = [row, ...buildCustomToolResultRows()];
     const section = helpers.buildSection(t("agentCustomToolsSection"), rows);
     section.classList.add("agent-custom-tools-section");
     return section;
+  }
+
+  async function addPickedCustomDiscoveryPath(input, button, kind) {
+    if (!window.settingsAPI || typeof window.settingsAPI.pickAgentDiscoveryPath !== "function") {
+      ops.showToast(t("toastSaveFailed") + "path picker unavailable", { error: true });
+      return;
+    }
+    button.disabled = true;
+    try {
+      const result = await window.settingsAPI.pickAgentDiscoveryPath(kind);
+      if (!result || result.status === "cancel") return;
+      if (result.status !== "ok" || typeof result.path !== "string" || !result.path) {
+        ops.showToast(t("toastSaveFailed") + ((result && result.message) || "path picker failed"), { error: true });
+        return;
+      }
+      const paths = String(input.value || "").split(";").map((value) => value.trim()).filter(Boolean);
+      if (!paths.includes(result.path)) paths.push(result.path);
+      input.value = paths.join("; ");
+      await saveAgentTextInput(input, { agentId: "custom", command: "setAgentCustomDiscoveryPaths" });
+    } catch (err) {
+      ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+    } finally {
+      button.disabled = false;
+    }
   }
 
   function buildCustomToolResultRows() {
@@ -833,6 +887,16 @@
         value: () => readers.readAgentCustomPermissionUrl(agent.id),
       }));
     }
+    if (agent.id !== "claude-code" && agent.id !== "codex") {
+      rows.push(buildAgentTextInputRow({
+        agentId: agent.id,
+        command: "setAgentCustomDiscoveryPaths",
+        labelKey: "rowAgentDiscoveryPaths",
+        descKey: "rowAgentDiscoveryPathsDesc",
+        placeholderKey: "rowAgentDiscoveryPathsPlaceholder",
+        value: () => readers.readAgentCustomDiscoveryPaths(agent.id).join("; "),
+      }));
+    }
     // WSL instances: show detected agent installations across distros
     rows.push(...buildAgentInstanceRows(agent));
     return rows;
@@ -1305,34 +1369,39 @@
     });
     ctrl.appendChild(input);
     row.appendChild(ctrl);
+    row._settingsInput = input;
+    row._settingsControl = ctrl;
     return row;
   }
 
-  function saveAgentTextInput(input, { agentId, command }) {
+  async function saveAgentTextInput(input, { agentId, command }) {
     if (!window.settingsAPI || typeof window.settingsAPI.command !== "function") {
       ops.showToast(t("toastSaveFailed") + "settings API unavailable", { error: true });
-      return;
+      return { status: "error", message: "settings API unavailable" };
     }
     const nextValue = input.value;
     input.disabled = true;
-    window.settingsAPI.command(command, {
-      agentId,
-      value: nextValue,
-    }).then((result) => {
+    try {
+      const result = await window.settingsAPI.command(command, {
+        agentId,
+        value: nextValue,
+      });
       if (!result || result.status !== "ok") {
         const msg = (result && result.message) || "unknown error";
         ops.showToast(t("toastSaveFailed") + msg, { error: true });
-        return;
+        return result || { status: "error", message: msg };
       }
       ops.showToast(t("toastAgentCustomSaved"));
       if (command === "setAgentCustomDiscoveryPaths" && typeof ops.fetchAgentInstallationHints === "function") {
-        ops.fetchAgentInstallationHints({ force: true }).catch(() => {});
+        await ops.fetchAgentInstallationHints({ force: true });
       }
-    }).catch((err) => {
+      return result;
+    } catch (err) {
       ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
-    }).finally(() => {
+      return { status: "error", message: err && err.message };
+    } finally {
       input.disabled = false;
-    });
+    }
   }
 
   function patchInPlace(changes) {

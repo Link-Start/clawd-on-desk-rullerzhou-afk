@@ -112,10 +112,22 @@ test("settings agent actions save custom discovery paths for the shared custom s
   }, { snapshot });
 
   assert.strictEqual(result.status, "ok");
-  assert.deepStrictEqual(result.commit.agents.custom.customDiscoveryPaths, [
+  assert.deepStrictEqual(result.commit.customToolDiscoveryPaths, [
     "C:\\Tools\\AI.exe",
     "C:\\Tools\\AI\\config",
   ]);
+});
+
+test("settings agent actions save discovery overrides on a registered agent", () => {
+  const snapshot = prefs.getDefaults();
+  const result = agentCommands.setAgentCustomDiscoveryPaths({
+    agentId: "qwen-code",
+    value: "C:\\Tools\\Qwen",
+  }, { snapshot });
+
+  assert.strictEqual(result.status, "ok");
+  assert.deepStrictEqual(result.commit.agents["qwen-code"].customDiscoveryPaths, ["C:\\Tools\\Qwen"]);
+  assert.strictEqual(result.commit.customToolDiscoveryPaths, undefined);
 });
 
 test("settings agent actions enable an agent and preserve sibling flags", () => {

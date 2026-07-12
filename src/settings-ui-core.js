@@ -177,6 +177,10 @@
   }
 
   function readAgentCustomDiscoveryPaths(agentId) {
+    if (agentId === "custom") {
+      const value = state.snapshot && state.snapshot.customToolDiscoveryPaths;
+      return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+    }
     const entry = state.snapshot && state.snapshot.agents && state.snapshot.agents[agentId];
     const value = entry && entry.customDiscoveryPaths;
     return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];

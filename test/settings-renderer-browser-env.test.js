@@ -3945,6 +3945,7 @@ describe("settings renderer browser environment", () => {
   it("renders Custom AI tool detection results under the manual discovery input", () => {
     const agentsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-agents.js"), "utf8");
     const coreSource = fs.readFileSync(path.join(SRC_DIR, "settings-ui-core.js"), "utf8");
+    const preloadSource = fs.readFileSync(PRELOAD_SETTINGS, "utf8");
     const css = fs.readFileSync(path.join(SRC_DIR, "settings.css"), "utf8");
 
     assert.ok(coreSource.includes("function readCustomToolDetectionResults("));
@@ -3952,7 +3953,69 @@ describe("settings renderer browser environment", () => {
     assert.ok(agentsSource.includes("function buildCustomToolResultRows("));
     assert.ok(agentsSource.includes("readCustomToolDetectionResults"));
     assert.ok(agentsSource.includes('className = "row-sub custom-tool-result-row"'));
+    assert.ok(agentsSource.includes("pickAgentDiscoveryPath"));
+    assert.ok(preloadSource.includes('ipcRenderer.invoke("settings:pick-agent-discovery-path"'));
+    assert.ok(agentsSource.includes('labelKey: "rowAgentDiscoveryPaths"'));
+    assert.ok(agentsSource.includes('await ops.fetchAgentInstallationHints({ force: true })'));
     assert.ok(css.includes(".custom-tool-result-status"));
+  });
+
+  it("adds a picked custom executable, persists it, and waits for a fresh path scan", async () => {
+    const calls = [];
+    const pickedPath = "C:\\Tools\\CustomAI.exe";
+    const harness = loadAgentsTabForTest({
+      snapshot: { agents: {}, customToolDiscoveryPaths: [] },
+      agentMetadata: [],
+      settingsAPI: {
+        pickAgentDiscoveryPath: async (kind) => {
+          calls.push(["pick", kind]);
+          return { status: "ok", path: pickedPath };
+        },
+        command: async (command, payload) => {
+          calls.push(["command", command, payload]);
+          return { status: "ok" };
+        },
+        detectAgentInstallations: async () => {
+          calls.push(["scan"]);
+          return {
+            checkedAt: 123,
+            agents: [],
+            customTools: [{
+              path: pickedPath,
+              detectedInstalled: true,
+              confidence: "medium",
+              reason: "custom-path",
+              detail: "Path exists (file)",
+              kind: "file",
+            }],
+          };
+        },
+      },
+    });
+    harness.core.runtime.agentInstallationHints = {
+      checkedAt: 1,
+      agents: [],
+      customTools: [],
+      skippedAgentIds: [],
+    };
+    harness.core.runtime.agentInstallationHintsFetched = true;
+    harness.core.ops.requestRender({ content: true });
+    harness.raf.flush();
+
+    harness.content.querySelector(".custom-tool-path-picker").dispatchEvent({ type: "click", bubbles: false });
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    harness.raf.flush();
+
+    assert.deepStrictEqual(calls[0], ["pick", "file"]);
+    assert.strictEqual(calls[1][0], "command");
+    assert.strictEqual(calls[1][1], "setAgentCustomDiscoveryPaths");
+    assert.strictEqual(calls[1][2].agentId, "custom");
+    assert.strictEqual(calls[1][2].value, pickedPath);
+    assert.deepStrictEqual(calls[2], ["scan"]);
+    assert.strictEqual(harness.core.runtime.agentInstallationHints.customTools[0].path, pickedPath);
+    harness.core.ops.requestRender({ content: true });
+    harness.raf.flush();
+    assert.ok(harness.content.querySelector(".custom-tool-result-found"));
   });
 
   it("keeps Agent management capability-driven for Gemini wait-for-input alerts", () => {

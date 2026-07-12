@@ -647,6 +647,34 @@ test("settings IPC serves agent/about/update/external and remove-theme dialog he
   }
 });
 
+test("settings IPC picks executable files and installation folders for discovery", async () => {
+  const selections = ["C:\\Tools\\agent.exe", "C:\\Tools\\Agent"];
+  const optionsSeen = [];
+  const { ipcMain } = createHarness({
+    dialog: {
+      showOpenDialog: async (_parent, options) => {
+        optionsSeen.push(options);
+        return { canceled: false, filePaths: [selections[optionsSeen.length - 1]] };
+      },
+      showMessageBox: async () => ({ response: 1 }),
+    },
+  });
+
+  assert.deepStrictEqual(await ipcMain.invoke("settings:pick-agent-discovery-path", { kind: "file" }), {
+    status: "ok",
+    path: selections[0],
+  });
+  assert.deepStrictEqual(await ipcMain.invoke("settings:pick-agent-discovery-path", { kind: "directory" }), {
+    status: "ok",
+    path: selections[1],
+  });
+  assert.deepStrictEqual(optionsSeen.map((options) => options.properties), [["openFile"], ["openDirectory"]]);
+  assert.deepStrictEqual(await ipcMain.invoke("settings:pick-agent-discovery-path", { kind: "anything" }), {
+    status: "error",
+    message: "pickAgentDiscoveryPath.kind must be file or directory",
+  });
+});
+
 test("settings IPC exposes read-only agent installation detection", async () => {
   let sawFs = false;
   let sawPath = false;

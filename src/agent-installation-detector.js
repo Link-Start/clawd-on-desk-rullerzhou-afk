@@ -177,10 +177,14 @@ function resolveAgentPaths(descriptor, options) {
 function customDiscoveryPathsForAgent(options, agentId) {
   const fromOption = options.customDiscoveryPaths && options.customDiscoveryPaths[agentId];
   const agents = options.snapshot && options.snapshot.agents;
-  const fromPrefs = agents && agents[agentId] && agents[agentId].customDiscoveryPaths;
+  const fromPrefs = agentId === "custom"
+    ? options.snapshot && options.snapshot.customToolDiscoveryPaths
+    : agents && agents[agentId] && agents[agentId].customDiscoveryPaths;
+  const legacyCustom = agentId === "custom" && agents && agents.custom && agents.custom.customDiscoveryPaths;
   return normalizePathList([
     ...normalizePathList(fromOption),
     ...normalizePathList(fromPrefs),
+    ...normalizePathList(legacyCustom),
   ]);
 }
 
@@ -348,9 +352,9 @@ function detectCustomDiscoveryPath(paths, options) {
     if (!kind) continue;
     return installationResult(
       true,
-      "high",
+      "medium",
       "custom-path",
-      `${candidate} exists (${kind})`
+      `User-provided path exists: ${candidate} (${kind})`
     );
   }
   return null;
@@ -364,9 +368,9 @@ function detectCustomTools(options = {}) {
     return {
       path: candidate,
       detectedInstalled: !!kind,
-      confidence: kind ? "high" : LOW_CONFIDENCE,
+      confidence: kind ? "medium" : LOW_CONFIDENCE,
       reason: kind ? "custom-path" : "not-found",
-      detail: kind ? `${candidate} exists (${kind})` : `${candidate} was not found`,
+      detail: kind ? `Path exists (${kind})` : "Path was not found",
       kind: kind || null,
     };
   });
