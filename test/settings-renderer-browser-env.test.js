@@ -784,6 +784,8 @@ function loadAgentsTabForTest({
           agentSectionConnected: "Connected",
           agentSectionRecommended: "Detected locally",
           agentSectionUnavailable: "Not detected locally",
+          agentCategoryCoding: "Coding AI",
+          agentCategoryWork: "Office AI",
           rowAgentIdleAlerts: "Idle alerts",
           rowAgentIdleAlertsDesc: "Idle alert desc",
           rowAgentPermissions: "Permissions",
@@ -3940,6 +3942,61 @@ describe("settings renderer browser environment", () => {
     assert.ok(!agentsSource.includes("buildAgentCategoryHeader("));
     assert.ok(css.includes(".agent-category-group > .collapsible-group-body"));
     assert.ok(css.includes(".agent-category-count"));
+  });
+
+  it("keeps install status primary and renders custom AI inside the Coding AI subgroup", () => {
+    const id = "custom-nova-ai-0123456789ab";
+    const harness = loadAgentsTabForTest({
+      snapshot: {
+        agents: {
+          [id]: { integrationInstalled: true, enabled: true },
+          qoderwork: { integrationInstalled: true, enabled: true },
+        },
+        customApplications: [],
+        customToolDiscoveryPaths: [],
+      },
+      agentMetadata: [
+        {
+          id,
+          name: "Nova AI",
+          category: "code",
+          eventSource: "custom-http",
+          custom: true,
+          capabilities: {},
+        },
+        {
+          id: "qoderwork",
+          name: "QoderWork",
+          category: "work",
+          eventSource: "hook",
+          capabilities: {},
+        },
+      ],
+    });
+    harness.core.runtime.agentInstallationHints = {
+      checkedAt: 1,
+      agents: [],
+      customTools: [],
+      skippedAgentIds: [],
+    };
+    harness.core.runtime.agentInstallationHintsFetched = true;
+    harness.core.ops.requestRender({ content: true });
+
+    const connected = harness.content.querySelector(".agent-section-connected");
+    assert.ok(connected);
+    const groups = connected.querySelectorAll(".agent-category-group");
+    assert.strictEqual(groups.length, 2);
+    assert.strictEqual(groups[0].querySelector(".collapsible-group-text .row-label").textContent, "Coding AI");
+    assert.strictEqual(groups[1].querySelector(".collapsible-group-text .row-label").textContent, "Office AI");
+    assert.deepStrictEqual(
+      groups[0].querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
+      ["Nova AI"]
+    );
+    assert.deepStrictEqual(
+      groups[1].querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
+      ["QoderWork"]
+    );
+
   });
 
   it("renders Custom AI tool detection results under the manual discovery input", () => {
