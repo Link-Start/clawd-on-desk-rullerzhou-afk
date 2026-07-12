@@ -84,6 +84,7 @@ const {
   resetAllShortcuts,
 } = require("./settings-actions-shortcuts");
 const {
+  addCustomApplication,
   clearAgentCleanupHints,
   clearAgentInstallHints,
   deployToWsl,
@@ -91,6 +92,9 @@ const {
   installAgentIntegration,
   dismissAgentInstallHints,
   removeFromWsl,
+  removeCustomApplication,
+  setAgentCustomDiscoveryPaths,
+  setAgentCustomPermissionUrl,
   setAgentFlag,
   setAgentPermissionMode,
   uninstallAgentIntegration,
@@ -1338,6 +1342,7 @@ function setTextScaleForDisplay(payload, deps) {
 }
 
 const commandRegistry = {
+  addCustomApplication,
   removeTheme,
   installHooks,
   uninstallHooks,
@@ -1349,7 +1354,10 @@ const commandRegistry = {
   dismissAgentInstallHints,
   installAgentIntegration,
   removeFromWsl,
+  removeCustomApplication,
   repairAgentIntegration,
+  setAgentCustomDiscoveryPaths,
+  setAgentCustomPermissionUrl,
   uninstallAgentIntegration,
   repairLocalServer,
   repairDoctorIssue,

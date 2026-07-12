@@ -1022,6 +1022,15 @@ html, body {
   font-weight: 600;
   white-space: nowrap;
 }
+.custom-tool-add,
+.custom-agent-remove {
+  flex: 0 0 auto;
+  min-width: 72px;
+}
+.custom-agent-detail .row-desc {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
 .custom-tool-result-found .custom-tool-result-status {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: color-mix(in srgb, var(--accent) 12%, var(--panel-bg));

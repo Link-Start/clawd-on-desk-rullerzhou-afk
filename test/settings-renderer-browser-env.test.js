@@ -4018,6 +4018,66 @@ describe("settings renderer browser environment", () => {
     assert.ok(harness.content.querySelector(".custom-tool-result-found"));
   });
 
+  it("adds a recognized custom AI and renders it as a managed Agent", async () => {
+    const id = "custom-nova-ai-0123456789ab";
+    const pickedPath = "C:\\Tools\\NovaAI.exe";
+    const calls = [];
+    let added = false;
+    const customMetadata = {
+      id,
+      name: "Nova AI",
+      category: "code",
+      eventSource: "custom-http",
+      custom: true,
+      sourcePath: pickedPath,
+      executablePath: pickedPath,
+      processName: "NovaAI.exe",
+      capabilities: { httpHook: true, permissionApproval: true, notificationHook: true },
+    };
+    const detection = () => ({
+      checkedAt: 1,
+      agents: [],
+      customTools: [{
+        path: pickedPath,
+        detectedInstalled: true,
+        confidence: "high",
+        reason: "application-recognized",
+        detail: "Recognized Nova AI",
+        kind: "file",
+        application: { ...customMetadata, added },
+      }],
+      skippedAgentIds: [],
+    });
+    const harness = loadAgentsTabForTest({
+      snapshot: { agents: {}, customToolDiscoveryPaths: [pickedPath], customApplications: [] },
+      agentMetadata: [],
+      settingsAPI: {
+        command: async (command, payload) => {
+          calls.push([command, payload]);
+          if (command === "addCustomApplication") added = true;
+          return { status: "ok" };
+        },
+        listAgents: async () => added ? [customMetadata] : [],
+        detectAgentInstallations: async () => detection(),
+      },
+    });
+    harness.core.runtime.agentInstallationHints = detection();
+    harness.core.runtime.agentInstallationHintsFetched = true;
+    harness.core.ops.requestRender({ content: true });
+    harness.raf.flush();
+
+    const addButton = harness.content.querySelector(".custom-tool-add");
+    assert.ok(addButton);
+    addButton.dispatchEvent({ type: "click", bubbles: false });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    harness.raf.flush();
+
+    assert.strictEqual(calls[0][0], "addCustomApplication");
+    assert.strictEqual(calls[0][1].path, pickedPath);
+    assert.ok(harness.core.runtime.agentMetadata.some((agent) => agent.id === id));
+    assert.ok(harness.content.querySelector(".custom-agent-remove"));
+  });
+
   it("keeps Agent management capability-driven for Gemini wait-for-input alerts", () => {
     const agentsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-agents.js"), "utf8");
     assert.ok(agentsSource.includes("if (caps.notificationHook) {"));

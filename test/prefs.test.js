@@ -511,6 +511,24 @@ describe("prefs.validate", () => {
     assert.strictEqual(Object.prototype.hasOwnProperty.call(legacy.agents, "custom"), false);
   });
 
+  it("normalizes custom applications and preserves their agent gates", () => {
+    const application = {
+      id: "custom-nova-ai-0123456789ab",
+      name: "Nova AI",
+      sourcePath: "C:\\NovaAI",
+      executablePath: "C:\\NovaAI\\NovaAI.exe",
+      processName: "NovaAI.exe",
+      category: "code",
+    };
+    const value = prefs.validate({
+      customApplications: [application, application, { id: "bad" }],
+      agents: { [application.id]: { integrationInstalled: true, enabled: false } },
+    });
+    assert.deepStrictEqual(value.customApplications, [application]);
+    assert.strictEqual(value.agents[application.id].integrationInstalled, true);
+    assert.strictEqual(value.agents[application.id].enabled, false);
+  });
+
   it("normalizes agents: preserves valid Codex permissionMode", () => {
     const v = prefs.validate({
       agents: {

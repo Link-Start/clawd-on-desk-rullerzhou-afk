@@ -192,6 +192,11 @@
     return Array.isArray(value) ? value.filter((item) => item && typeof item.path === "string") : [];
   }
 
+  function readCustomApplications() {
+    const value = state.snapshot && state.snapshot.customApplications;
+    return Array.isArray(value) ? value.filter((item) => item && typeof item.id === "string") : [];
+  }
+
   function getShortcutValue(actionId) {
     const shortcuts = state.snapshot && state.snapshot.shortcuts;
     if (!shortcuts || typeof shortcuts !== "object") return null;
@@ -1317,6 +1322,7 @@
     readAgentCustomPermissionUrl,
     readAgentCustomDiscoveryPaths,
     readCustomToolDetectionResults,
+    readCustomApplications,
     getShortcutValue,
     getLang,
     readThemeOverrideMap,

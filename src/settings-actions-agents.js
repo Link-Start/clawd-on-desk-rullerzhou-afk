@@ -16,6 +16,10 @@ const {
   requireString,
 } = require("./settings-validators");
 const { getAgent } = require("../agents/registry");
+const {
+  MAX_CUSTOM_APPLICATIONS,
+  identifyCustomApplication: defaultIdentifyCustomApplication,
+} = require("./custom-applications");
 
 const AUTO_REPAIRABLE_AGENT_IDS = new Set([
   "claude-code",
@@ -341,6 +345,63 @@ function setAgentCustomDiscoveryPaths(payload, deps = {}) {
     };
 }
 
+function addCustomApplication(payload, deps = {}) {
+  if (!payload || typeof payload !== "object" || typeof payload.path !== "string") {
+    return { status: "error", message: "addCustomApplication requires a path" };
+  }
+  const identify = deps.identifyCustomApplication || defaultIdentifyCustomApplication;
+  const application = identify(payload.path);
+  if (!application) {
+    return { status: "error", message: "No launchable AI application was recognized at this path" };
+  }
+  const snapshot = deps.snapshot || {};
+  const current = Array.isArray(snapshot.customApplications) ? snapshot.customApplications : [];
+  if (current.some((entry) => entry && entry.id === application.id)) {
+    return { status: "ok", noop: true, application };
+  }
+  if (current.length >= MAX_CUSTOM_APPLICATIONS) {
+    return { status: "error", message: `Custom AI limit reached (${MAX_CUSTOM_APPLICATIONS})` };
+  }
+  const agents = snapshot.agents && typeof snapshot.agents === "object" ? snapshot.agents : {};
+  return {
+    status: "ok",
+    application,
+    commit: {
+      customApplications: [...current, application],
+      agents: {
+        ...agents,
+        [application.id]: {
+          integrationInstalled: true,
+          enabled: true,
+          permissionsEnabled: true,
+          notificationHookEnabled: true,
+        },
+      },
+    },
+  };
+}
+
+function removeCustomApplication(payload, deps = {}) {
+  const id = payload && typeof payload.id === "string" ? payload.id.trim() : "";
+  if (!/^custom-[a-z0-9-]+-[a-f0-9]{12}$/.test(id)) {
+    return { status: "error", message: "removeCustomApplication requires a valid custom agent id" };
+  }
+  const snapshot = deps.snapshot || {};
+  const current = Array.isArray(snapshot.customApplications) ? snapshot.customApplications : [];
+  if (!current.some((entry) => entry && entry.id === id)) return { status: "ok", noop: true };
+  if (typeof deps.clearSessionsByAgent === "function") deps.clearSessionsByAgent(id);
+  if (typeof deps.dismissPermissionsByAgent === "function") deps.dismissPermissionsByAgent(id);
+  const agents = snapshot.agents && typeof snapshot.agents === "object" ? { ...snapshot.agents } : {};
+  delete agents[id];
+  return {
+    status: "ok",
+    commit: {
+      customApplications: current.filter((entry) => entry && entry.id !== id),
+      agents,
+    },
+  };
+}
+
 function withoutDismissedInstallHint(snapshot, agentId) {
   const current = snapshot && snapshot.dismissedAgentInstallHints;
   if (!current || typeof current !== "object" || Array.isArray(current)) return {};
@@ -644,6 +705,8 @@ uninstallAgentIntegration.lockKey = "agentIntegration";
 repairAgentIntegration.lockKey = "agentIntegration";
 setAgentCustomPermissionUrl.lockKey = "agentIntegration";
 setAgentCustomDiscoveryPaths.lockKey = "agentIntegration";
+addCustomApplication.lockKey = "agentIntegration";
+removeCustomApplication.lockKey = "agentIntegration";
 dismissAgentInstallHints.lockKey = "agentIntegration";
 dismissAgentCleanupHints.lockKey = "agentIntegration";
 clearAgentCleanupHints.lockKey = "agentIntegration";
@@ -705,12 +768,14 @@ removeFromWsl.lockKey = "agentIntegration";
 
 module.exports = {
   INSTALLABLE_AGENT_IDS,
+  addCustomApplication,
   clearAgentCleanupHints,
   clearAgentInstallHints,
   deployToWsl,
   dismissAgentCleanupHints,
   dismissAgentInstallHints,
   installAgentIntegration,
+  removeCustomApplication,
   removeFromWsl,
   setAgentCustomDiscoveryPaths,
   setAgentFlag,

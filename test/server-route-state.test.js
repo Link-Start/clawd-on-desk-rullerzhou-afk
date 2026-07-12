@@ -414,6 +414,18 @@ describe("server-route-state POST", () => {
     assert.strictEqual(opts.agentIdDefaulted, true);
   });
 
+  it("routes state events to a currently registered custom AI", async () => {
+    const id = "custom-nova-ai-0123456789ab";
+    const res = await callStatePost(JSON.stringify({
+      state: "working",
+      session_id: "nova:sid",
+      event: "PreToolUse",
+      agent_id: id,
+    }), { ctx: { getCustomAgentIds: () => [id] } });
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.calls.updateSession[0][3].agentId, id);
+  });
+
   it("infers opencode from hook_source when agent_id is missing", async () => {
     const res = await callStatePost(JSON.stringify({
       state: "working",

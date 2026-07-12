@@ -608,11 +608,45 @@ test("settings IPC serves agent/about/update/external and remove-theme dialog he
       getAllAgents: () => [
         { id: "codex", name: "Codex", eventSource: "hook", capabilities: { permission: true } },
       ],
+      settingsController: {
+        getSnapshot: () => ({
+          lang: "en",
+          customApplications: [{
+            id: "custom-nova-ai-0123456789ab",
+            name: "Nova AI",
+            sourcePath: "C:\\NovaAI",
+            executablePath: "C:\\NovaAI\\NovaAI.exe",
+            processName: "NovaAI.exe",
+            category: "code",
+          }],
+        }),
+        applyUpdate: () => ({ status: "ok" }),
+        applyCommand: async () => ({ status: "ok" }),
+      },
     });
 
     assert.strictEqual(await ipcMain.invoke("settings:get-preview-sound-url"), "file:///preview.mp3");
     assert.deepStrictEqual(await ipcMain.invoke("settings:list-agents"), [
       { id: "codex", name: "Codex", eventSource: "hook", capabilities: { permission: true } },
+      {
+        id: "custom-nova-ai-0123456789ab",
+        name: "Nova AI",
+        category: "code",
+        eventSource: "custom-http",
+        custom: true,
+        sourcePath: "C:\\NovaAI",
+        executablePath: "C:\\NovaAI\\NovaAI.exe",
+        processName: "NovaAI.exe",
+        capabilities: {
+          httpHook: true,
+          permissionApproval: true,
+          interactiveBubble: true,
+          notificationHook: true,
+          sessionEnd: true,
+          subagent: false,
+          managedIntegration: false,
+        },
+      },
     ]);
     assert.deepStrictEqual(await ipcMain.invoke("settings:get-about-info"), {
       version: "1.2.3",

@@ -50,6 +50,19 @@ describe("resolveHookAgentId", () => {
     );
   });
 
+  it("accepts only currently registered custom agent ids", () => {
+    const id = "custom-nova-ai-0123456789ab";
+    assert.deepStrictEqual(resolveHookAgentId({ agent_id: id }, { customAgentIds: [id] }), {
+      agentId: id,
+      source: "custom",
+      defaulted: false,
+    });
+    assert.strictEqual(resolveHookAgentId({ agent_id: id }).source, "subagent");
+    assert.strictEqual(resolveHookAgentId({ agent_id: "custom-forged-0123456789ab" }, {
+      customAgentIds: [id],
+    }).source, "subagent");
+  });
+
   it("classifies a subagent marker without agent_type", () => {
     const resolved = resolveHookAgentId({ agent_id: SUBAGENT_UUID });
     assert.strictEqual(resolved.source, "subagent");

@@ -535,6 +535,20 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.recorder.map((item) => item.outcome).filter(Boolean), ["accepted"]);
   });
 
+  it("routes permission requests to a currently registered custom AI", async () => {
+    const id = "custom-nova-ai-0123456789ab";
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: id,
+      session_id: "nova:sid",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      tool_use_id: "tool-custom-1",
+    }), { ctx: { getCustomAgentIds: () => [id] } });
+    assert.strictEqual(res.statusCode, null);
+    assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+    assert.strictEqual(res.ctx.pendingPermissions[0].agentId, id);
+  });
+
   it("starts remote approval only after a Claude bubble is shown", async () => {
     const order = [];
     const res = await callPermissionPost(JSON.stringify({

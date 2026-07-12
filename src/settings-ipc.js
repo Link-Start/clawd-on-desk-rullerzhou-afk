@@ -108,6 +108,28 @@ function mapAgentMetadata(agent) {
   return metadata;
 }
 
+function mapCustomApplicationMetadata(application) {
+  return {
+    id: application.id,
+    name: application.name,
+    category: application.category || "code",
+    eventSource: "custom-http",
+    custom: true,
+    sourcePath: application.sourcePath,
+    executablePath: application.executablePath,
+    processName: application.processName,
+    capabilities: {
+      httpHook: true,
+      permissionApproval: true,
+      interactiveBubble: true,
+      notificationHook: true,
+      sessionEnd: true,
+      subagent: false,
+      managedIntegration: false,
+    },
+  };
+}
+
 function registerSettingsIpc(options = {}) {
   const ipcMain = requiredDependency(options.ipcMain, "ipcMain");
   const settingsController = requiredDependency(options.settingsController, "settingsController");
@@ -402,7 +424,11 @@ function registerSettingsIpc(options = {}) {
 
   handle("settings:list-agents", () => {
     try {
-      return getAllAgents().map(mapAgentMetadata);
+      const snapshot = settingsController.getSnapshot();
+      const custom = Array.isArray(snapshot.customApplications)
+        ? snapshot.customApplications.map(mapCustomApplicationMetadata)
+        : [];
+      return [...getAllAgents().map(mapAgentMetadata), ...custom];
     } catch (err) {
       console.warn("Clawd: settings:list-agents failed:", err && err.message);
       return [];

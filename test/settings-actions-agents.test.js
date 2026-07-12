@@ -5,16 +5,19 @@ const assert = require("node:assert");
 
 const prefs = require("../src/prefs");
 const agentCommands = require("../src/settings-actions-agents");
+const { commandRegistry } = require("../src/settings-actions");
 
 test("settings agent actions expose the command surface", () => {
   assert.deepStrictEqual(Object.keys(agentCommands).sort(), [
     "INSTALLABLE_AGENT_IDS",
+    "addCustomApplication",
     "clearAgentCleanupHints",
     "clearAgentInstallHints",
     "deployToWsl",
     "dismissAgentCleanupHints",
     "dismissAgentInstallHints",
     "installAgentIntegration",
+    "removeCustomApplication",
     "removeFromWsl",
     "repairAgentIntegration",
     "setAgentCustomDiscoveryPaths",
@@ -33,6 +36,8 @@ test("settings agent integration commands share a serialization lock", () => {
   assert.strictEqual(agentCommands.repairAgentIntegration.lockKey, "agentIntegration");
   assert.strictEqual(agentCommands.setAgentCustomPermissionUrl.lockKey, "agentIntegration");
   assert.strictEqual(agentCommands.setAgentCustomDiscoveryPaths.lockKey, "agentIntegration");
+  assert.strictEqual(agentCommands.addCustomApplication.lockKey, "agentIntegration");
+  assert.strictEqual(agentCommands.removeCustomApplication.lockKey, "agentIntegration");
   assert.strictEqual(agentCommands.dismissAgentInstallHints.lockKey, "agentIntegration");
   assert.strictEqual(agentCommands.dismissAgentCleanupHints.lockKey, "agentIntegration");
   assert.strictEqual(agentCommands.clearAgentCleanupHints.lockKey, "agentIntegration");
@@ -51,6 +56,79 @@ test("settings agent actions save a CodeBuddy-compatible custom permission URL",
     result.commit.agents.codebuddy.customPermissionUrl,
     "https://approval.example.test/permission"
   );
+});
+
+test("settings command registry exposes custom AI add, remove, and discovery commands", () => {
+  assert.strictEqual(commandRegistry.addCustomApplication, agentCommands.addCustomApplication);
+  assert.strictEqual(commandRegistry.removeCustomApplication, agentCommands.removeCustomApplication);
+  assert.strictEqual(commandRegistry.setAgentCustomDiscoveryPaths, agentCommands.setAgentCustomDiscoveryPaths);
+  assert.strictEqual(commandRegistry.setAgentCustomPermissionUrl, agentCommands.setAgentCustomPermissionUrl);
+});
+
+test("settings agent actions add and deduplicate a recognized custom AI", () => {
+  const snapshot = prefs.getDefaults();
+  const application = {
+    id: "custom-nova-ai-0123456789ab",
+    name: "Nova AI",
+    sourcePath: "C:\\NovaAI",
+    executablePath: "C:\\NovaAI\\NovaAI.exe",
+    processName: "NovaAI.exe",
+    category: "code",
+  };
+  const result = agentCommands.addCustomApplication({ path: application.sourcePath }, {
+    snapshot,
+    identifyCustomApplication: () => application,
+  });
+  assert.deepStrictEqual(result.commit.customApplications, [application]);
+  assert.deepStrictEqual(result.commit.agents[application.id], {
+    integrationInstalled: true,
+    enabled: true,
+    permissionsEnabled: true,
+    notificationHookEnabled: true,
+  });
+  const duplicate = agentCommands.addCustomApplication({ path: application.sourcePath }, {
+    snapshot: { ...snapshot, customApplications: [application] },
+    identifyCustomApplication: () => application,
+  });
+  assert.strictEqual(duplicate.noop, true);
+});
+
+test("settings agent actions reject unidentified paths and clean up removed custom AI", () => {
+  const id = "custom-nova-ai-0123456789ab";
+  assert.strictEqual(agentCommands.addCustomApplication({ path: "C:\\missing" }, {
+    snapshot: prefs.getDefaults(),
+    identifyCustomApplication: () => null,
+  }).status, "error");
+  const calls = [];
+  const result = agentCommands.removeCustomApplication({ id }, {
+    snapshot: {
+      customApplications: [{ id }],
+      agents: { [id]: { enabled: true } },
+    },
+    clearSessionsByAgent: (agentId) => calls.push(["sessions", agentId]),
+    dismissPermissionsByAgent: (agentId) => calls.push(["permissions", agentId]),
+  });
+  assert.deepStrictEqual(result.commit.customApplications, []);
+  assert.strictEqual(result.commit.agents[id], undefined);
+  assert.deepStrictEqual(calls, [["sessions", id], ["permissions", id]]);
+});
+
+test("settings agent actions enforce the persisted custom AI limit", () => {
+  const application = {
+    id: "custom-over-limit-0123456789ab",
+    name: "Over Limit",
+    sourcePath: "C:\\OverLimit.exe",
+    executablePath: "C:\\OverLimit.exe",
+    processName: "OverLimit.exe",
+    category: "code",
+  };
+  const current = Array.from({ length: 32 }, (_, index) => ({ id: `custom-app-${String(index).padStart(2, "0")}-0123456789ab` }));
+  const result = agentCommands.addCustomApplication({ path: application.sourcePath }, {
+    snapshot: { customApplications: current, agents: {} },
+    identifyCustomApplication: () => application,
+  });
+  assert.strictEqual(result.status, "error");
+  assert.match(result.message, /limit reached/);
 });
 
 test("settings agent actions sync an installed custom permission URL change immediately", () => {

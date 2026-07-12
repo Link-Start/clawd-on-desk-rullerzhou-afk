@@ -18,6 +18,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { normalizeCustomApplications } = require("./custom-applications");
 const { isPlainObject } = require("./theme-loader");
 const { normalizeShortcuts, getDefaultShortcuts } = require("./shortcut-actions");
 const { isValidDisplaySnapshot } = require("./work-area");
@@ -296,6 +297,11 @@ const SCHEMA = {
     type: "array",
     defaultFactory: () => [],
     normalize: normalizePathList,
+  },
+  customApplications: {
+    type: "array",
+    defaultFactory: () => [],
+    normalize: normalizeCustomApplications,
   },
   dismissedAgentInstallHints: {
     type: "object",

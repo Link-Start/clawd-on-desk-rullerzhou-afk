@@ -8,6 +8,7 @@ const { getAgentDescriptors } = require("./doctor-detectors/agent-descriptors");
 const { DEFAULT_INTEGRATION_INSTALLED_IDS, normalizePathList } = require("./prefs");
 const copilot = require("../hooks/copilot-install");
 const hermes = require("../hooks/hermes-install");
+const { identifyCustomApplication } = require("./custom-applications");
 
 const DEFAULT_SKIPPED_AGENT_IDS = new Set(DEFAULT_INTEGRATION_INSTALLED_IDS);
 const LOW_CONFIDENCE = "low";
@@ -99,6 +100,45 @@ function pathForHome(homeDir, ...parts) {
   return path.join(homeDir || os.homedir(), ...parts);
 }
 
+function uniqueStrings(values) {
+  return [...new Set(values.filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim()))];
+}
+
+function pascalFromAgentId(agentId) {
+  return String(agentId || "").split(/[^a-z0-9]+/i).filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("");
+}
+
+function commonWindowsAppPaths(descriptor, options) {
+  if ((options.platform || process.platform) !== "win32") return [];
+  const env = options.env || process.env;
+  const names = uniqueStrings([
+    descriptor.agentName,
+    descriptor.agentName && descriptor.agentName.replace(/\s+/g, ""),
+    descriptor.agentId,
+    pascalFromAgentId(descriptor.agentId),
+  ]);
+  const roots = uniqueStrings([
+    options.homeDir || os.homedir(),
+    env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, "Programs"),
+    env.LOCALAPPDATA,
+    env.PROGRAMFILES,
+    env["PROGRAMFILES(X86)"],
+  ]);
+  return uniqueStrings(roots.flatMap((root) => names.map((name) => path.join(root, name, `${name}.exe`))));
+}
+
+function finalizeAgentPaths(descriptor, paths, options) {
+  return {
+    ...paths,
+    commandPaths: uniqueStrings([
+      ...(paths.commandPaths || []),
+      ...commonWindowsAppPaths(descriptor, options),
+    ]),
+    customDiscoveryPaths: customDiscoveryPathsForAgent(options, descriptor.agentId),
+  };
+}
+
 function resolveOpenClawPaths(options) {
   const env = options.env || process.env;
   const stateDir = typeof env.OPENCLAW_STATE_DIR === "string" && env.OPENCLAW_STATE_DIR.trim()
@@ -128,34 +168,31 @@ function resolveAgentPaths(descriptor, options) {
 
   if (descriptor.agentId === "copilot-cli") {
     const parentDir = copilot.resolveCopilotHome({ homeDir, env });
-    return {
+    return finalizeAgentPaths(descriptor, {
       parentDir,
       configPath: copilot.resolveCopilotHooksPath({ homeDir, env }),
       settingsPath: copilot.resolveCopilotSettingsPath({ homeDir, env }),
-      customDiscoveryPaths: customDiscoveryPathsForAgent(options, descriptor.agentId),
-    };
+    }, options);
   }
 
   if (descriptor.agentId === "openclaw") {
     const { stateDir, configPath } = resolveOpenClawPaths({ homeDir, env });
-    return {
+    return finalizeAgentPaths(descriptor, {
       parentDir: stateDir,
       stateDir,
       configPath,
-      customDiscoveryPaths: customDiscoveryPathsForAgent(options, descriptor.agentId),
-    };
+    }, options);
   }
 
   if (descriptor.agentId === "hermes") {
     const hermesHome = hermes.resolveHermesHome({ homeDir, env, platform });
-    return {
+    return finalizeAgentPaths(descriptor, {
       parentDir: hermesHome,
       hermesHome,
       configPath: path.join(hermesHome, "plugins", hermes.PLUGIN_ID),
       configFilePath: path.join(hermesHome, "config.yaml"),
       commandPaths: hermesCommandPaths(hermesHome, platform, env),
-      customDiscoveryPaths: customDiscoveryPathsForAgent(options, descriptor.agentId),
-    };
+    }, options);
   }
 
   const parentDir = rebaseHomePath(descriptor.parentDir, homeDir);
@@ -170,8 +207,7 @@ function resolveAgentPaths(descriptor, options) {
       configPath: rebaseHomePath(target.configPath, homeDir),
     }));
   }
-  paths.customDiscoveryPaths = customDiscoveryPathsForAgent(options, descriptor.agentId);
-  return paths;
+  return finalizeAgentPaths(descriptor, paths, options);
 }
 
 function customDiscoveryPathsForAgent(options, agentId) {
@@ -298,6 +334,10 @@ function detectInstallation(descriptor, paths, options) {
   const fsImpl = options.fs;
   const custom = detectCustomDiscoveryPath(paths.customDiscoveryPaths, options);
   if (custom) return custom;
+  const appPath = (paths.commandPaths || []).find((candidate) => fileExists(fsImpl, candidate));
+  if (appPath) {
+    return installationResult(true, "high", "app-path", `${descriptor.agentName || descriptor.agentId} application was found at ${appPath}`);
+  }
   switch (descriptor.agentId) {
     case "gemini-cli":
       return detectGeminiInstallation(descriptor, paths, options);
@@ -363,15 +403,18 @@ function detectCustomDiscoveryPath(paths, options) {
 function detectCustomTools(options = {}) {
   const fsImpl = options.fs || fs;
   const paths = customDiscoveryPathsForAgent({ ...options, fs: fsImpl }, "custom");
+  const addedIds = new Set(((options.snapshot && options.snapshot.customApplications) || []).map((entry) => entry && entry.id));
   return paths.map((candidate) => {
     const kind = statPath(fsImpl, candidate);
+    const application = kind ? identifyCustomApplication(candidate, { ...options, fs: fsImpl }) : null;
     return {
       path: candidate,
       detectedInstalled: !!kind,
-      confidence: kind ? "medium" : LOW_CONFIDENCE,
-      reason: kind ? "custom-path" : "not-found",
-      detail: kind ? `Path exists (${kind})` : "Path was not found",
+      confidence: application ? "high" : (kind ? "low" : LOW_CONFIDENCE),
+      reason: application ? "application-recognized" : (kind ? "no-application" : "not-found"),
+      detail: application ? `Recognized ${application.name}` : (kind ? "No launchable application was recognized" : "Path was not found"),
       kind: kind || null,
+      application: application ? { ...application, added: addedIds.has(application.id) } : null,
     };
   });
 }

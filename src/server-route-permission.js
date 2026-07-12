@@ -396,7 +396,9 @@ function handlePermissionPost(req, res, options) {
       return;
     }
     const recordRequestHookEvent = createRequestHookRecorder(data, "permission");
-    const hookIdentity = resolveHookAgentId(data);
+    const hookIdentity = resolveHookAgentId(data, {
+      customAgentIds: typeof ctx.getCustomAgentIds === "function" ? ctx.getCustomAgentIds() : [],
+    });
     const { agentId } = hookIdentity;
 
     try {

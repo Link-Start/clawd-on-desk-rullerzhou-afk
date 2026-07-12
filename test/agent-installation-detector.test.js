@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const {
+  detectAgentInstallation,
   detectAgentInstallations,
 } = require("../src/agent-installation-detector");
 const { getAgentDescriptor } = require("../src/doctor-detectors/agent-descriptors");
@@ -237,11 +238,35 @@ describe("agent installation detector", () => {
 
     assert.strictEqual(report.customTools.length, 2);
     assert.strictEqual(report.customTools[0].detectedInstalled, true);
-    assert.strictEqual(report.customTools[0].confidence, "medium");
-    assert.strictEqual(report.customTools[0].reason, "custom-path");
+    assert.strictEqual(report.customTools[0].confidence, "high");
+    assert.strictEqual(report.customTools[0].reason, "application-recognized");
     assert.strictEqual(report.customTools[0].kind, "file");
-    assert.strictEqual(report.customTools[0].detail, "Path exists (file)");
+    assert.strictEqual(report.customTools[0].application.name, "CustomAI");
+    assert.strictEqual(report.customTools[0].application.added, false);
     assert.strictEqual(report.customTools[1].detectedInstalled, false);
+  });
+
+  it("discovers supported agents in common Windows application roots", () => {
+    const root = makeHome();
+    const localAppData = path.join(root, "LocalAppData");
+    const executable = path.join(localAppData, "Programs", "Nova AI", "Nova AI.exe");
+    writeText(executable, "");
+    const descriptor = {
+      agentId: "nova-ai",
+      agentName: "Nova AI",
+      parentDir: path.join(root, ".nova-ai"),
+      configPath: path.join(root, ".nova-ai", "settings.json"),
+      marker: "clawd",
+    };
+    const result = detectAgentInstallation(descriptor, {
+      homeDir: root,
+      platform: "win32",
+      env: { LOCALAPPDATA: localAppData },
+    });
+    assert.strictEqual(result.detectedInstalled, true);
+    assert.strictEqual(result.confidence, "high");
+    assert.strictEqual(result.reason, "app-path");
+    assert.match(result.detail, /Nova AI\.exe/);
   });
 
   describe("kimi dual-generation detection (#563)", () => {

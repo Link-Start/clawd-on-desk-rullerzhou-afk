@@ -347,23 +347,58 @@
     text.className = "row-text";
     const label = document.createElement("span");
     label.className = "row-label custom-tool-result-path";
-    label.textContent = result.path || "";
+    label.textContent = result.application ? result.application.name : (result.path || "");
     text.appendChild(label);
     const desc = document.createElement("span");
     desc.className = "row-desc custom-tool-result-detail";
-    desc.textContent = result.detail || "";
+    desc.textContent = result.application
+      ? `${result.application.executablePath} · ${result.application.id}`
+      : (result.detail || "");
     text.appendChild(desc);
     row.appendChild(text);
 
-    const status = document.createElement("span");
-    status.className = "custom-tool-result-status";
-    status.textContent = result.detectedInstalled === true
-      ? t("customToolDetectionFound")
+    const status = document.createElement(result.application && !result.application.added ? "button" : "span");
+    status.className = result.application && !result.application.added
+      ? "soft-btn accent custom-tool-add"
+      : "custom-tool-result-status";
+    status.textContent = result.application
+      ? (result.application.added ? t("customToolAdded") : t("customToolAdd"))
+      : result.detectedInstalled === true
+        ? t("customToolNotRecognized")
       : result.detectedInstalled === false
         ? t("customToolDetectionMissing")
         : t("customToolDetectionPendingShort");
+    if (result.application && !result.application.added) {
+      status.type = "button";
+      status.addEventListener("click", () => addCustomApplication(result, status));
+    }
     row.appendChild(status);
     return row;
+  }
+
+  async function refreshCustomAgentUi() {
+    if (window.settingsAPI && typeof window.settingsAPI.listAgents === "function") {
+      const list = await window.settingsAPI.listAgents();
+      if (ops && typeof ops.applyAgentMetadata === "function") ops.applyAgentMetadata(list);
+      else runtime.agentMetadata = Array.isArray(list) ? list : [];
+    }
+    if (ops && typeof ops.fetchAgentInstallationHints === "function") {
+      await ops.fetchAgentInstallationHints({ force: true });
+    }
+    ops.requestRender({ content: true });
+  }
+
+  async function addCustomApplication(result, button) {
+    button.disabled = true;
+    try {
+      const response = await window.settingsAPI.command("addCustomApplication", { path: result.path });
+      if (!response || response.status !== "ok") throw new Error((response && response.message) || "add failed");
+      ops.showToast(t("customToolAdded"));
+      await refreshCustomAgentUi();
+    } catch (err) {
+      ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+      button.disabled = false;
+    }
   }
 
   function getRestoredCleanupDismissalAgentIds() {
@@ -772,10 +807,30 @@
           permBadge.textContent = t("badgePermissionBubble");
           badges.appendChild(permBadge);
         }
-        syncAgentIntegrationBadge(integrationBadge, agent.id);
+        if (agent.custom) integrationBadge.textContent = t("customToolAdded");
+        else syncAgentIntegrationBadge(integrationBadge, agent.id);
         text.appendChild(badges);
       },
       buildExtraControls: (ctrl) => {
+        if (agent.custom) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "soft-btn danger custom-agent-remove";
+          button.textContent = t("customToolRemove");
+          button.addEventListener("click", async () => {
+            button.disabled = true;
+            try {
+              const result = await window.settingsAPI.command("removeCustomApplication", { id: agent.id });
+              if (!result || result.status !== "ok") throw new Error((result && result.message) || "remove failed");
+              await refreshCustomAgentUi();
+            } catch (err) {
+              ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+              button.disabled = false;
+            }
+          });
+          ctrl.appendChild(button);
+          return;
+        }
         const button = buildAgentIntegrationActionButton(agent);
         const meta = state.mountedControls.agentIntegrationActions.get(agent.id);
         if (meta) {
@@ -790,6 +845,28 @@
   function buildAgentDetailRows(agent) {
     const rows = [];
     const caps = agent.capabilities || {};
+    if (agent.custom) {
+      for (const [labelKey, value] of [
+        ["customToolAgentId", agent.id],
+        ["customToolExecutable", agent.executablePath],
+        ["customToolSourcePath", agent.sourcePath],
+      ]) {
+        const row = document.createElement("div");
+        row.className = "row row-sub custom-agent-detail";
+        const text = document.createElement("div");
+        text.className = "row-text";
+        const label = document.createElement("span");
+        label.className = "row-label";
+        label.textContent = t(labelKey);
+        const desc = document.createElement("span");
+        desc.className = "row-desc";
+        desc.textContent = value || "";
+        text.appendChild(label);
+        text.appendChild(desc);
+        row.appendChild(text);
+        rows.push(row);
+      }
+    }
     if (agent.id === "claude-code") {
       rows.push(...buildClaudeHookManagementRows());
     }
@@ -887,7 +964,7 @@
         value: () => readers.readAgentCustomPermissionUrl(agent.id),
       }));
     }
-    if (agent.id !== "claude-code" && agent.id !== "codex") {
+    if (!agent.custom && agent.id !== "claude-code" && agent.id !== "codex") {
       rows.push(buildAgentTextInputRow({
         agentId: agent.id,
         command: "setAgentCustomDiscoveryPaths",

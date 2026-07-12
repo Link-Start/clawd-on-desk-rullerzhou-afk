@@ -28,10 +28,16 @@ function normalizeHookText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function resolveHookAgentId(data) {
+function resolveHookAgentId(data, options = {}) {
   const explicit = normalizeHookText(data && data.agent_id);
   if (explicit && KNOWN_HOOK_AGENT_IDS.has(explicit)) {
     return { agentId: explicit, source: "explicit", defaulted: false };
+  }
+  const customAgentIds = options.customAgentIds instanceof Set
+    ? options.customAgentIds
+    : new Set(Array.isArray(options.customAgentIds) ? options.customAgentIds : []);
+  if (/^custom-[a-z0-9-]+-[a-f0-9]{12}$/.test(explicit) && customAgentIds.has(explicit)) {
+    return { agentId: explicit, source: "custom", defaulted: false };
   }
 
   const hookSource = normalizeHookText(data && data.hook_source);
