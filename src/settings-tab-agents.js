@@ -16,6 +16,7 @@
     { id: "intercept", labelKey: "codexPermissionModeIntercept" },
   ];
   const INSTALL_HINT_CONFIDENCES = new Set(["high", "medium"]);
+  const CUSTOM_TOOL_SCAN_STATUS_MIN_MS = 1200;
   let agentHintActionPending = false;
   let agentInstallHintResetPending = false;
   let agentCleanupHintResetPending = false;
@@ -282,6 +283,7 @@
     scanStatus.className = "custom-tool-scan-status";
     scanStatus.textContent = getCustomToolScanStatusText();
     scanButton.addEventListener("click", async () => {
+      const scanStartedAt = Date.now();
       scanButton.disabled = true;
       scanStatus.classList.remove("failed");
       scanStatus.classList.add("pending");
@@ -289,6 +291,10 @@
       try {
         if (ops && typeof ops.fetchAgentInstallationHints === "function") {
           await ops.fetchAgentInstallationHints({ force: true });
+        }
+        const remainingStatusMs = CUSTOM_TOOL_SCAN_STATUS_MIN_MS - (Date.now() - scanStartedAt);
+        if (remainingStatusMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, remainingStatusMs));
         }
         scanStatus.textContent = getCustomToolScanStatusText();
       } catch (err) {

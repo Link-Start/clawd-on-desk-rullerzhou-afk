@@ -757,6 +757,7 @@ function loadAgentsTabForTest({
     },
     document,
     requestAnimationFrame: (cb) => raf.requestAnimationFrame(cb),
+    setTimeout,
     window: null,
     globalThis: null,
     settingsAPI: {
@@ -4061,6 +4062,7 @@ describe("settings renderer browser environment", () => {
       customTools: [],
       skippedAgentIds: [],
     });
+    await new Promise((resolve) => setTimeout(resolve, 1250));
     for (let i = 0; i < 8; i++) await Promise.resolve();
     assert.match(status.textContent, /^Last scanned at /);
     assert.strictEqual(button.disabled, false);
