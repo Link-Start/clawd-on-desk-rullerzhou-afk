@@ -537,6 +537,33 @@ describe("state-session-snapshot builder", () => {
     assert.deepStrictEqual(snapshot.groups, [{ host: "", ids: ["codex:new", "codex:old"], displayHost: "" }]);
   });
 
+  it("keeps Codex Desktop sessions that share one agent process visible in HUD", () => {
+    const snapshot = buildSessionSnapshot(new Map([
+      ["codex:desktop-a", session("working", {
+        agentId: "codex",
+        agentPid: 4242,
+        codexOriginator: "Codex Desktop",
+        updatedAt: 1000,
+        cwd: "/repo/a",
+      })],
+      ["codex:desktop-b", session("thinking", {
+        agentId: "codex",
+        agentPid: 4242,
+        codexOriginator: "Codex Desktop",
+        updatedAt: 2000,
+        cwd: "/repo/b",
+      })],
+    ]), {
+      statePriority: STATE_PRIORITY,
+      getAgentIconUrl: () => null,
+    });
+
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "codex:desktop-a").hiddenFromHud, false);
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "codex:desktop-b").hiddenFromHud, false);
+    assert.strictEqual(snapshot.hudTotalNonIdle, 2);
+    assert.strictEqual(snapshot.hudLastSessionId, "codex:desktop-b");
+  });
+
   it("snapshot signatures include visible fields but ignore icon URL churn", () => {
     const base = buildSessionSnapshot(new Map([
       ["s1", session("working", {

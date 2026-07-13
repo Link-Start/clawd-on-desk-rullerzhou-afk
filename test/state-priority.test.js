@@ -102,6 +102,23 @@ describe("state-priority display selection", () => {
     ])), "working");
   });
 
+  it("keeps concurrent Codex Desktop sessions separate when they share one agent process", () => {
+    assert.strictEqual(resolveDominantSessionState(new Map([
+      ["codex:desktop-a", session("working", {
+        agentId: "codex",
+        agentPid: 4242,
+        codexOriginator: " Codex Desktop ",
+        updatedAt: 1000,
+      })],
+      ["codex:desktop-b", session("thinking", {
+        agentId: "codex",
+        agentPid: 4242,
+        codexOriginator: "codex desktop",
+        updatedAt: 2000,
+      })],
+    ])), "working");
+  });
+
   it("does not dedupe Codex sessions without a local agent pid", () => {
     assert.strictEqual(resolveDominantSessionState(new Map([
       ["codex:old", session("working", {
