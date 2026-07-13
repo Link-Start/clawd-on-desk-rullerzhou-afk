@@ -974,7 +974,7 @@ html, body {
   flex: 1 1 260px;
   min-width: min(100%, 260px);
 }
-.agent-custom-tools-section .agent-text-input-row {
+.agent-custom-tools-section .custom-tool-discovery-row {
   align-items: stretch;
   flex-direction: column;
   gap: 14px;
@@ -998,7 +998,7 @@ html, body {
   font-size: 12px;
   line-height: 1.5;
 }
-.agent-custom-tools-section .agent-text-input-control {
+.agent-custom-tools-section .custom-tool-discovery-control {
   display: flex;
   align-items: stretch;
   flex: 0 0 auto;
@@ -1006,10 +1006,6 @@ html, body {
   gap: 10px;
   width: 100%;
   min-width: 0;
-}
-.agent-custom-tools-section .agent-text-input-control input {
-  flex: 0 0 auto;
-  min-height: 40px;
 }
 .agent-custom-tools-section .custom-tool-path-picker {
   width: 100%;

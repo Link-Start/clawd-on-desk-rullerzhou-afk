@@ -212,27 +212,28 @@
   }
 
   function buildCustomToolsSection() {
-    const row = buildAgentTextInputRow({
-      agentId: "custom",
-      command: "setAgentCustomDiscoveryPaths",
-      labelKey: "rowCustomToolsDiscoveryPaths",
-      descKey: "rowCustomToolsDiscoveryPathsDesc",
-      placeholderKey: "rowCustomToolsDiscoveryPathsPlaceholder",
-      value: () => readers.readAgentCustomDiscoveryPaths("custom").join("; "),
-    });
-    const input = row._settingsInput;
-    const control = row._settingsControl;
-    for (const [kind, labelKey] of [
-      ["file", "customToolAddExecutable"],
-      ["directory", "customToolAddFolder"],
-    ]) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "soft-btn custom-tool-path-picker";
-      button.textContent = t(labelKey);
-      button.addEventListener("click", () => addPickedCustomDiscoveryPath(input, button, kind));
-      control.appendChild(button);
-    }
+    const row = document.createElement("div");
+    row.className = "row-sub custom-tool-discovery-row";
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("rowCustomToolsDiscoveryPaths");
+    text.appendChild(label);
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("rowCustomToolsDiscoveryPathsDesc");
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const control = document.createElement("div");
+    control.className = "custom-tool-discovery-control";
+    const addButton = document.createElement("button");
+    addButton.type = "button";
+    addButton.className = "soft-btn accent custom-tool-path-picker";
+    addButton.textContent = t("customToolManualAdd");
+    addButton.addEventListener("click", () => addPickedCustomDiscoveryPath(addButton));
+    control.appendChild(addButton);
     const scanButton = document.createElement("button");
     scanButton.type = "button";
     scanButton.className = "soft-btn custom-tool-scan";
@@ -267,6 +268,7 @@
     control.appendChild(scanStatus);
     const wslScanControl = buildWslScanControl();
     if (wslScanControl) control.appendChild(wslScanControl);
+    row.appendChild(control);
     const rows = [row, ...buildCustomToolResultRows()];
     const section = helpers.buildSection(t("agentCustomToolsSection"), rows);
     section.classList.add("agent-custom-tools-section");
@@ -328,27 +330,43 @@
     return t("customToolScanStatusComplete").replace("{time}", time);
   }
 
-  async function addPickedCustomDiscoveryPath(input, button, kind) {
+  async function addPickedCustomDiscoveryPath(button) {
     if (!window.settingsAPI || typeof window.settingsAPI.pickAgentDiscoveryPath !== "function") {
       ops.showToast(t("toastSaveFailed") + "path picker unavailable", { error: true });
       return;
     }
+    if (!window.settingsAPI || typeof window.settingsAPI.command !== "function") {
+      ops.showToast(t("toastSaveFailed") + "settings API unavailable", { error: true });
+      return;
+    }
+    const originalLabel = button.textContent;
     button.disabled = true;
+    button.textContent = t("customToolScanStatusScanning");
     try {
-      const result = await window.settingsAPI.pickAgentDiscoveryPath(kind);
+      const result = await window.settingsAPI.pickAgentDiscoveryPath("directory");
       if (!result || result.status === "cancel") return;
       if (result.status !== "ok" || typeof result.path !== "string" || !result.path) {
         ops.showToast(t("toastSaveFailed") + ((result && result.message) || "path picker failed"), { error: true });
         return;
       }
-      const paths = String(input.value || "").split(";").map((value) => value.trim()).filter(Boolean);
+      const paths = readers.readAgentCustomDiscoveryPaths("custom").slice();
       if (!paths.includes(result.path)) paths.push(result.path);
-      input.value = paths.join("; ");
-      await saveAgentTextInput(input, { agentId: "custom", command: "setAgentCustomDiscoveryPaths" });
+      const response = await window.settingsAPI.command("setAgentCustomDiscoveryPaths", {
+        agentId: "custom",
+        value: paths.join("; "),
+      });
+      if (!response || response.status !== "ok") {
+        throw new Error((response && response.message) || "failed to save discovery path");
+      }
+      if (ops && typeof ops.fetchAgentInstallationHints === "function") {
+        await ops.fetchAgentInstallationHints({ force: true });
+      }
+      ops.requestRender({ content: true });
     } catch (err) {
       ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
     } finally {
       button.disabled = false;
+      button.textContent = originalLabel;
     }
   }
 
@@ -993,16 +1011,6 @@
         descKey: "rowCodeBuddyCompatiblePermissionUrlDesc",
         placeholderKey: "rowCodeBuddyCompatiblePermissionUrlPlaceholder",
         value: () => readers.readAgentCustomPermissionUrl(agent.id),
-      }));
-    }
-    if (!agent.custom && agent.id !== "claude-code" && agent.id !== "codex") {
-      rows.push(buildAgentTextInputRow({
-        agentId: agent.id,
-        command: "setAgentCustomDiscoveryPaths",
-        labelKey: "rowAgentDiscoveryPaths",
-        descKey: "rowAgentDiscoveryPathsDesc",
-        placeholderKey: "rowAgentDiscoveryPathsPlaceholder",
-        value: () => readers.readAgentCustomDiscoveryPaths(agent.id).join("; "),
       }));
     }
     // WSL instances: show detected agent installations across distros

@@ -787,6 +787,10 @@ function loadAgentsTabForTest({
           agentSectionUnavailable: "Not detected locally",
           agentCategoryCoding: "Coding AI",
           agentCategoryWork: "Office AI",
+          agentCustomToolsSection: "Discover and add custom AI",
+          rowCustomToolsDiscoveryPaths: "Add another AI",
+          rowCustomToolsDiscoveryPathsDesc: "Choose an AI installation folder.",
+          customToolManualAdd: "Choose AI installation folder",
           customToolRescan: "Rescan",
           customToolScanStatusIdle: "Not scanned",
           customToolScanStatusScanning: "Scanning...",
@@ -4005,7 +4009,7 @@ describe("settings renderer browser environment", () => {
 
   });
 
-  it("renders Custom AI tool detection results under the manual discovery input", () => {
+  it("renders Custom AI detection under one manual folder picker", () => {
     const agentsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-agents.js"), "utf8");
     const coreSource = fs.readFileSync(path.join(SRC_DIR, "settings-ui-core.js"), "utf8");
     const preloadSource = fs.readFileSync(PRELOAD_SETTINGS, "utf8");
@@ -4018,13 +4022,14 @@ describe("settings renderer browser environment", () => {
     assert.ok(agentsSource.includes('className = "row-sub custom-tool-result-row"'));
     assert.ok(agentsSource.includes("pickAgentDiscoveryPath"));
     assert.ok(preloadSource.includes('ipcRenderer.invoke("settings:pick-agent-discovery-path"'));
-    assert.ok(agentsSource.includes('labelKey: "rowAgentDiscoveryPaths"'));
+    assert.ok(agentsSource.includes('pickAgentDiscoveryPath("directory")'));
+    assert.ok(!agentsSource.includes('labelKey: "rowAgentDiscoveryPaths"'));
     assert.ok(agentsSource.includes('await ops.fetchAgentInstallationHints({ force: true })'));
     assert.ok(agentsSource.includes("function buildWslScanControl("));
     assert.ok(agentsSource.includes('control.className = "custom-tool-wsl-scan"'));
     assert.ok(!agentsSource.includes('toolbar.className = "agent-scan-toolbar"'));
     assert.ok(css.includes(".custom-tool-result-status"));
-    assert.match(css, /\.agent-custom-tools-section \.agent-text-input-row\s*\{[^}]*flex-direction:\s*column;/s);
+    assert.match(css, /\.agent-custom-tools-section \.custom-tool-discovery-row\s*\{[^}]*flex-direction:\s*column;/s);
     assert.match(css, /\.custom-tool-path-picker\s*\{[^}]*width:\s*100%;/s);
   });
 
@@ -4073,9 +4078,9 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(button.disabled, false);
   });
 
-  it("adds a picked custom executable, persists it, and waits for a fresh path scan", async () => {
+  it("adds a picked installation folder, persists it, and waits for a fresh path scan", async () => {
     const calls = [];
-    const pickedPath = "C:\\Tools\\CustomAI.exe";
+    const pickedPath = "C:\\Tools\\CustomAI";
     const harness = loadAgentsTabForTest({
       snapshot: { agents: {}, customToolDiscoveryPaths: [] },
       agentMetadata: [],
@@ -4098,8 +4103,8 @@ describe("settings renderer browser environment", () => {
               detectedInstalled: true,
               confidence: "medium",
               reason: "custom-path",
-              detail: "Path exists (file)",
-              kind: "file",
+              detail: "Path exists (directory)",
+              kind: "directory",
             }],
           };
         },
@@ -4115,11 +4120,14 @@ describe("settings renderer browser environment", () => {
     harness.core.ops.requestRender({ content: true });
     harness.raf.flush();
 
-    harness.content.querySelector(".custom-tool-path-picker").dispatchEvent({ type: "click", bubbles: false });
+    const picker = harness.content.querySelector(".custom-tool-path-picker");
+    assert.strictEqual(picker.textContent, "Choose AI installation folder");
+    assert.strictEqual(harness.content.querySelector(".agent-custom-tools-section input"), null);
+    picker.dispatchEvent({ type: "click", bubbles: false });
     for (let i = 0; i < 8; i++) await Promise.resolve();
     harness.raf.flush();
 
-    assert.deepStrictEqual(calls[0], ["pick", "file"]);
+    assert.deepStrictEqual(calls[0], ["pick", "directory"]);
     assert.strictEqual(calls[1][0], "command");
     assert.strictEqual(calls[1][1], "setAgentCustomDiscoveryPaths");
     assert.strictEqual(calls[1][2].agentId, "custom");
