@@ -9,9 +9,11 @@ const {
   buildPermissionUrl,
   clearRuntimeConfig,
   getPortCandidates,
+  readRuntimeIdentity,
   readRuntimePort,
   writeRuntimeConfig,
 } = require("../hooks/server-config");
+const { processAlive } = require("../hooks/shared-process");
 const {
   getClaudeHookScriptPath,
   getClaudeAutoStartScriptPath,
@@ -65,6 +67,19 @@ const clearRuntimeConfigFn = ctx.clearRuntimeConfig || clearRuntimeConfig;
 const getPortCandidatesFn = ctx.getPortCandidates || getPortCandidates;
 const readRuntimePortFn = ctx.readRuntimePort || readRuntimePort;
 const writeRuntimeConfigFn = ctx.writeRuntimeConfig || writeRuntimeConfig;
+// #681. Injectable so tests never read the developer's real ~/.clawd/runtime.json
+// (whose contents depend on whether Clawd happens to be running right now).
+const readRuntimeIdentityFn = ctx.readRuntimeIdentity
+  || (() => readRuntimeIdentity({ runtimeConfigPath: ctx.runtimeConfigPath }));
+const isProcessAliveFn = ctx.isProcessAlive || processAlive;
+// #681: where the runtime file lives is a pure expression — answering it must
+// not read the file, probe a PID, or touch any of the seams above. Callers that
+// only want the path used to reach it through getRuntimeStatus(), which costs
+// two reads, two JSON.parses and a kill() syscall to build a string that ignores
+// all of them, and which drags three throw-capable seams into the callsite.
+function runtimeConfigFilePath() {
+  return typeof ctx.runtimeConfigPath === "string" ? ctx.runtimeConfigPath : RUNTIME_CONFIG_PATH;
+}
 const CLAUDE_HOOK_GUARD_NOTICE_TTL_MS = 30 * 60 * 1000;
 
 let httpServer = null;
@@ -131,13 +146,23 @@ function getRuntimeStatus() {
     : null;
   const port = activeServerPort || addressPort || null;
   const runtimePort = readRuntimePortFn();
+  // #681: the runtime file is now the hook resolver's offline gate, so its
+  // identity — not just its port — decides whether hooks can report process
+  // metadata at all. A stale ownerPid (a crashed instance's leftover file) reads
+  // as "Clawd offline" to every hook even while this server is happily
+  // listening, which is exactly the state Doctor must surface.
+  const identity = readRuntimeIdentityFn();
+  const runtimeOwnerPid = identity && identity.ok ? identity.ownerPid : null;
   return {
     listening: !!port && (!httpServer || httpServer.listening !== false),
     port,
-    runtimePath: typeof ctx.runtimeConfigPath === "string" ? ctx.runtimeConfigPath : RUNTIME_CONFIG_PATH,
+    runtimePath: runtimeConfigFilePath(),
     runtimePort,
     runtimeFileExists: Number.isInteger(runtimePort),
     runtimeMatches: Number.isInteger(port) && runtimePort === port,
+    runtimeOwnerPid,
+    runtimeOwnerAlive: runtimeOwnerPid ? isProcessAliveFn(runtimeOwnerPid) : false,
+    runtimeIdentityValid: !!(identity && identity.ok),
   };
 }
 
@@ -577,7 +602,36 @@ function startHttpServer() {
 
     httpServer.on("listening", () => {
       activeServerPort = listenPorts[listenIndex];
-      writeRuntimeConfigFn(activeServerPort);
+      // #681: settle() is at the bottom of this handler, and this is an event
+      // callback with no main-process uncaughtException handler behind it — so a
+      // throw from here takes the Electron main process down, and under a host
+      // that does catch (the test runner) it instead strands startHttpServer's
+      // promise and every caller awaiting the port. writeRuntimeConfig owes a
+      // boolean contract (its mkdirSync used to sit outside its own try), but a
+      // ctx-injected implementation can throw for any reason. Report, never
+      // propagate.
+      let runtimeWritten = false;
+      try {
+        runtimeWritten = writeRuntimeConfigFn(activeServerPort) === true;
+      } catch (err) {
+        runtimeWritten = false;
+        console.warn("Failed to write the Clawd runtime file:", (err && err.message) || err);
+      }
+      if (!runtimeWritten) {
+        // Hooks fall back to probing the port range, so state/permission POSTs
+        // still land. What is lost is the resolver's offline gate input: with no
+        // readable runtime identity the hook fail-closes and OMITS process
+        // metadata (no terminal focus for new sessions) rather than snapshot the
+        // machine to guess it. Surfaced in Doctor → Local server.
+        // runtimeConfigFilePath(), not getRuntimeStatus().runtimePath: the status
+        // object reads the runtime file twice and probes the owner PID to build
+        // fields this log line discards, and each of those is a throw-capable
+        // ctx seam sitting above settle().
+        console.warn(
+          `Clawd runtime file was not written (${runtimeConfigFilePath()}) — `
+          + "hook process metadata will be omitted until this is repaired (see Doctor → Local server)"
+        );
+      }
       console.log(`Clawd state server listening on 127.0.0.1:${activeServerPort}`);
       // Defer hook/plugin registration off the startup path. Each sync call
       // reads+parses+writes a config JSON (50-150ms cumulative on slow disks),
