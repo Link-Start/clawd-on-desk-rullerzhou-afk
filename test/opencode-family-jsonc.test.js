@@ -41,16 +41,19 @@ function parseJsonc(text) {
 }
 
 describe("mimocode JSONC installer — register", () => {
-  it("creates mimocode.jsonc when missing, without a foreign $schema", () => {
+  it("creates mimocode.jsonc when no candidate exists, stamped with MiMo's own $schema", () => {
     const { configPath } = tmpConfig(undefined);
     const res = registerMimocodePlugin({ silent: true, configPath, pluginDir: PLUGIN_DIR });
     assert.deepStrictEqual(res, { added: true, skipped: false, created: true, configPath, pluginDir: PLUGIN_DIR });
     const text = fs.readFileSync(configPath, "utf8");
     const tree = parseJsonc(text);
-    assert.deepStrictEqual(tree, { plugin: [PLUGIN_DIR] });
-    // The pre-family installer wrote opencode.ai's schema URL into mimocode
-    // configs; the registry pins schema: null so that never happens again.
-    assert.ok(!text.includes("$schema"), "mimocode must not be given opencode's $schema");
+    // MiMo v0.1.6 stamps this URL itself (config.ts:564-566) and rewrites
+    // opencode.ai's URL when it finds one — write what the host would write.
+    assert.deepStrictEqual(tree, {
+      $schema: "https://mimo.xiaomi.com/mimocode/config.json",
+      plugin: [PLUGIN_DIR],
+    });
+    assert.ok(!text.includes("opencode.ai"), "mimocode must not be given opencode's $schema");
   });
 
   it("appends while PRESERVING comments and trailing commas", () => {
@@ -208,6 +211,123 @@ describe("mimocode JSONC installer — unregister", () => {
       () => unregisterMimocodePlugin({ silent: true, configPath, pluginDir: PLUGIN_DIR }),
       /Failed to read/
     );
+  });
+});
+
+// MiMo v0.1.6 merges config.json → mimocode.json → mimocode.jsonc (later
+// wins; "plugin" arrays are REPLACED, not concatenated). The installer must
+// edit the file whose plugin array is effectively live and sweep all
+// candidates on unregister (#607 review).
+describe("mimocode JSONC installer — merged dual-file semantics", () => {
+  function tmpDir() {
+    return fs.mkdtempSync(path.join(os.tmpdir(), "clawd-mimocode-merged-"));
+  }
+  function inDir(dir, name, text) {
+    const p = path.join(dir, name);
+    if (text !== undefined) fs.writeFileSync(p, text);
+    return p;
+  }
+
+  it("edits mimocode.json when it is the only file declaring plugin (no .jsonc created)", () => {
+    const dir = tmpDir();
+    const jsonPath = inDir(dir, "mimocode.json", '{\n  "plugin": ["@vendor/keep"]\n}');
+    const configPath = path.join(dir, "mimocode.jsonc"); // create-default, does not exist
+    const res = registerMimocodePlugin({ silent: true, configPath, pluginDir: PLUGIN_DIR });
+    assert.strictEqual(res.added, true);
+    assert.strictEqual(res.created, false);
+    assert.strictEqual(res.configPath, jsonPath, "must edit the live plugin owner, not the create-default");
+    assert.ok(!fs.existsSync(configPath), "creating .jsonc here would MASK the user's .json plugins");
+    assert.deepStrictEqual(parseJsonc(fs.readFileSync(jsonPath, "utf8")).plugin, ["@vendor/keep", PLUGIN_DIR]);
+  });
+
+  it("edits .jsonc when BOTH declare plugin (priority), leaving .json byte-identical", () => {
+    const dir = tmpDir();
+    const jsonText = '{\n  "plugin": ["@vendor/in-json"]\n}';
+    const jsonPath = inDir(dir, "mimocode.json", jsonText);
+    const jsoncPath = inDir(dir, "mimocode.jsonc", '{\n  // live file\n  "plugin": ["@vendor/in-jsonc"],\n}');
+    const res = registerMimocodePlugin({ silent: true, configPath: jsoncPath, pluginDir: PLUGIN_DIR });
+    assert.strictEqual(res.configPath, jsoncPath);
+    assert.deepStrictEqual(parseJsonc(fs.readFileSync(jsoncPath, "utf8")).plugin, ["@vendor/in-jsonc", PLUGIN_DIR]);
+    assert.strictEqual(fs.readFileSync(jsonPath, "utf8"), jsonText, ".json must stay untouched");
+  });
+
+  it("edits .json when it declares plugin and .jsonc exists WITHOUT plugin", () => {
+    const dir = tmpDir();
+    const jsonPath = inDir(dir, "mimocode.json", '{\n  "plugin": ["@vendor/live"]\n}');
+    const jsoncText = '{\n  // model prefs only\n  "model": "mimo/base",\n}';
+    const jsoncPath = inDir(dir, "mimocode.jsonc", jsoncText);
+    const res = registerMimocodePlugin({ silent: true, configPath: jsoncPath, pluginDir: PLUGIN_DIR });
+    assert.strictEqual(res.configPath, jsonPath, "plugin lives in .json — writing .jsonc would mask it");
+    assert.strictEqual(fs.readFileSync(jsoncPath, "utf8"), jsoncText, ".jsonc must stay untouched");
+    assert.deepStrictEqual(parseJsonc(fs.readFileSync(jsonPath, "utf8")).plugin, ["@vendor/live", PLUGIN_DIR]);
+  });
+
+  it("supports the legacy config.json tier as the effective owner", () => {
+    const dir = tmpDir();
+    const legacyPath = inDir(dir, "config.json", '{\n  "plugin": ["@vendor/legacy"]\n}');
+    const configPath = path.join(dir, "mimocode.jsonc");
+    const res = registerMimocodePlugin({ silent: true, configPath, pluginDir: PLUGIN_DIR });
+    assert.strictEqual(res.configPath, legacyPath);
+    assert.deepStrictEqual(parseJsonc(fs.readFileSync(legacyPath, "utf8")).plugin, ["@vendor/legacy", PLUGIN_DIR]);
+  });
+
+  it("prefers the existing highest-priority file when NO candidate declares plugin", () => {
+    const dir = tmpDir();
+    inDir(dir, "mimocode.json", '{\n  "model": "mimo/base"\n}');
+    const jsoncPath = inDir(dir, "mimocode.jsonc", '{\n  // prefs\n  "theme": "dark",\n}');
+    const res = registerMimocodePlugin({ silent: true, configPath: jsoncPath, pluginDir: PLUGIN_DIR });
+    assert.strictEqual(res.configPath, jsoncPath);
+    const tree = parseJsonc(fs.readFileSync(jsoncPath, "utf8"));
+    assert.deepStrictEqual(tree.plugin, [PLUGIN_DIR]);
+    assert.strictEqual(tree.theme, "dark");
+  });
+
+  it("unregister sweeps managed entries from ALL candidates (masked entries cannot resurrect)", () => {
+    const dir = tmpDir();
+    const jsoncPath = inDir(dir, "mimocode.jsonc", `{\n  // live\n  "plugin": ["${PLUGIN_DIR}", "@vendor/keep"],\n}`);
+    const jsonPath = inDir(dir, "mimocode.json", `{\n  "plugin": ["${PLUGIN_DIR}", "${PLUGIN_DIR}"]\n}`);
+    const legacyPath = inDir(dir, "config.json", `{\n  "plugin": ["${PLUGIN_DIR}"]\n}`);
+    const res = unregisterMimocodePlugin({ silent: true, configPath: jsoncPath, pluginDir: PLUGIN_DIR, backup: true });
+    assert.strictEqual(res.removed, 4, "1 live + 2 masked in .json + 1 masked in config.json");
+    assert.strictEqual(res.changed, true);
+    assert.strictEqual(res.backupPaths.length, 3, "each changed file gets a backup");
+    assert.deepStrictEqual(parseJsonc(fs.readFileSync(jsoncPath, "utf8")).plugin, ["@vendor/keep"]);
+    assert.deepStrictEqual(parseJsonc(fs.readFileSync(jsonPath, "utf8")).plugin, []);
+    assert.deepStrictEqual(parseJsonc(fs.readFileSync(legacyPath, "utf8")).plugin, []);
+    assert.ok(fs.readFileSync(jsoncPath, "utf8").includes("// live"), "comments survive the sweep");
+  });
+
+  it("survives SINGLE-LINE plugin arrays on removal (jsonc-parser 3.3.1 emits corrupt edits there)", () => {
+    // Upstream modify() drops a dangling quote when removing elements from a
+    // one-line array — the module must fall back to whole-array replacement.
+    const dir = tmpDir();
+    const jsoncPath = inDir(dir, "mimocode.jsonc", `{\n  "plugin": ["${PLUGIN_DIR}", "@vendor/keep", "${PLUGIN_DIR}"]\n}`);
+    const res = unregisterMimocodePlugin({ silent: true, configPath: jsoncPath, pluginDir: PLUGIN_DIR });
+    assert.strictEqual(res.removed, 2);
+    assert.deepStrictEqual(parseJsonc(fs.readFileSync(jsoncPath, "utf8")).plugin, ["@vendor/keep"]);
+  });
+
+  it("refuses to edit when ANY existing candidate is corrupt", () => {
+    const dir = tmpDir();
+    const jsoncPath = inDir(dir, "mimocode.jsonc", '{\n  "plugin": [],\n}');
+    const jsonText = "{ broken";
+    const jsonPath = inDir(dir, "mimocode.json", jsonText);
+    assert.throws(
+      () => registerMimocodePlugin({ silent: true, configPath: jsoncPath, pluginDir: PLUGIN_DIR }),
+      /Failed to read/
+    );
+    assert.strictEqual(fs.readFileSync(jsonPath, "utf8"), jsonText);
+  });
+
+  it("tolerates a UTF-8 BOM and CRLF line endings in the target file", () => {
+    const dir = tmpDir();
+    const bomCrlf = "﻿{\r\n  // windows-authored\r\n  \"plugin\": [\"@vendor/keep\"],\r\n}";
+    const jsoncPath = inDir(dir, "mimocode.jsonc", bomCrlf);
+    const res = registerMimocodePlugin({ silent: true, configPath: jsoncPath, pluginDir: PLUGIN_DIR });
+    assert.strictEqual(res.added, true);
+    const text = fs.readFileSync(jsoncPath, "utf8");
+    assert.ok(text.includes("// windows-authored"), "CRLF comments must survive");
+    assert.deepStrictEqual(parseJsonc(text).plugin, ["@vendor/keep", PLUGIN_DIR]);
   });
 });
 

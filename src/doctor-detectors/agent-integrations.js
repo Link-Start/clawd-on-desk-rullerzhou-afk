@@ -909,7 +909,55 @@ function applyAntigravitySupplementary(detail, descriptor, settings) {
   };
 }
 
+// MiMo-style merged config (descriptor.configCandidates, highest-priority
+// first): EVERY existing candidate loads, each parsed as JSONC exactly like
+// the host's own loader, and the "plugin" array is REPLACED by the
+// highest-priority file that declares it. The doctor must validate that
+// EFFECTIVE view — checking one fixed file would bless a masked entry or
+// miss the live one (#607 review). Only opencode-family JSONC members set
+// configCandidates, so this always funnels into checkOpencodeSettings.
+function checkMergedJsoncConfig(descriptor, options) {
+  const existing = [];
+  for (const candidate of descriptor.configCandidates) {
+    if (!fileExists(options.fs, candidate)) continue;
+    let tree;
+    try {
+      tree = readJsonc(options.fs, candidate);
+    } catch (err) {
+      return makeDetail(descriptor, "config-corrupt", {
+        level: "warning",
+        parentDirExists: true,
+        configFileExists: true,
+        configPath: candidate,
+        detail: `${candidate}: ${err && err.message ? err.message : "config parse failed"}`,
+      });
+    }
+    existing.push({ candidate, tree });
+  }
+
+  if (!existing.length) {
+    return makeDetail(descriptor, descriptor.autoInstall ? "not-connected" : "manual-only", {
+      level: descriptor.autoInstall ? "warning" : "info",
+      parentDirExists: true,
+      configFileExists: false,
+      configPath: descriptor.configPath,
+      detail: `${descriptor.configPath} missing`,
+    });
+  }
+
+  const owner = existing.find((entry) => (
+    entry.tree && typeof entry.tree === "object" && !Array.isArray(entry.tree)
+    && Object.prototype.hasOwnProperty.call(entry.tree, "plugin")
+  ));
+  const effective = owner || existing[0];
+  // Point every downstream message at the file whose plugin array is live.
+  return checkOpencodeSettings({ ...descriptor, configPath: effective.candidate }, effective.tree, options);
+}
+
 function checkFileMode(descriptor, options) {
+  if (Array.isArray(descriptor.configCandidates) && descriptor.configCandidates.length) {
+    return checkMergedJsoncConfig(descriptor, options);
+  }
   if (!fileExists(options.fs, descriptor.configPath)) {
     return makeDetail(descriptor, descriptor.autoInstall ? "not-connected" : "manual-only", {
       level: descriptor.autoInstall ? "warning" : "info",

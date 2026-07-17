@@ -1557,6 +1557,58 @@ describe("checkAgentIntegrations", () => {
     assert.strictEqual(detail.status, "config-corrupt");
   });
 
+  function mimocodeMergedDescriptor(root, overrides = {}) {
+    const parentDir = path.join(root, ".config", "mimocode");
+    return mimocodeDescriptor(root, {
+      configCandidates: ["mimocode.jsonc", "mimocode.json", "config.json"].map((name) => path.join(parentDir, name)),
+      ...overrides,
+    });
+  }
+
+  it("merged view: validates the live plugin owner (.json) when .jsonc exists without plugin", () => {
+    const root = makeTempDir();
+    const pluginPath = makeValidFamilyPlugin(root, "mimocode-plugin");
+    const descriptor = mimocodeMergedDescriptor(root);
+    fs.writeFileSync(path.join(path.dirname(descriptor.configPath), "mimocode.json"), JSON.stringify({ plugin: [pluginPath] }), "utf8");
+    fs.writeFileSync(descriptor.configPath, '{\n  // prefs only\n  "model": "mimo/base",\n}\n', "utf8");
+
+    const detail = runOne(descriptor);
+    assert.strictEqual(detail.status, "ok", `expected ok, got ${detail.status}: ${detail.detail}`);
+    assert.ok(detail.configPath.endsWith("mimocode.json"), "detail must point at the file whose plugin is live");
+  });
+
+  it("merged view: a managed entry MASKED by a higher-priority plugin array is not connected", () => {
+    const root = makeTempDir();
+    const pluginPath = makeValidFamilyPlugin(root, "mimocode-plugin");
+    const descriptor = mimocodeMergedDescriptor(root);
+    // .jsonc declares plugin (empty) → it REPLACES .json's array at runtime,
+    // so the valid entry in .json is dead. The doctor must see the merge.
+    fs.writeFileSync(descriptor.configPath, '{\n  "plugin": [],\n}\n', "utf8");
+    fs.writeFileSync(path.join(path.dirname(descriptor.configPath), "mimocode.json"), JSON.stringify({ plugin: [pluginPath] }), "utf8");
+
+    const detail = runOne(descriptor);
+    assert.strictEqual(detail.status, "not-connected", `masked entry must not count: ${detail.detail}`);
+  });
+
+  it("merged view: no candidate exists → not-connected missing", () => {
+    const root = makeTempDir();
+    const descriptor = mimocodeMergedDescriptor(root);
+    const detail = runOne(descriptor);
+    assert.strictEqual(detail.status, "not-connected");
+    assert.strictEqual(detail.configFileExists, false);
+  });
+
+  it("merged view: a corrupt candidate is config-corrupt and names the file", () => {
+    const root = makeTempDir();
+    const descriptor = mimocodeMergedDescriptor(root);
+    fs.writeFileSync(descriptor.configPath, '{\n  "plugin": [],\n}\n', "utf8");
+    fs.writeFileSync(path.join(path.dirname(descriptor.configPath), "mimocode.json"), "{ broken", "utf8");
+
+    const detail = runOne(descriptor);
+    assert.strictEqual(detail.status, "config-corrupt");
+    assert.ok(detail.detail.includes("mimocode.json"), `detail must name the corrupt file: ${detail.detail}`);
+  });
+
   it("descriptor configJsonc matches the family registry's jsonc flag (drift lock)", () => {
     // eslint-disable-next-line global-require
     const { AGENT_DESCRIPTORS } = require("../src/doctor-detectors/agent-descriptors");
@@ -1574,6 +1626,13 @@ describe("checkAgentIntegrations", () => {
         descriptor.configPath.endsWith(cfg.configFileName),
         `${agentId}: descriptor configPath must target ${cfg.configFileName}`
       );
+      if (cfg.configCandidates) {
+        assert.deepStrictEqual(
+          (descriptor.configCandidates || []).map((p) => path.basename(p)),
+          [...cfg.configCandidates],
+          `${agentId}: descriptor configCandidates must mirror the registry (order matters — highest priority first)`
+        );
+      }
     }
   });
 

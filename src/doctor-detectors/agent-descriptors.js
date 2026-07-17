@@ -2,6 +2,7 @@
 
 const path = require("path");
 const { getAgent } = require("../../agents/registry");
+const { getFamilyConfig } = require("../../agents/opencode-family");
 
 const claude = require("../../hooks/install");
 const codex = require("../../hooks/codex-install");
@@ -201,9 +202,14 @@ const AGENT_DESCRIPTORS = Object.freeze([
     autoInstall: true,
     // mimocode is an opencode-family member and shares the same plugin
     // loader contract. Detection reuses the opencode-plugin validator path;
-    // configJsonc routes the doctor's read through the JSONC parser so a
-    // commented config is not misreported as config-corrupt.
+    // configJsonc routes reads through the JSONC parser so a commented
+    // config is not misreported as config-corrupt, and configCandidates
+    // (highest-priority first, from the family registry) makes the doctor
+    // validate the MERGED effective plugin view rather than one fixed file.
     configJsonc: true,
+    configCandidates: Object.freeze(
+      getFamilyConfig("mimocode").configCandidates.map((name) => path.join(mimocode.DEFAULT_PARENT_DIR, name))
+    ),
     marker: "mimocode-plugin",
     detection: "opencode-plugin",
   }),
