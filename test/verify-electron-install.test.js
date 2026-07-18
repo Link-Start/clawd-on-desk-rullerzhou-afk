@@ -291,9 +291,12 @@ test("package lifecycle and launch wiring cover install and development entry po
   }
 
   const launchSource = fs.readFileSync(path.join(__dirname, "..", "launch.js"), "utf8");
+  const verifierIndex = launchSource.indexOf("verifyElectronInstall({ context: \"launch\" })");
+  const electronRequireIndex = launchSource.indexOf('const electron = require("electron")');
+  assert.notEqual(verifierIndex, -1, "launch verifier wiring must exist");
+  assert.notEqual(electronRequireIndex, -1, "Electron module resolution wiring must exist");
   assert.ok(
-    launchSource.indexOf("verifyElectronInstall({ context: \"launch\" })") <
-      launchSource.indexOf('const electron = require("electron")'),
+    verifierIndex < electronRequireIndex,
     "launch verifier must run before Electron module resolution"
   );
 });

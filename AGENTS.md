@@ -19,6 +19,7 @@ npm run build:linux
 npm run build:all
 npm install
 npm test
+npm run verify:electron
 npm run create-theme
 
 npm run install:claude-hooks
