@@ -143,6 +143,7 @@ FILES=(
   "$HOOKS_DIR/install.js"
   "$HOOKS_DIR/codex-hook.js"
   "$HOOKS_DIR/codex-assistant-output.js"
+  "$HOOKS_DIR/codex-user-input.js"
   "$HOOKS_DIR/codex-install.js"
   "$HOOKS_DIR/codex-install-utils.js"
   "$HOOKS_DIR/codex-remote-monitor.js"

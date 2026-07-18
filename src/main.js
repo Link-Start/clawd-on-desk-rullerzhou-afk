@@ -88,6 +88,7 @@ const { formatLocalTimestamp } = require("./log-timestamp");
 const { launchClaudeSession, openTerminalAt } = require("./launch-claude");
 const { dialog: electronDialog } = require("electron");
 const initPermission = require("./permission");
+const { isPassiveNotifyEntry } = require("./passive-notify-entry");
 const { registerPermissionIpc } = initPermission;
 const { createTelegramApprovalSidecar } = require("./telegram-approval-sidecar");
 const telegramApprovalSettings = require("./telegram-approval-settings");
@@ -1405,7 +1406,7 @@ const _permCtx = {
   },
 };
 const _perm = initPermission(_permCtx);
-const { showPermissionBubble, resolvePermissionEntry, sendPermissionResponse, repositionBubbles, permLog, PASSTHROUGH_TOOLS, addPendingPermission, removePendingPermission, maybeStartRemoteApproval, clearCodexNotifyBubbles, showKimiNotifyBubble, clearKimiNotifyBubbles, syncPermissionShortcuts, replyOpencodeFamilyPermission } = _perm;
+const { showPermissionBubble, resolvePermissionEntry, sendPermissionResponse, repositionBubbles, permLog, PASSTHROUGH_TOOLS, addPendingPermission, removePendingPermission, maybeStartRemoteApproval, clearCodexNotifyBubbles, showCodexUserInputBubble, clearCodexUserInputBubbles, showKimiNotifyBubble, clearKimiNotifyBubbles, syncPermissionShortcuts, replyOpencodeFamilyPermission } = _perm;
 const pendingPermissions = _perm.pendingPermissions;
 let permDebugLog = null; // set after app.whenReady()
 let updateDebugLog = null; // set after app.whenReady()
@@ -1922,6 +1923,8 @@ agentRuntime = createAgentRuntimeMain({
   updateSession: (sessionId, state, event, opts) => updateSession(sessionId, state, event, opts),
   captureGhosttyTerminalId,
   clearCodexNotifyBubbles: (...args) => clearCodexNotifyBubbles(...args),
+  showCodexUserInputBubble: (...args) => showCodexUserInputBubble(...args),
+  clearCodexUserInputBubbles: (...args) => clearCodexUserInputBubbles(...args),
 });
 
 // ── HTTP server — delegated to src/server.js ──
@@ -1957,6 +1960,8 @@ const _serverCtx = {
   addPendingPermission,
   removePendingPermission,
   showPermissionBubble,
+  showCodexUserInputBubble,
+  clearCodexUserInputBubbles,
   maybeStartRemoteApproval,
   replyOpencodeFamilyPermission,
   syncPermissionShortcuts,
@@ -2442,11 +2447,7 @@ function getTelegramApprovalStatus() {
 }
 
 function getPendingTelegramApprovalCount() {
-  return pendingPermissions.filter((entry) =>
-    entry
-    && !entry.isCodexNotify
-    && !entry.isKimiNotify
-  ).length;
+  return pendingPermissions.filter((entry) => entry && !isPassiveNotifyEntry(entry)).length;
 }
 
 function getTelegramNativeRunnerStatus() {
@@ -3200,6 +3201,7 @@ const settingsEffectRouter = createSettingsEffectRouter({
   syncPermissionShortcuts,
   dismissInteractivePermissionBubbles: () => callRuntimeMethod(_perm, "dismissInteractivePermissionBubbles"),
   clearCodexNotifyBubbles,
+  clearCodexUserInputBubbles,
   clearKimiNotifyBubbles,
   refreshPassiveNotifyAutoClose: () => callRuntimeMethod(_perm, "refreshPassiveNotifyAutoClose"),
   refreshPermissionAutoCloseForPolicy: () => callRuntimeMethod(_perm, "refreshPermissionAutoCloseForPolicy"),

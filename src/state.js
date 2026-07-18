@@ -100,7 +100,7 @@ const COMPLETION_HOUSEKEEPING_EVENTS = new Set([
 const COMPLETION_CANCEL_EVENTS = new Set([
   "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
   "SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
-  "PermissionRequest", "Elicitation", "StopFailure", "ApiError", "SessionEnd",
+  "PermissionRequest", "CodexUserInputRequest", "Elicitation", "StopFailure", "ApiError", "SessionEnd",
 ]);
 // #449: headless sessions (claude -p / Agent SDK hosts such as Obsidian-
 // Claudian) end every intermediate orchestrator step with a REAL Stop and
@@ -1402,8 +1402,9 @@ function updateSession(sessionId, state, event, opts = {}) {
   const sessionForPerm = sessions.get(sessionId);
   const permAgentId = resolveIncomingAgentId(sessionForPerm, agentId, agentIdDefaulted);
 
-  if (event === "PermissionRequest") {
-    if (permAgentId === "codex") cancelCodexExitProbe(sessionId, "PermissionRequest");
+  const isTransientAttentionRequest = event === "PermissionRequest" || event === "CodexUserInputRequest";
+  if (isTransientAttentionRequest) {
+    if (permAgentId === "codex") cancelCodexExitProbe(sessionId, event);
     // Kimi-only gate: startKimiPermissionPoll suppresses the passive bubble
     // when the user disabled Kimi permissions in Settings, but the setState
     // ran first and flashed notification anyway — leaving a silent animation
@@ -1411,7 +1412,8 @@ function updateSession(sessionId, state, event, opts = {}) {
     // don't need a second DND check here. CC / opencode keep the
     // unconditional setState — their bubble flow gates DND upstream.
     if (
-      permAgentId === "kimi-cli"
+      event === "PermissionRequest"
+      && permAgentId === "kimi-cli"
       && typeof ctx.isAgentPermissionsEnabled === "function"
       && !ctx.isAgentPermissionsEnabled("kimi-cli")
     ) return;
@@ -1483,7 +1485,7 @@ function updateSession(sessionId, state, event, opts = {}) {
       });
     }
     setState("notification", undefined, { muteNotificationSound: muteNotificationSound === true });
-    if (permAgentId === "kimi-cli") {
+    if (event === "PermissionRequest" && permAgentId === "kimi-cli") {
       // Synthesized PermissionRequest (rewritten gated PreToolUse) carries a
       // gate marker — record it so the Post that settles it can re-arm the
       // cue for the next queued approval. Native Kimi Code PermissionRequests
