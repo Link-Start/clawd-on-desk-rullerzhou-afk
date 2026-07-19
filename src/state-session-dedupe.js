@@ -14,6 +14,10 @@ function normalizePositiveInteger(value) {
 
 function getLocalCodexProcessKey(session) {
   if (!session || session.agentId !== "codex" || session.host || session.headless) return null;
+  // Codex Desktop multiplexes independent threads through one process, so its
+  // stable session IDs must remain distinct in the HUD (#581).
+  if (typeof session.codexOriginator === "string"
+    && session.codexOriginator.trim().toLowerCase() === "codex desktop") return null;
   const agentPid = normalizePositiveInteger(session.agentPid);
   return agentPid ? `codex-agent:${agentPid}` : null;
 }
