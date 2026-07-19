@@ -82,6 +82,7 @@ const {
 const { registerSettingsIpc } = require("./settings-ipc");
 const createSettingsEffectRouter = require("./settings-effect-router");
 const { registerSessionIpc } = require("./session-ipc");
+const { createSessionFolderOpener } = require("./session-open-folder");
 const { registerPetInteractionIpc } = require("./pet-interaction-ipc");
 const { createSystemWakeRecovery } = require("./system-wake-recovery");
 const { formatLocalTimestamp } = require("./log-timestamp");
@@ -1759,6 +1760,11 @@ function hideDashboardSession(sessionId) {
     ? { status: "ok" }
     : { status: "not-found" };
 }
+
+const openDashboardSessionFolder = createSessionFolderOpener({
+  getSession: (sessionId) => sessions.get(sessionId),
+  openPath: (cwd) => shell.openPath(cwd),
+});
 
 const _dashboard = require("./dashboard")({
   get lang() { return lang; },
@@ -3440,6 +3446,7 @@ registerSessionIpc({
   getI18n: () => getDashboardI18nPayload(),
   focusSession: (sessionId, options) => focusDashboardSession(sessionId, options),
   hideSession: (sessionId) => hideDashboardSession(sessionId),
+  openSessionFolder: (sessionId) => openDashboardSessionFolder(sessionId),
   ackSessionCompletion: (sessionId) => _state.ackSessionCompletion(sessionId),
   setSessionAlias: (payload) => _settingsController.applyCommand("setSessionAlias", payload),
   showDashboard: (options) => showDashboard(options),
