@@ -12,7 +12,6 @@ const { getAgent } = require("../../agents/registry");
 const { commandMatchesMarker, findHookCommands } = require("../../hooks/json-utils");
 const { GEMINI_HOOK_EVENTS } = require("../../hooks/gemini-install");
 const { ANTIGRAVITY_HOOK_EVENTS, HOOK_GROUP_ID: ANTIGRAVITY_HOOK_GROUP_ID } = require("../../hooks/antigravity-install");
-const { QWEN_CODE_HOOK_EVENTS } = require("../../hooks/qwen-code-install");
 const {
   hasUserPermissionHookInOtherFiles,
   hasUserPermissionHookInSettingsJson,
@@ -208,6 +207,7 @@ function withAgentFixAction(detail, descriptor) {
     return { ...detail, fixAction: { type: "agent-integration", agentId: descriptor.agentId } };
   }
   if (!descriptor.autoInstall || !REPAIRABLE_AGENT_STATUSES.has(detail.status)) return detail;
+  if (detail.supplementary && detail.supplementary.key === "hook_group") return detail;
   if (
     descriptor.agentId === "gemini-cli"
     && detail.supplementary
@@ -436,8 +436,11 @@ function validateGeminiHookEvents(descriptor, settings, options) {
   });
 }
 
-function validateQwenHookEvents(descriptor, settings, options) {
-  const events = Array.isArray(descriptor.hookEvents) ? descriptor.hookEvents : QWEN_CODE_HOOK_EVENTS;
+function validateFileHookEvents(descriptor, settings, options) {
+  const events = descriptor.hookEvents;
+  const agentName = descriptor.agentName || descriptor.agentId;
+  const missingKey = descriptor.agentId === "qwen-code" ? "missingQwenHookEvents" : "missingHookEvents";
+  const brokenKey = descriptor.agentId === "qwen-code" ? "brokenQwenHookEvent" : "brokenHookEvent";
   const missingEvents = [];
   let commandCount = 0;
   let firstOk = null;
@@ -472,9 +475,9 @@ function validateQwenHookEvents(descriptor, settings, options) {
   if (missingEvents.length) {
     return makeDetail(descriptor, "not-connected", {
       level: "warning",
-      detail: `${descriptor.configPath} missing Qwen Code hook event(s): ${missingEvents.join(", ")}`,
+      detail: `${descriptor.configPath} missing ${agentName} hook event(s): ${missingEvents.join(", ")}`,
       commandCount,
-      missingQwenHookEvents: missingEvents,
+      [missingKey]: missingEvents,
     });
   }
 
@@ -482,19 +485,19 @@ function validateQwenHookEvents(descriptor, settings, options) {
     const first = firstFailure.result;
     return makeDetail(descriptor, "broken-path", {
       level: "warning",
-      detail: `Qwen Code hook command failed validation for ${firstFailure.eventName}: ${first.issue || "parse-failed"}`,
+      detail: `${agentName} hook command failed validation for ${firstFailure.eventName}: ${first.issue || "parse-failed"}`,
       commandCount,
       hookCommandIssue: first.issue || "parse-failed",
       nodeBin: first.nodeBin || null,
       scriptPath: first.scriptPath || null,
       commandFragment: first.fragment || String(firstFailure.command || "").slice(0, 128),
-      brokenQwenHookEvent: firstFailure.eventName,
+      [brokenKey]: firstFailure.eventName,
     });
   }
 
   return makeDetail(descriptor, "ok", {
     level: null,
-    detail: `${descriptor.configPath} Qwen Code hooks registered for ${events.length} events, scriptPath verified`,
+    detail: `${descriptor.configPath} ${agentName} hooks registered for ${events.length} events, scriptPath verified`,
     commandCount,
     scriptPath: firstOk && firstOk.scriptPath ? firstOk.scriptPath : null,
   });
@@ -840,6 +843,35 @@ function applyGeminiSupplementary(detail, descriptor, settings) {
   };
 }
 
+function applyDisabledHookGroup(detail, descriptor, settings) {
+  if (!descriptor.hookGroupId) return detail;
+  const hooksConfig = settings && typeof settings === "object" ? settings.hooksConfig : null;
+  if (!hooksConfig || typeof hooksConfig !== "object") return detail;
+
+  let supplementary = null;
+  if (hooksConfig.enabled === false) {
+    supplementary = {
+      key: "hook_group",
+      value: "disabled-global",
+      detail: "hooksConfig.enabled is false",
+    };
+  } else if (Array.isArray(hooksConfig.disabled) && hooksConfig.disabled.includes(descriptor.hookGroupId)) {
+    supplementary = {
+      key: "hook_group",
+      value: `disabled-${descriptor.hookGroupId}`,
+      detail: `hooksConfig.disabled includes "${descriptor.hookGroupId}"`,
+    };
+  }
+  if (!supplementary) return detail;
+  return {
+    ...detail,
+    status: "not-connected",
+    level: "warning",
+    detail: `${descriptor.agentName} hooks are disabled in settings.json; Clawd preserves this user setting and will not receive hook events`,
+    supplementary,
+  };
+}
+
 function getQwenHooksSupplementary(settings) {
   if (settings && typeof settings === "object" && settings.disableAllHooks === true) {
     return {
@@ -990,8 +1022,8 @@ function checkFileMode(descriptor, options) {
   let detail;
   if (descriptor.agentId === "gemini-cli") {
     detail = validateGeminiHookEvents(descriptor, settings, options);
-  } else if (descriptor.agentId === "qwen-code") {
-    detail = validateQwenHookEvents(descriptor, settings, options);
+  } else if (Array.isArray(descriptor.hookEvents) && descriptor.hookEvents.length) {
+    detail = validateFileHookEvents(descriptor, settings, options);
   } else if (descriptor.agentId === "codex") {
     detail = validateCommandList(
       descriptor,
@@ -1012,6 +1044,7 @@ function checkFileMode(descriptor, options) {
     configPath: descriptor.configPath,
   };
   detail = applyCodexSupplementary(detail, descriptor, options, settings);
+  detail = applyDisabledHookGroup(detail, descriptor, settings);
   detail = applyGeminiSupplementary(detail, descriptor, settings);
   return applyQwenSupplementary(detail, descriptor, settings);
 }

@@ -9,6 +9,7 @@ const {
   findOpenClawPluginEntry,
   findOpencodePluginEntry,
 } = require("../src/doctor-detectors/agent-integrations");
+const { getAgentDescriptor } = require("../src/doctor-detectors/agent-descriptors");
 const { GEMINI_HOOK_EVENTS } = require("../hooks/gemini-install");
 const { ANTIGRAVITY_HOOK_EVENTS, __test: antigravityInstallTest } = require("../hooks/antigravity-install");
 const { QWEN_CODE_HOOK_EVENTS, buildQwenCodeHookCommand } = require("../hooks/qwen-code-install");
@@ -148,30 +149,48 @@ function qwenDescriptor() {
   });
 }
 
-function qoderDescriptor() {
+function managedFileDescriptor(agentId, dirName) {
   const root = makeTempDir();
-  const parentDir = path.join(root, ".qoder");
-  return baseDescriptor({
-    agentId: "qoder",
-    agentName: "Qoder",
-    marker: "qoder-hook.js",
+  const parentDir = path.join(root, dirName);
+  return {
+    ...getAgentDescriptor(agentId),
     parentDir,
     configPath: path.join(parentDir, "settings.json"),
-    configMode: "file",
-    nested: true,
-    hookEvents: QODER_HOOK_EVENTS,
-  });
+  };
 }
 
-function qoderHooksConfig(commandForEvent = (event) => `"/node" "/app/hooks/qoder-hook.js" ${event}`) {
+function qoderDescriptor() {
+  return managedFileDescriptor("qoder", ".qoder");
+}
+
+function nestedHooksConfig(events, marker, commandForEvent = (event) => `"/node" "/app/hooks/${marker}" ${event}`) {
   const hooks = {};
-  for (const event of QODER_HOOK_EVENTS) {
+  for (const event of events) {
     hooks[event] = [{
       matcher: "*",
       hooks: [{ name: "clawd", type: "command", command: commandForEvent(event) }],
     }];
   }
   return hooks;
+}
+
+function qoderHooksConfig(commandForEvent) {
+  return nestedHooksConfig(QODER_HOOK_EVENTS, "qoder-hook.js", commandForEvent);
+}
+
+function reasonixDescriptor() {
+  return managedFileDescriptor("reasonix", ".reasonix");
+}
+
+function qoderWorkDescriptor() {
+  return managedFileDescriptor("qoderwork", ".qoderwork");
+}
+
+function flatHooksConfig(events, marker) {
+  return Object.fromEntries(events.map((event) => [
+    event,
+    [{ match: "*", command: `"/node" "/app/hooks/${marker}" ${event}` }],
+  ]));
 }
 
 function codewhaleDescriptor() {
@@ -977,8 +996,75 @@ describe("checkAgentIntegrations", () => {
 
     const detail = runOne(descriptor);
     assert.strictEqual(detail.status, "not-connected");
-    assert.match(detail.detail, /has no qoder-hook\.js command/);
+    assert.deepStrictEqual(detail.missingHookEvents, QODER_HOOK_EVENTS);
     assert.deepStrictEqual(detail.fixAction, { type: "agent-integration", agentId: "qoder" });
+  });
+
+  it("warns and offers repair when required file-mode hook events are missing", () => {
+    for (const descriptor of [qoderDescriptor(), reasonixDescriptor(), qoderWorkDescriptor()]) {
+      const hooks = descriptor.agentId === "reasonix"
+        ? flatHooksConfig(descriptor.hookEvents, descriptor.marker)
+        : nestedHooksConfig(descriptor.hookEvents, descriptor.marker);
+      const firstEvent = descriptor.hookEvents[0];
+      writeJson(descriptor.configPath, { hooks: { [firstEvent]: hooks[firstEvent] } });
+
+      const detail = runOne(descriptor);
+      assert.strictEqual(detail.status, "not-connected", descriptor.agentId);
+      assert.strictEqual(detail.commandCount, 1, descriptor.agentId);
+      assert.deepStrictEqual(detail.missingHookEvents, descriptor.hookEvents.slice(1), descriptor.agentId);
+      assert.deepStrictEqual(detail.fixAction, {
+        type: "agent-integration",
+        agentId: descriptor.agentId,
+      });
+    }
+  });
+
+  it("does not offer repair when a managed hook group is disabled", () => {
+    for (const descriptor of [qoderDescriptor(), qoderWorkDescriptor()]) {
+      writeJson(descriptor.configPath, {
+        hooks: nestedHooksConfig(descriptor.hookEvents, descriptor.marker),
+        hooksConfig: { disabled: ["clawd"] },
+      });
+
+      const detail = runOne(descriptor);
+      assert.strictEqual(detail.status, "not-connected", descriptor.agentId);
+      assert.strictEqual(detail.level, "warning", descriptor.agentId);
+      assert.deepStrictEqual(detail.supplementary, {
+        key: "hook_group",
+        value: "disabled-clawd",
+        detail: 'hooksConfig.disabled includes "clawd"',
+      });
+      assert.strictEqual(detail.fixAction, undefined, descriptor.agentId);
+    }
+  });
+
+  it("does not offer repair when hooksConfig is globally disabled", () => {
+    const descriptor = qoderDescriptor();
+    writeJson(descriptor.configPath, {
+      hooks: qoderHooksConfig(),
+      hooksConfig: { enabled: false },
+    });
+
+    const detail = runOne(descriptor);
+    assert.strictEqual(detail.status, "not-connected");
+    assert.deepStrictEqual(detail.supplementary, {
+      key: "hook_group",
+      value: "disabled-global",
+      detail: "hooksConfig.enabled is false",
+    });
+    assert.strictEqual(detail.fixAction, undefined);
+  });
+
+  it("ignores unrelated disabled hook groups", () => {
+    const descriptor = qoderDescriptor();
+    writeJson(descriptor.configPath, {
+      hooks: qoderHooksConfig(),
+      hooksConfig: { disabled: ["other"] },
+    });
+
+    const detail = runOne(descriptor);
+    assert.strictEqual(detail.status, "ok");
+    assert.strictEqual(detail.supplementary, undefined);
   });
 
   it("validates CodeWhale TOML hooks", () => {
