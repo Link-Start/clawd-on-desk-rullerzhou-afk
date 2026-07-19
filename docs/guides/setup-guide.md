@@ -81,6 +81,16 @@ bot, so you can Allow or Deny from Telegram while the local desktop bubble
 remains available. See [telegram-approval.md](telegram-approval.md) for setup,
 token ownership, supported agents, and fallback behavior.
 
+## Feishu / Lark Approval
+
+Clawd can also mirror permission bubbles to a Feishu (China) or Lark
+(International) self-built app as an interactive card. Pick the platform in
+**Settings → Remote Approval → Feishu / Lark**; both are the same channel, so
+existing Feishu users keep their credentials and stay on Feishu by default. See
+[feishu-lark-remote-approval.md](feishu-lark-remote-approval.md) for the
+platform choice, permission scope, `open_id` / `union_id` / `user_id`
+differences, and card language.
+
 ## Remote SSH (Claude Code, Codex CLI & Copilot CLI)
 
 <img src="../../assets/screenshot-remote-ssh.png" width="560" alt="Remote SSH — permission bubble from Raspberry Pi">
