@@ -495,11 +495,14 @@ describe("CodexLogMonitor", () => {
   });
 
   it("does not lose a trailing partial line split by the recovery scan's read window", () => {
-    // #707 follow-up review, finding 5: recovery must not silently swallow
-    // a line that's genuinely still being appended — the caller resumes
-    // exactly where the scan stopped, so the partial has to survive intact
-    // for the next normal poll to complete it.
+    // #700 follow-up: recovery must not silently swallow a line that's
+    // genuinely still being appended. #700 removed the tracker's `partial`
+    // buffer entirely (offset now stops at the last complete newline; an
+    // incomplete tail is simply left on disk for the next poll to reread
+    // whole), so recovery must follow the same convention instead of
+    // consuming through true EOF and stashing the fragment separately.
     const testFile = path.join(dateDir, TEST_FILENAME);
+    const sessionMetaLine = JSON.stringify({ type: "session_meta", payload: { cwd: "/projects/foo" } });
     const requestLine = JSON.stringify({
       type: "response_item",
       payload: {
@@ -511,7 +514,7 @@ describe("CodexLogMonitor", () => {
     });
     fs.writeFileSync(
       testFile,
-      JSON.stringify({ type: "session_meta", payload: { cwd: "/projects/foo" } }) + "\n"
+      sessionMetaLine + "\n"
       + requestLine + "\n"
       + '{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_partial_ta' // deliberately unterminated
     );
@@ -521,21 +524,82 @@ describe("CodexLogMonitor", () => {
     monitor = new CodexLogMonitor(makeConfig(tmpDir), () => {}, {});
     const recovered = monitor._recoverStalePendingUserInput(testFile, path.basename(testFile));
     assert.ok(recovered, "the request itself is still genuinely pending");
-    assert.strictEqual(recovered.partial, '{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_partial_ta');
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(recovered, "partial"), false,
+      "#700's tracker shape has no `partial` field — the incomplete tail stays on disk instead"
+    );
     assert.strictEqual(
       recovered.offset,
-      Buffer.byteLength(fs.readFileSync(testFile, "utf8"), "utf8"),
-      "offset must land at true EOF (matching _pollFile's own convention) with the partial preserved separately, not stop short of it"
+      Buffer.byteLength(sessionMetaLine + "\n" + requestLine + "\n", "utf8"),
+      "offset must stop at the last complete newline (matching _pollFile's own commit convention), not run through the unterminated tail"
     );
+    assert.notStrictEqual(recovered.fileIdentity, null);
 
     // Completing the line on a normal poll must resolve the question — this
-    // is what an unconditional offset-to-EOF would have permanently broken.
+    // is what an unconditional offset-to-EOF would have permanently broken
+    // once _pollFile stopped reading a `partial` prefix.
     monitor._tracked.set(testFile, recovered);
     fs.appendFileSync(testFile, 'il","output":"{}"}}\n');
     const resolved = [];
     monitor._onUserInputResolved = (...args) => resolved.push(args);
     monitor._pollFile(testFile, path.basename(testFile));
     assert.deepStrictEqual(resolved, [[recovered.sessionId, "call_partial_tail"]]);
+  });
+
+  it("seeds fileIdentity on the recovered tracker and mirrors it into the read-position ledger", () => {
+    // _runRecoverySweep bypasses _pollFile's normal new-tracker construction,
+    // which is where fileIdentity and _readPositions are otherwise populated
+    // together. Leaving fileIdentity unset reads as "identity changed" on
+    // the very next regular poll (undefined !== null, same as a real
+    // identity string would), silently resetting the offset to EOF and
+    // dropping whatever landed between the sweep and that poll. Leaving the
+    // ledger unseeded defeats #700's own fix the next time this tracker is
+    // evicted from both LRUs.
+    const testFile = path.join(dateDir, TEST_FILENAME);
+    fs.writeFileSync(testFile, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/projects/foo" } }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "request_user_input",
+          call_id: "call_identity_check",
+          arguments: JSON.stringify({ questions: [{ id: "q", header: "Choice", question: "Pick one", options: [] }] }),
+        },
+      }),
+    ].join("\n") + "\n");
+    const oldTime = new Date(Date.now() - 600000);
+    fs.utimesSync(testFile, oldTime, oldTime);
+
+    monitor = new CodexLogMonitor(makeConfig(tmpDir), () => {}, {});
+    const expectedIdentity = monitor._getFileIdentity(fs.statSync(testFile));
+    assert.notStrictEqual(expectedIdentity, null, "sanity: this file must have a real dev/ino identity");
+
+    monitor._runRecoverySweep([{
+      filePath: testFile,
+      file: path.basename(testFile),
+      mtimeMs: oldTime.getTime(),
+      size: fs.statSync(testFile).size,
+    }]);
+    const tracked = monitor._tracked.get(testFile);
+    assert.ok(tracked);
+    assert.strictEqual(tracked.fileIdentity, expectedIdentity);
+    assert.deepStrictEqual(monitor._readPositions.get(testFile), {
+      offset: tracked.offset,
+      identity: expectedIdentity,
+    });
+
+    // Prove the fix actually matters: a normal poll right after recovery
+    // must not misfire the identityChanged guard and skip freshly appended
+    // bytes.
+    fs.appendFileSync(testFile, JSON.stringify({
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: "call_identity_check", output: "{}" },
+    }) + "\n");
+    const resolved = [];
+    monitor._onUserInputResolved = (...args) => resolved.push(args);
+    monitor._pollFile(testFile, path.basename(testFile));
+    assert.deepStrictEqual(resolved, [[tracked.sessionId, "call_identity_check"]]);
   });
 
   it("resets the recovery sweep on every real start(), not just the first one this instance ever saw", (_, done) => {
@@ -2085,6 +2149,69 @@ describe("CodexLogMonitor", () => {
       state: "thinking",
       event: "event_msg:task_started",
     }]);
+  });
+
+  it("emits exactly one request when a pending question arrives after both trackers are evicted", () => {
+    // #700/#707 integration: the read-position ledger must let a rollout
+    // resume from its saved offset after eviction from both the 50-active
+    // and 100-retired LRUs — this exercises that same real _poll() reattach
+    // path for a request_user_input line rather than a plain state event.
+    // The request must fire exactly once: not zero (silently absorbed by a
+    // stale-identity reattach or a ledger that failed to survive eviction),
+    // and not duplicated by initializingUserInputs' deferred-emit firing on
+    // top of an inline one.
+    const testFile = path.join(dateDir, TEST_FILENAME);
+    fs.writeFileSync(testFile, [
+      '{"type":"session_meta","payload":{"cwd":"/target"}}',
+      '{"type":"event_msg","payload":{"type":"task_started"}}',
+      '{"type":"response_item","payload":{"type":"function_call","name":"shell_command"}}',
+      '{"type":"event_msg","payload":{"type":"task_complete"}}',
+    ].join("\n") + "\n");
+
+    const states = [];
+    const requests = [];
+    monitor = new CodexLogMonitor(makeConfig(tmpDir), (sid, state, event) => {
+      states.push({ sid, state, event });
+    }, {
+      onUserInputRequest: (...args) => requests.push(args),
+    });
+    monitor._findCodexWriterPid = () => null;
+
+    monitor._poll();
+    for (let i = 0; i < 150; i++) {
+      const suffix = String(i + 1).padStart(12, "0");
+      const fileName = `rollout-2026-03-25T15-16-51-019d23d4-f1a9-7633-b9c7-${suffix}.jsonl`;
+      fs.writeFileSync(
+        path.join(dateDir, fileName),
+        `{"type":"session_meta","payload":{"cwd":"/filler-${i}"}}\n`
+      );
+    }
+    monitor._poll();
+
+    assert.strictEqual(monitor._tracked.has(testFile), false);
+    assert.strictEqual(monitor._retiredTracked.has(testFile), false);
+    assert.strictEqual(monitor._readPositions.has(testFile), true, "the ledger must survive double eviction");
+    states.length = 0;
+    requests.length = 0;
+
+    fs.appendFileSync(testFile, JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "request_user_input",
+        call_id: "call_after_double_eviction",
+        arguments: JSON.stringify({ questions: [{ id: "q", header: "Choice", question: "Pick one", options: [] }] }),
+      },
+    }) + "\n");
+    monitor._poll();
+
+    assert.deepStrictEqual(
+      states.filter((entry) => entry.sid === EXPECTED_SID), [],
+      "the historical turn must not replay"
+    );
+    assert.strictEqual(requests.length, 1, "the fresh request must fire exactly once");
+    assert.strictEqual(requests[0][0], EXPECTED_SID);
+    assert.strictEqual(requests[0][1].callId, "call_after_double_eviction");
   });
 
   it("preserves an incomplete JSONL record across 150-file tracker churn", () => {

@@ -252,32 +252,43 @@ class CodexLogMonitor {
       const recovered = this._recoverStalePendingUserInput(candidate.filePath, candidate.file);
       if (recovered) {
         this._tracked.set(candidate.filePath, recovered);
+        // Bypasses _pollFile's normal new-tracker construction, which is
+        // where the ledger is otherwise seeded — without this, evicting this
+        // tracker later has no read position to resume from and a reattach
+        // falls back to a full replay (defeats #700's own fix).
+        this._readPositions.set(candidate.filePath, {
+          offset: recovered.offset,
+          identity: recovered.fileIdentity,
+        });
         this._emitPendingUserInputRequests(recovered);
       }
     }
   }
 
-  // Returns { text, bytesRead }. bytesRead is the TRUE byte count read from
-  // disk — callers doing offset math must use it, not
-  // Buffer.byteLength(text): if `start` lands mid-character in a multi-byte
-  // UTF-8 sequence (any non-ASCII content — CJK cwd/output is common),
-  // decoding replaces the truncated leading bytes with U+FFFD, whose own
-  // UTF-8 length does not equal the raw bytes it replaced. Re-deriving the
-  // byte count from the decoded string can overshoot the file's true size,
-  // and an offset past real EOF either silently skips the next genuine
-  // write forever or gets misread elsewhere as a truncated/rotated file and
-  // triggers a full replay from 0 — the exact unbounded read this sweep
-  // exists to avoid.
+  // Returns { text, bytesRead, buf }. bytesRead is the TRUE byte count read
+  // from disk — callers doing offset math must use it (or `buf`, already
+  // sliced to that length), not Buffer.byteLength(text): if `start` lands
+  // mid-character in a multi-byte UTF-8 sequence (any non-ASCII content —
+  // CJK cwd/output is common), decoding replaces the truncated leading bytes
+  // with U+FFFD, whose own UTF-8 length does not equal the raw bytes it
+  // replaced. Re-deriving the byte count from the decoded string can
+  // overshoot the file's true size, and an offset past real EOF either
+  // silently skips the next genuine write forever or gets misread elsewhere
+  // as a truncated/rotated file and triggers a full replay from 0 — the
+  // exact unbounded read this sweep exists to avoid. `buf` exists for the
+  // same reason: a byte-precise search (e.g. the last newline) must run
+  // against raw bytes, never against a string that may contain replacement
+  // characters.
   _readByteRange(filePath, start, length) {
-    if (length <= 0) return { text: "", bytesRead: 0 };
+    if (length <= 0) return { text: "", bytesRead: 0, buf: Buffer.alloc(0) };
     let fd;
     try {
       fd = fs.openSync(filePath, "r");
       const buf = Buffer.alloc(length);
       const bytesRead = fs.readSync(fd, buf, 0, length, start);
-      return { text: buf.toString("utf8", 0, bytesRead), bytesRead };
+      return { text: buf.toString("utf8", 0, bytesRead), bytesRead, buf: buf.subarray(0, bytesRead) };
     } catch {
-      return { text: "", bytesRead: 0 };
+      return { text: "", bytesRead: 0, buf: Buffer.alloc(0) };
     } finally {
       if (fd !== undefined) {
         try { fs.closeSync(fd); } catch {}
@@ -371,16 +382,25 @@ class CodexLogMonitor {
     // Codex stops writing once it's blocked waiting for an answer.
     const tailLen = Math.min(stat.size, RECOVERY_TAIL_SCAN_BYTES);
     const tailStart = stat.size - tailLen;
-    const { text: tailText, bytesRead: tailBytesRead } = this._readByteRange(filePath, tailStart, tailLen);
+    const { buf: tailBuf } = this._readByteRange(filePath, tailStart, tailLen);
+    // Find the last complete (newline-terminated) record in RAW BYTE space —
+    // 0x0A can never appear inside a multi-byte UTF-8 sequence, so this index
+    // is exact even when the window start cuts a leading character in half
+    // and decoding replaces it with U+FFFD (see _readByteRange). Everything
+    // after this index is a genuinely incomplete final line; it is left on
+    // disk rather than buffered as `partial`, mirroring _pollFile's own
+    // newline-commit convention so a normal poll rereads it whole once it
+    // completes.
+    const lastNewlineInTail = tailBuf.lastIndexOf(0x0a);
+    if (lastNewlineInTail < 0) return null; // no complete record anywhere in the scan window
+    const committedTailBytes = lastNewlineInTail + 1;
+    const tailText = tailBuf.toString("utf8", 0, committedTailBytes);
     const rawLines = tailText.split("\n");
+    rawLines.pop(); // trailing "" — tailText always ends in the newline we just found
     // The window can start mid-line when tailStart > 0 — that first fragment
     // is unparseable garbage, not a real record; drop it rather than risk a
     // false JSON.parse failure silently masking a genuine question.
     if (tailStart > 0) rawLines.shift();
-    // The window always ends at true EOF, so a non-empty last element is a
-    // genuinely incomplete final line — mirror _pollFile's own `partial`
-    // handling instead of consuming those bytes without ever parsing them.
-    const trailingPartial = rawLines.pop() || "";
 
     const pending = new Map();
     const pendingTimestampMs = new Map();
@@ -423,19 +443,20 @@ class CodexLogMonitor {
       return null;
     }
 
-    const cappedPartial = trailingPartial.length > MAX_PARTIAL_BYTES ? "" : trailingPartial;
-    // Advance PAST the partial's bytes using the TRUE bytes read (see
-    // _readByteRange) — `partial` is what reconstructs the line once the
-    // rest of it lands on a normal poll. Getting this pair wrong either
-    // double-reads the partial's bytes (offset not advanced + partial kept)
-    // or silently drops them (offset advanced + partial discarded); this is
-    // the offset half.
-    const consumedThroughScanWindow = tailStart + tailBytesRead;
-
     return {
-      offset: consumedThroughScanWindow,
+      // Stops at the last complete newline, not true EOF — matches
+      // _pollFile's own offset convention. A still-growing final line is
+      // simply left on disk and reread whole by the next normal poll,
+      // instead of needing a separately tracked `partial` fragment here.
+      offset: tailStart + committedTailBytes,
       sessionId: "codex:" + sessionId,
       filePath,
+      // _pollFile's reattach path compares tracked.fileIdentity against a
+      // freshly computed value on every poll; leaving this unset here would
+      // read as "identity changed" (undefined !== null) on the very next
+      // poll and silently reset the offset to EOF, dropping whatever landed
+      // between recovery and that poll.
+      fileIdentity: this._getFileIdentity(stat),
       cwd,
       sessionTitle: null,
       codexOriginator: null,
@@ -448,7 +469,6 @@ class CodexLogMonitor {
       // entry becomes a first-priority eviction candidate under
       // MAX_TRACKED_FILES pressure despite genuinely being live.
       hasEmittedState: true,
-      partial: cappedPartial,
       hadToolUse: false,
       isSubagent,
       agentPid: null,
