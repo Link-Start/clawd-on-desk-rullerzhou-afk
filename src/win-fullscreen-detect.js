@@ -24,6 +24,25 @@ const FULLSCREEN_TOLERANCE_PX = 2;
 
 const MONITOR_DEFAULTTONEAREST = 2;
 
+// #719: the desktop itself passes the geometry test. Clicking the desktop
+// makes the shell window the foreground window — Progman, or one of
+// explorer's WorkerW siblings when a wallpaper host re-parents the icon view —
+// and its rect covers the whole monitor, so geometry alone classifies the
+// bare desktop as a fullscreen app. That made the hit window go non-activating
+// ~1s after any desktop click (startFocusablePoll), and Electron's
+// setFocusable(false) on Windows ends in Focus(false), which deactivates —
+// cancelling e.g. an in-place file rename on the desktop. Excluding the shell
+// window classes keeps "fullscreen" meaning an actual app.
+const DESKTOP_SHELL_WINDOW_CLASSES = new Set(["progman", "workerw"]);
+// Ample for real class names; matches win-foreground-terminal.js.
+const CLASS_NAME_BUF_LEN = 256;
+
+// Win32 class-name comparison is case-insensitive.
+function isDesktopShellWindowClass(className) {
+  return typeof className === "string"
+    && DESKTOP_SHELL_WINDOW_CLASSES.has(className.toLowerCase());
+}
+
 // Pure geometry: does the window rect cover the entire monitor rect (not just
 // the work area)? Exported so the decision logic is unit-testable without FFI.
 function rectCoversMonitor(winRect, monitorRect, tolerance = FULLSCREEN_TOLERANCE_PX) {
@@ -48,6 +67,7 @@ function createForegroundFullscreenProbe(options = {}) {
   let GetWindowRect;
   let MonitorFromWindow;
   let GetMonitorInfoW;
+  let GetClassNameW;
   let monitorInfoSize;
   try {
     const koffi = options.koffi || require("koffi");
@@ -65,6 +85,7 @@ function createForegroundFullscreenProbe(options = {}) {
     GetWindowRect = user32.func("bool __stdcall GetWindowRect(void* hWnd, _Out_ ClawdRECT* lpRect)");
     MonitorFromWindow = user32.func("void* __stdcall MonitorFromWindow(void* hWnd, uint32 dwFlags)");
     GetMonitorInfoW = user32.func("bool __stdcall GetMonitorInfoW(void* hMonitor, _Inout_ ClawdMONITORINFO* lpmi)");
+    GetClassNameW = user32.func("int __stdcall GetClassNameW(void* hWnd, _Out_ uint16_t* lpClassName, int nMaxCount)");
   } catch (err) {
     if (typeof options.onError === "function") options.onError(err);
     return noop;
@@ -84,7 +105,20 @@ function createForegroundFullscreenProbe(options = {}) {
       const info = { cbSize: monitorInfoSize, rcMonitor: {}, rcWork: {}, dwFlags: 0 };
       if (!GetMonitorInfoW(hMonitor, info)) return false;
 
-      return rectCoversMonitor(winRect, info.rcMonitor);
+      if (!rectCoversMonitor(winRect, info.rcMonitor)) return false;
+
+      // Geometry matched — rule out the desktop shell (#719). Only reached in
+      // the rare covers-monitor case, so the extra FFI call is off the common
+      // path. A failed class read (0 length) keeps the geometric answer: the
+      // pre-#719 behavior, erring toward "fullscreen" for a covering window.
+      const classBuf = new Uint16Array(CLASS_NAME_BUF_LEN);
+      const classLen = GetClassNameW(hwnd, classBuf, CLASS_NAME_BUF_LEN);
+      if (classLen > 0) {
+        let className = "";
+        for (let i = 0; i < classLen; i++) className += String.fromCharCode(classBuf[i]);
+        if (isDesktopShellWindowClass(className)) return false;
+      }
+      return true;
     } catch {
       // Any FFI hiccup at call time: behave as "not fullscreen" so the
       // watchdog keeps the pet visible rather than hiding it on an error.
@@ -96,5 +130,6 @@ function createForegroundFullscreenProbe(options = {}) {
 module.exports = {
   createForegroundFullscreenProbe,
   rectCoversMonitor,
+  isDesktopShellWindowClass,
   FULLSCREEN_TOLERANCE_PX,
 };
