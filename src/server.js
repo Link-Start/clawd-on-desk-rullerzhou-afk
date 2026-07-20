@@ -37,7 +37,7 @@ const {
   handlePermissionPost,
   shouldBypassCCBubble,
   shouldBypassCodexBubble,
-  shouldBypassOpencodeBubble,
+  shouldBypassFamilyBubble,
 } = require("./server-route-permission");
 const {
   getCodexOfficialTurnKey,
@@ -708,7 +708,7 @@ module.exports.__test = {
   settingsNeedClaudeHookResync,
   shouldBypassCCBubble,
   shouldBypassCodexBubble,
-  shouldBypassOpencodeBubble,
+  shouldBypassFamilyBubble,
   normalizePermissionSuggestions,
   normalizeElicitationToolInput,
   normalizeCodexPermissionToolInput,

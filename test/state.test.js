@@ -98,6 +98,7 @@ function update(api, o = {}) {
       backgroundTasksCount: o.backgroundTasksCount ?? 0,
       sessionCronsCount: o.sessionCronsCount ?? 0,
       stopHookActive: o.stopHookActive ?? false,
+      transientPermissionEvent: o.transientPermissionEvent === true,
     },
   );
 }
@@ -570,6 +571,25 @@ describe("wake poll behavior", () => {
     assert.strictEqual(api.getCurrentState(), "idle");
   });
 
+  it("wake-from-doze returns to the user-selected idle visual", () => {
+    api.cleanup();
+    ctx = makeCtx({
+      getCursorScreenPoint: () => ({ ...fakeCursor }),
+      getIdleVisualChoice: () => "clawd-idle-reading.svg",
+    });
+    const changes = [];
+    ctx.sendToRenderer = (ev, ...args) => { if (ev === "state-change") changes.push(args); };
+    api = require("../src/state")(ctx);
+
+    api.applyState("dozing");
+    mock.timers.tick(500);
+    fakeCursor.x = 200;
+    mock.timers.tick(200);
+    mock.timers.tick(350);
+    assert.strictEqual(api.getCurrentState(), "idle");
+    assert.deepStrictEqual(changes[changes.length - 1], ["idle", "clawd-idle-reading.svg"]);
+  });
+
   it("collapsing + mouse move → waking", () => {
     api.applyState("collapsing");
     mock.timers.tick(500); // wake poll delay
@@ -668,6 +688,19 @@ describe("cleanStaleSessions()", () => {
     api.sessions.set("s1", rawSession("working", { agentPid: 9999, pidReachable: true }));
     api.cleanStaleSessions();
     assert.strictEqual(api.sessions.size, 0);
+  });
+
+  it("empty-session return rests on the user-selected idle visual", () => {
+    const changes = [];
+    api = require("../src/state")(makeCtx({
+      processKill: makePidKill(new Set()),
+      getIdleVisualChoice: () => "clawd-idle-reading.svg",
+      sendToRenderer: (ev, ...args) => { if (ev === "state-change") changes.push(args); },
+    }));
+    api.sessions.set("s1", rawSession("working", { agentPid: 9999, pidReachable: true }));
+    api.cleanStaleSessions();
+    assert.strictEqual(api.sessions.size, 0);
+    assert.deepStrictEqual(changes[changes.length - 1], ["idle", "clawd-idle-reading.svg"]);
   });
 
   it("agentPid alive + sourcePid dead + stale → delete", () => {
@@ -1000,6 +1033,31 @@ describe("updateSession()", () => {
     update(api, { id: "perm1", state: "notification", event: "PermissionRequest" });
     assert.ok(!api.sessions.has("perm1"));
     assert.strictEqual(api.getCurrentState(), "notification");
+  });
+
+  it("Codex user-input request flashes notification while preserving session state", () => {
+    update(api, {
+      id: "codex:question",
+      state: "working",
+      event: "PreToolUse",
+      agentId: "codex",
+      sourcePid: 456,
+      cwd: "/repo",
+    });
+    update(api, {
+      id: "codex:question",
+      state: "notification",
+      event: "CodexUserInputRequest",
+      agentId: "codex",
+      sourcePid: 456,
+      cwd: "/repo",
+      transientPermissionEvent: true,
+    });
+
+    assert.strictEqual(api.sessions.get("codex:question").state, "working");
+    mock.timers.tick(1000);
+    assert.strictEqual(api.getCurrentState(), "notification");
+    assert.strictEqual(api.sessions.get("codex:question").recentEvents.at(-1).event, "PreToolUse");
   });
 
   it("Codex PermissionRequest persists focus metadata for snapshots", () => {

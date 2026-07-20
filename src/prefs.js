@@ -289,6 +289,7 @@ const SCHEMA = {
       "qwen-code": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "codewhale": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       "opencode": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
+      "mimocode": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "pi": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       "openclaw": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       "hermes": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
@@ -322,6 +323,16 @@ const SCHEMA = {
     type: "object",
     defaultFactory: () => ({}),
     normalize: normalizeThemeVariant,
+  },
+  // #509: per-theme default idle visual (e.g. {clawd: "clawd-idle-reading.svg"}).
+  // Missing key for a theme = that theme's stock idle behavior. Values are bare
+  // filenames validated against the LOADED theme at resolve time
+  // (idle-visual.js), never here, so a theme update that drops the file
+  // degrades gracefully to the theme default.
+  idleVisual: {
+    type: "object",
+    defaultFactory: () => ({}),
+    normalize: normalizeIdleVisual,
   },
   sessionAliases: {
     type: "object",
@@ -943,6 +954,20 @@ function normalizeThemeVariant(value, defaultsValue) {
     if (typeof themeId !== "string" || !themeId) continue;
     if (typeof variantId !== "string" || !variantId) continue;
     out[themeId] = variantId;
+  }
+  return out;
+}
+
+function normalizeIdleVisual(value, defaultsValue) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return defaultsValue;
+  const out = {};
+  for (const themeId of Object.keys(value)) {
+    const file = value[themeId];
+    if (typeof themeId !== "string" || !themeId) continue;
+    if (typeof file !== "string" || !file) continue;
+    // Bare filenames only — asset paths are resolved by the theme loader.
+    if (file.includes("/") || file.includes("\\")) continue;
+    out[themeId] = file;
   }
   return out;
 }

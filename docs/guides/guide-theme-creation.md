@@ -86,7 +86,7 @@ my-theme/
 
 1. Start from `themes/template/`
 2. Choose whether you want eye tracking:
-   - `eyeTracking.enabled: true` → your `idle` asset must be SVG and include `#eyes-js`
+   - `eyeTracking.enabled: true` → every file in a state listed by `eyeTracking.states` must be SVG. In the template, `idle` is listed: only `states.idle[0]` follows the cursor and it must include the legacy `#eyes-js` target; put additional non-SVG idle visuals in `idleAnimations`
    - `eyeTracking.enabled: false` → idle can also be GIF / APNG / WebP / PNG / JPG / JPEG
 3. Create simple frame animations (4-12 frames) for other states using [Piskel](https://www.piskelapp.com/) (free, browser-based) or [Aseprite](https://www.aseprite.org/) (paid, pixel art pro tool)
 4. Export as APNG / WebP / GIF, or use single-frame PNG / JPG / JPEG for static poses

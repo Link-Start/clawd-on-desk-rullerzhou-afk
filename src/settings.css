@@ -1554,6 +1554,18 @@ html, body {
   font-size: 12px;
   color: var(--text-secondary);
 }
+/* #509: single-row panel for the default idle visual picker. Same look as
+   .section-rows, but no overflow:hidden — the picker menu must drop below
+   the row (the row is alone in this panel, so clipping would swallow it). */
+.anim-idle-visual-row {
+  background: var(--bg);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+@media (prefers-color-scheme: dark) {
+  .anim-idle-visual-row { background: #1a1a1d; }
+}
+
 .anim-override-list {
   display: flex;
   flex-direction: column;

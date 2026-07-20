@@ -70,6 +70,14 @@ function refreshTheme() {
 
 refreshTheme();
 
+// #509: resting idle sprite — the user-selected default idle visual when set,
+// the theme's follow sprite otherwise. SVG_IDLE_FOLLOW itself stays pure so the
+// eye-tracking gate below only fires on the real follow sprite.
+function idleRestSvg() {
+  const choice = typeof ctx.getIdleVisualChoice === "function" ? ctx.getIdleVisualChoice() : null;
+  return choice || SVG_IDLE_FOLLOW;
+}
+
 // ── Unified main tick (cursor polling for eye tracking + sleep + mini peek) ──
 // Input routing is handled by hitWin — no setIgnoreMouseEvents toggling here.
 function startMainTick() {
@@ -280,7 +288,7 @@ function runMainTickOnce() {
         if (yawnDelayTimer) { clearTimeout(yawnDelayTimer); yawnDelayTimer = null; }
         if (isMouseIdle) {
           isMouseIdle = false;
-          ctx.sendToRenderer("state-change", "idle", SVG_IDLE_FOLLOW);
+          ctx.sendToRenderer("state-change", "idle", idleRestSvg());
         }
       }
 
@@ -307,11 +315,21 @@ function runMainTickOnce() {
         return nextDelay();
       }
 
-      // 20s no mouse movement → random idle animation (play once, then return to idle-follow)
+      // 20s no mouse movement → random idle animation (play once, then return
+      // to the resting idle visual). A user-chosen resting sprite is excluded
+      // from the pool — "playing" it would be an invisible no-op that eats the
+      // once-per-idle-period slot. With no choice set the pool is untouched:
+      // a theme may deliberately list its follow sprite as a stay-at-rest beat.
       if (IDLE_ANIMS.length > 0 && !isMouseIdle && !hasTriggeredYawn && !idleLookPlayed && elapsed >= MOUSE_IDLE_TIMEOUT) {
+        const choice = typeof ctx.getIdleVisualChoice === "function" ? ctx.getIdleVisualChoice() : null;
+        const pool = choice ? IDLE_ANIMS.filter((a) => a.svg !== choice) : IDLE_ANIMS;
+        if (pool.length === 0) {
+          idleLookPlayed = true;
+          return nextDelay();
+        }
         isMouseIdle = true;
         idleLookPlayed = true;
-        const pick = IDLE_ANIMS[Math.floor(Math.random() * IDLE_ANIMS.length)];
+        const pick = pool[Math.floor(Math.random() * pool.length)];
         if (!shouldSuppressPassiveIpc()) ctx.sendToRenderer("eye-move", 0, 0);
         setTimeout(() => {
           if (isMouseIdle && ctx.currentState === "idle") {
@@ -323,8 +341,9 @@ function runMainTickOnce() {
           idleLookReturnTimer = null;
           if (isMouseIdle && ctx.currentState === "idle") {
             isMouseIdle = false;
-            ctx.sendToRenderer("state-change", "idle", SVG_IDLE_FOLLOW);
-            ctx.sendToHitWin("hit-state-sync", { currentSvg: SVG_IDLE_FOLLOW });
+            const returnSvg = idleRestSvg();
+            ctx.sendToRenderer("state-change", "idle", returnSvg);
+            ctx.sendToHitWin("hit-state-sync", { currentSvg: returnSvg });
             setTimeout(() => { ctx.forceEyeResend = true; }, 200);
           }
         }, 250 + pick.duration);
@@ -336,7 +355,13 @@ function runMainTickOnce() {
     }
 
     const trackEyesNow = (idleNow && ctx.currentSvg === SVG_IDLE_FOLLOW && !isMouseIdle) || miniIdleNow;
-    if (!trackEyesNow) return nextDelay();
+    if (!trackEyesNow) {
+      // Resting on a non-follow visual: the eye path below never runs, so
+      // consume the resend flag here — otherwise needsBounds stays true and
+      // getPetWindowBounds() fires every idle tick for nothing.
+      if (idleNow && !isMouseIdle && ctx.forceEyeResend) ctx.forceEyeResend = false;
+      return nextDelay();
+    }
     if (shouldSuppressPassiveIpc() && !moved) {
       if (ctx.forceEyeResend) ctx.forceEyeResend = false;
       return nextDelay();

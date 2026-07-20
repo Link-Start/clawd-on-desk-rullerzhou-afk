@@ -5,7 +5,7 @@ const assert = require("node:assert");
 
 const {
   shouldBypassCCBubble,
-  shouldBypassOpencodeBubble,
+  shouldBypassFamilyBubble,
 } = require("../src/server").__test;
 
 function makeCtx({ enabled = true, hideBubbles = false, permissionBubblesEnabled = true } = {}) {
@@ -74,16 +74,16 @@ describe("shouldBypassCCBubble", () => {
   });
 });
 
-describe("shouldBypassOpencodeBubble", () => {
+describe("shouldBypassFamilyBubble", () => {
   it("does not bypass when the sub-gate is on", () => {
-    assert.strictEqual(shouldBypassOpencodeBubble(makeCtx({ enabled: true })), false);
+    assert.strictEqual(shouldBypassFamilyBubble(makeCtx({ enabled: true }), "opencode"), false);
   });
 
   it("bypasses when the sub-gate is off", () => {
-    assert.strictEqual(shouldBypassOpencodeBubble(makeCtx({ enabled: false })), true);
+    assert.strictEqual(shouldBypassFamilyBubble(makeCtx({ enabled: false }), "opencode"), true);
   });
 
-  it("always queries the 'opencode' agent id regardless of call context", () => {
+  it("queries exactly the caller's agent id — sub-gates stay per-agent", () => {
     const calls = [];
     const ctx = {
       isAgentPermissionsEnabled: (id) => {
@@ -91,12 +91,13 @@ describe("shouldBypassOpencodeBubble", () => {
         return false;
       },
     };
-    shouldBypassOpencodeBubble(ctx);
-    assert.deepStrictEqual(calls, ["opencode"]);
+    shouldBypassFamilyBubble(ctx, "opencode");
+    shouldBypassFamilyBubble(ctx, "mimocode");
+    assert.deepStrictEqual(calls, ["opencode", "mimocode"]);
   });
 
   it("missing isAgentPermissionsEnabled → fail-open", () => {
-    assert.strictEqual(shouldBypassOpencodeBubble({}), false);
+    assert.strictEqual(shouldBypassFamilyBubble({}, "opencode"), false);
   });
 });
 

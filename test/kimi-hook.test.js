@@ -854,3 +854,277 @@ describe("Kimi Code native events (#563)", () => {
     assert.deepStrictEqual(body.permission_tool_input, { command: "npm test" });
   });
 });
+
+describe("Kimi gate-ledger markers", () => {
+  const resolve = () => ({ stablePid: 1, agentPid: null, detectedEditor: null, pidChain: [] });
+  const { readToolCallId, isGatedPostEvent, PERMISSION_GATE_ID_MAX_CHARS } = require("../hooks/kimi-hook");
+
+  const withSuspectMode = (fn) => {
+    const oldSuspect = process.env.CLAWD_KIMI_PERMISSION_SUSPECT;
+    const oldMode = process.env.CLAWD_KIMI_PERMISSION_MODE;
+    const oldImmediate = process.env.CLAWD_KIMI_PERMISSION_IMMEDIATE;
+    try {
+      process.env.CLAWD_KIMI_PERMISSION_SUSPECT = "1";
+      delete process.env.CLAWD_KIMI_PERMISSION_MODE;
+      delete process.env.CLAWD_KIMI_PERMISSION_IMMEDIATE;
+      fn();
+    } finally {
+      if (oldSuspect == null) delete process.env.CLAWD_KIMI_PERMISSION_SUSPECT;
+      else process.env.CLAWD_KIMI_PERMISSION_SUSPECT = oldSuspect;
+      if (oldMode == null) delete process.env.CLAWD_KIMI_PERMISSION_MODE;
+      else process.env.CLAWD_KIMI_PERMISSION_MODE = oldMode;
+      if (oldImmediate == null) delete process.env.CLAWD_KIMI_PERMISSION_IMMEDIATE;
+      else process.env.CLAWD_KIMI_PERMISSION_IMMEDIATE = oldImmediate;
+    }
+  };
+
+  it("gated suspect PreToolUse opens a gate and forwards the tool cue detail", () => {
+    withSuspectMode(() => {
+      const body = buildStateBody(
+        "PreToolUse",
+        {
+          session_id: "s1",
+          tool_name: "shell",
+          tool_call_id: "call_abc",
+          tool_input: { command: "Remove-Item kimi-cue-test.txt" },
+        },
+        resolve
+      );
+      assert.strictEqual(body.state, "working");
+      assert.strictEqual(body.event, "PreToolUse");
+      assert.strictEqual(body.permission_suspect, true);
+      assert.strictEqual(body.permission_gate_open, true);
+      assert.strictEqual(body.permission_gate_id, "call_abc");
+      assert.strictEqual(body.permission_gated, undefined);
+      assert.strictEqual(body.tool_name, "shell");
+      assert.deepStrictEqual(body.permission_tool_input, { command: "Remove-Item kimi-cue-test.txt" });
+    });
+  });
+
+  it("gated suspect PreToolUse without tool_call_id opens an anonymous gate", () => {
+    withSuspectMode(() => {
+      const body = buildStateBody(
+        "PreToolUse",
+        { session_id: "s1", tool_name: "write_file", tool_input: { path: "a.txt" } },
+        resolve
+      );
+      assert.strictEqual(body.permission_gate_open, true);
+      assert.strictEqual(body.permission_gate_id, undefined);
+      assert.deepStrictEqual(body.permission_tool_input, { file_path: "a.txt" });
+    });
+  });
+
+  it("synthesized immediate PermissionRequest carries the gate marker too", () => {
+    const body = buildStateBody(
+      "PreToolUse",
+      {
+        session_id: "s1",
+        tool_name: "shell",
+        tool_call_id: "call_now",
+        permission_required: true,
+        tool_input: { command: "npm install" },
+      },
+      resolve
+    );
+    assert.strictEqual(body.event, "PermissionRequest");
+    assert.strictEqual(body.state, "notification");
+    assert.strictEqual(body.permission_gate_open, true);
+    assert.strictEqual(body.permission_gate_id, "call_now");
+    assert.deepStrictEqual(body.permission_tool_input, { command: "npm install" });
+  });
+
+  it("gated PostToolUse and PostToolUseFailure close their gate; non-gated Posts carry no markers", () => {
+    const post = buildStateBody(
+      "PostToolUse",
+      { session_id: "s1", tool_name: "shell", tool_call_id: "call_abc" },
+      resolve
+    );
+    assert.strictEqual(post.permission_gated, true);
+    assert.strictEqual(post.permission_gate_id, "call_abc");
+    assert.strictEqual(post.permission_gate_open, undefined);
+
+    const failure = buildStateBody(
+      "PostToolUseFailure",
+      { session_id: "s1", tool_name: "write_file", tool_call_id: "call_w" },
+      resolve
+    );
+    assert.strictEqual(failure.permission_gated, true);
+    assert.strictEqual(failure.permission_gate_id, "call_w");
+
+    const nonGated = buildStateBody(
+      "PostToolUse",
+      { session_id: "s1", tool_name: "read_file", tool_call_id: "call_r" },
+      resolve
+    );
+    assert.strictEqual(nonGated.permission_gated, undefined);
+    assert.strictEqual(nonGated.permission_gate_id, undefined);
+  });
+
+  it("default explicit-only mode emits no gate markers at all", () => {
+    const oldSuspect = process.env.CLAWD_KIMI_PERMISSION_SUSPECT;
+    const oldMode = process.env.CLAWD_KIMI_PERMISSION_MODE;
+    try {
+      delete process.env.CLAWD_KIMI_PERMISSION_SUSPECT;
+      delete process.env.CLAWD_KIMI_PERMISSION_MODE;
+      const body = buildStateBody(
+        "PreToolUse",
+        { session_id: "s1", tool_name: "shell", tool_call_id: "call_abc" },
+        resolve
+      );
+      assert.strictEqual(body.state, "working");
+      assert.strictEqual(body.permission_suspect, undefined);
+      assert.strictEqual(body.permission_gate_open, undefined);
+      assert.strictEqual(body.permission_gate_id, undefined);
+      assert.strictEqual(body.tool_name, undefined);
+    } finally {
+      if (oldSuspect == null) delete process.env.CLAWD_KIMI_PERMISSION_SUSPECT;
+      else process.env.CLAWD_KIMI_PERMISSION_SUSPECT = oldSuspect;
+      if (oldMode == null) delete process.env.CLAWD_KIMI_PERMISSION_MODE;
+      else process.env.CLAWD_KIMI_PERMISSION_MODE = oldMode;
+    }
+  });
+
+  it("readToolCallId tolerates shape drift and clamps", () => {
+    assert.strictEqual(readToolCallId({ tool_call_id: " call_1 " }), "call_1");
+    assert.strictEqual(readToolCallId({ toolCallId: "call_2" }), "call_2");
+    assert.strictEqual(readToolCallId({ tool_call: { id: "call_3" } }), "call_3");
+    assert.strictEqual(readToolCallId({ toolCall: { id: "call_4" } }), "call_4");
+    assert.strictEqual(readToolCallId({ tool_call_id: 42 }), "42");
+    assert.strictEqual(
+      readToolCallId({ tool_call_id: "x".repeat(500) }),
+      "x".repeat(PERMISSION_GATE_ID_MAX_CHARS)
+    );
+    assert.strictEqual(readToolCallId({ tool_call_id: "   " }), null);
+    assert.strictEqual(readToolCallId({ tool_call_id: { nested: true } }), null);
+    assert.strictEqual(readToolCallId({}), null);
+    assert.strictEqual(readToolCallId(null), null);
+  });
+
+  it("isGatedPostEvent matches only gated tools on Post events", () => {
+    assert.strictEqual(isGatedPostEvent("PostToolUse", { tool_name: "shell" }), true);
+    assert.strictEqual(isGatedPostEvent("PostToolUseFailure", { tool_name: "WriteFile" }), true);
+    assert.strictEqual(isGatedPostEvent("PostToolUse", { tool_name: "read_file" }), false);
+    assert.strictEqual(isGatedPostEvent("PreToolUse", { tool_name: "shell" }), false);
+    assert.strictEqual(isGatedPostEvent("PostToolUse", {}), false);
+  });
+});
+
+describe("Kimi hook argv permission-mode flag", () => {
+  const { parseHookArgv, setArgvPermissionMode } = require("../hooks/kimi-hook");
+
+  const cleanEnv = (fn) => {
+    const oldMode = process.env.CLAWD_KIMI_PERMISSION_MODE;
+    const oldSuspect = process.env.CLAWD_KIMI_PERMISSION_SUSPECT;
+    const oldImmediate = process.env.CLAWD_KIMI_PERMISSION_IMMEDIATE;
+    try {
+      delete process.env.CLAWD_KIMI_PERMISSION_MODE;
+      delete process.env.CLAWD_KIMI_PERMISSION_SUSPECT;
+      delete process.env.CLAWD_KIMI_PERMISSION_IMMEDIATE;
+      fn();
+    } finally {
+      setArgvPermissionMode(null);
+      if (oldMode == null) delete process.env.CLAWD_KIMI_PERMISSION_MODE;
+      else process.env.CLAWD_KIMI_PERMISSION_MODE = oldMode;
+      if (oldSuspect == null) delete process.env.CLAWD_KIMI_PERMISSION_SUSPECT;
+      else process.env.CLAWD_KIMI_PERMISSION_SUSPECT = oldSuspect;
+      if (oldImmediate == null) delete process.env.CLAWD_KIMI_PERMISSION_IMMEDIATE;
+      else process.env.CLAWD_KIMI_PERMISSION_IMMEDIATE = oldImmediate;
+    }
+  };
+
+  it("parses the mode flag in any position without eating the event name", () => {
+    assert.deepStrictEqual(
+      parseHookArgv(["--permission-mode=suspect", "PreToolUse"]),
+      { event: "PreToolUse", mode: "suspect", ignoredFlags: [] }
+    );
+    assert.deepStrictEqual(
+      parseHookArgv(["PreToolUse", "--permission-mode=explicit"]),
+      { event: "PreToolUse", mode: "explicit", ignoredFlags: [] }
+    );
+    // kimi-cli passes no event argv at all — the installer flag must not
+    // become the event name (that would silently kill every hook run).
+    assert.deepStrictEqual(
+      parseHookArgv(["--permission-mode=suspect"]),
+      { event: "", mode: "suspect", ignoredFlags: [] }
+    );
+  });
+
+  it("ignores unknown flags and invalid mode values instead of misparsing them as events", () => {
+    const unknown = parseHookArgv(["--future-flag", "Stop"]);
+    assert.strictEqual(unknown.event, "Stop");
+    assert.deepStrictEqual(unknown.ignoredFlags, ["--future-flag"]);
+    const badMode = parseHookArgv(["--permission-mode=chaotic", "Stop"]);
+    assert.strictEqual(badMode.mode, null);
+    assert.deepStrictEqual(badMode.ignoredFlags, ["--permission-mode=chaotic"]);
+    assert.deepStrictEqual(parseHookArgv([]), { event: "", mode: null, ignoredFlags: [] });
+    assert.deepStrictEqual(parseHookArgv(undefined), { event: "", mode: null, ignoredFlags: [] });
+  });
+
+  it("space-separated mode values and unknown-flag values never claim the event slot", () => {
+    // `--permission-mode suspect`: the value is consumed by the flag — it must
+    // not become the event (which would override the stdin hook_event_name
+    // and silently kill the hook on the unknown name).
+    assert.deepStrictEqual(
+      parseHookArgv(["--permission-mode", "suspect"]),
+      { event: "", mode: "suspect", ignoredFlags: [] }
+    );
+    assert.deepStrictEqual(
+      parseHookArgv(["--permission-mode", "chaotic"]),
+      { event: "", mode: null, ignoredFlags: ["--permission-mode chaotic"] }
+    );
+    assert.deepStrictEqual(
+      parseHookArgv(["--permission-mode"]),
+      { event: "", mode: null, ignoredFlags: ["--permission-mode"] }
+    );
+    // Unknown flag with a non-event value: both tokens are ignored; the event
+    // stays empty so the stdin payload's hook_event_name wins.
+    assert.deepStrictEqual(
+      parseHookArgv(["--future-flag", "future-value"]),
+      { event: "", mode: null, ignoredFlags: ["--future-flag", "future-value"] }
+    );
+    // A bare positional that is not a known event name is ignored too.
+    assert.deepStrictEqual(
+      parseHookArgv(["banana"]),
+      { event: "", mode: null, ignoredFlags: ["banana"] }
+    );
+    // Space form still coexists with a real positional event.
+    assert.deepStrictEqual(
+      parseHookArgv(["--permission-mode", "explicit", "PreToolUse"]),
+      { event: "PreToolUse", mode: "explicit", ignoredFlags: [] }
+    );
+  });
+
+  it("argv suspect mode drives classifyPreTool when no env override exists", () => {
+    cleanEnv(() => {
+      setArgvPermissionMode("suspect");
+      assert.strictEqual(classifyPreTool("PreToolUse", { tool_name: "shell" }), "suspect");
+      setArgvPermissionMode("explicit");
+      assert.strictEqual(classifyPreTool("PreToolUse", { tool_name: "shell" }), "none");
+      setArgvPermissionMode(null);
+      assert.strictEqual(classifyPreTool("PreToolUse", { tool_name: "shell" }), "none");
+    });
+  });
+
+  it("env escape hatches beat the persisted argv mode in both directions", () => {
+    cleanEnv(() => {
+      setArgvPermissionMode("suspect");
+      process.env.CLAWD_KIMI_PERMISSION_MODE = "explicit";
+      assert.strictEqual(classifyPreTool("PreToolUse", { tool_name: "shell" }), "none");
+      delete process.env.CLAWD_KIMI_PERMISSION_MODE;
+
+      setArgvPermissionMode("explicit");
+      process.env.CLAWD_KIMI_PERMISSION_SUSPECT = "1";
+      assert.strictEqual(classifyPreTool("PreToolUse", { tool_name: "shell" }), "suspect");
+    });
+  });
+
+  it("explicit payload signals still win over any mode (argv or otherwise)", () => {
+    cleanEnv(() => {
+      setArgvPermissionMode("explicit");
+      assert.strictEqual(
+        classifyPreTool("PreToolUse", { tool_name: "shell", permission_required: true }),
+        "immediate"
+      );
+    });
+  });
+});

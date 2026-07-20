@@ -28,6 +28,7 @@ const AUTO_REPAIRABLE_AGENT_IDS = new Set([
   "qwen-code",
   "codewhale",
   "opencode",
+  "mimocode",
   "hermes",
   "qoder",
   "reasonix",
@@ -48,6 +49,7 @@ const INSTALLABLE_AGENT_IDS = new Set([
   "qwen-code",
   "codewhale",
   "opencode",
+  "mimocode",
   "pi",
   "openclaw",
   "hermes",
@@ -615,6 +617,7 @@ deployToWsl.lockKey = "agentIntegration";
 removeFromWsl.lockKey = "agentIntegration";
 
 module.exports = {
+  AUTO_REPAIRABLE_AGENT_IDS,
   INSTALLABLE_AGENT_IDS,
   clearAgentCleanupHints,
   clearAgentInstallHints,

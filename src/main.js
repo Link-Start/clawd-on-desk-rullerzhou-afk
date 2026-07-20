@@ -82,12 +82,14 @@ const {
 const { registerSettingsIpc } = require("./settings-ipc");
 const createSettingsEffectRouter = require("./settings-effect-router");
 const { registerSessionIpc } = require("./session-ipc");
+const { createSessionFolderOpener } = require("./session-open-folder");
 const { registerPetInteractionIpc } = require("./pet-interaction-ipc");
 const { createSystemWakeRecovery } = require("./system-wake-recovery");
 const { formatLocalTimestamp } = require("./log-timestamp");
 const { launchClaudeSession, openTerminalAt } = require("./launch-claude");
 const { dialog: electronDialog } = require("electron");
 const initPermission = require("./permission");
+const { isPassiveNotifyEntry } = require("./passive-notify-entry");
 const { registerPermissionIpc } = initPermission;
 const { createTelegramApprovalSidecar } = require("./telegram-approval-sidecar");
 const telegramApprovalSettings = require("./telegram-approval-settings");
@@ -168,6 +170,15 @@ const { createForegroundFullscreenProbe } = require("./win-fullscreen-detect");
 const _isForegroundFullscreen = createForegroundFullscreenProbe({
   isWin,
   onError: (err) => console.warn("Clawd: win-fullscreen-detect not available:", err && err.message),
+});
+
+// ── Windows: DWM cloak inspection + un-cloak (#525 self-heal) ──
+// Best-effort; degrades to "never cloaked / recovery no-op" when koffi/dwmapi
+// or the virtual-desktop COM manager is unavailable.
+const { createCloakInspector } = require("./win-cloak-recovery");
+const _cloakInspector = createCloakInspector({
+  isWin,
+  log: (line) => console.warn(`Clawd: ${line}`),
 });
 
 // ── Windows: foreground Windows Terminal probe (server-side wt_hwnd sample,
@@ -405,6 +416,7 @@ const _settingsController = createSettingsController({
       themeRuntime.refreshActiveThemeHitboxOverrides(id, overrideMap),
     getThemeInfo: (id) => themeRuntime.getThemeInfo(id),
     removeThemeDir: (id) => themeRuntime.removeThemeDir(id),
+    getActiveTheme: () => themeRuntime.getActiveTheme(),
     globalShortcut,
     shortcutHandlers,
     // The controller is created before shortcutRuntime because each side needs
@@ -745,6 +757,8 @@ const petWindowRuntime = createPetWindowRuntime({
   reapplyMacVisibility: () => reapplyMacVisibility(),
   reassertWinTopmost: () => reassertWinTopmost(),
   scheduleHwndRecovery: () => scheduleHwndRecovery(),
+  cloakInspector: _cloakInspector,
+  isMiniAnimating: () => _mini.getIsAnimating(),
   isNearWorkAreaEdge: (bounds) => isNearWorkAreaEdge(bounds),
   flushRuntimeStateToPrefs: () => flushRuntimeStateToPrefs(),
   handleMiniDisplayChange: () => _mini.handleDisplayChange(),
@@ -1297,6 +1311,7 @@ const topmostRuntime = createTopmostRuntime({
   isMac,
   getWin: () => win,
   getHitWin: () => hitWin,
+  recoverCloakedPet: () => petWindowRuntime.recoverIfCloaked(),
   getPendingPermissions: () => pendingPermissions,
   getUpdateBubbleWindow: () => _updateBubble.getBubbleWindow(),
   getSessionHudWindow: () => getSessionHudWindow(),
@@ -1393,7 +1408,7 @@ const _permCtx = {
   },
 };
 const _perm = initPermission(_permCtx);
-const { showPermissionBubble, resolvePermissionEntry, sendPermissionResponse, repositionBubbles, permLog, PASSTHROUGH_TOOLS, addPendingPermission, removePendingPermission, maybeStartRemoteApproval, clearCodexNotifyBubbles, showKimiNotifyBubble, clearKimiNotifyBubbles, syncPermissionShortcuts, replyOpencodePermission } = _perm;
+const { showPermissionBubble, resolvePermissionEntry, sendPermissionResponse, repositionBubbles, permLog, PASSTHROUGH_TOOLS, addPendingPermission, removePendingPermission, maybeStartRemoteApproval, clearCodexNotifyBubbles, showCodexUserInputBubble, clearCodexUserInputBubbles, showKimiNotifyBubble, clearKimiNotifyBubbles, syncPermissionShortcuts, replyOpencodeFamilyPermission } = _perm;
 const pendingPermissions = _perm.pendingPermissions;
 let permDebugLog = null; // set after app.whenReady()
 let updateDebugLog = null; // set after app.whenReady()
@@ -1482,6 +1497,24 @@ let sendDashboardI18n = () => {};
 // after the updater module is constructed below.
 let notifyUpdaterSilentExit = () => {};
 
+// #509: user-selected default idle visual, resolved against the live active
+// theme so reads never go stale across theme switches. Returns null when
+// unset/invalid — callers keep their existing fallback. The visible repaint
+// on a pref change is the refreshIdleVisual router hook's job, further down.
+const { resolveIdleVisualChoice } = require("./idle-visual");
+function getIdleVisualChoice() {
+  return resolveIdleVisualChoice(getActiveTheme(), _settingsController.get("idleVisual"));
+}
+
+// Renderer theme config with the idle choice stamped on — the renderer's
+// pre-IPC first frame should already show the selected visual, not flash the
+// follow sprite. getRendererConfig() returns a fresh object, safe to extend.
+function buildRendererThemeConfig() {
+  const cfg = themeRuntime.getRendererConfig();
+  if (cfg) cfg.idleDefaultVisual = getIdleVisualChoice();
+  return cfg;
+}
+
 const _stateCtx = {
   get theme() { return getActiveTheme(); },
   get win() { return win; },
@@ -1564,6 +1597,7 @@ const _stateCtx = {
     detachedIdleStaleMs,
   }),
   getSessionAliases: () => _settingsController.get("sessionAliases"),
+  getIdleVisualChoice,
   hasAnyEnabledAgent: () => {
     // `get("agents")` returns the live reference (no clone) — we're only
     // reading. Missing agents field falls back to "assume enabled" (the
@@ -1654,6 +1688,7 @@ const _tickCtx = {
   sendToHitWin,
   setState,
   applyState,
+  getIdleVisualChoice,
   miniPeekIn: () => miniPeekIn(),
   miniPeekOut: () => miniPeekOut(),
   getObjRect,
@@ -1746,6 +1781,11 @@ function hideDashboardSession(sessionId) {
     ? { status: "ok" }
     : { status: "not-found" };
 }
+
+const openDashboardSessionFolder = createSessionFolderOpener({
+  getSession: (sessionId) => sessions.get(sessionId),
+  openPath: (cwd) => shell.openPath(cwd),
+});
 
 const _dashboard = require("./dashboard")({
   get lang() { return lang; },
@@ -1910,6 +1950,8 @@ agentRuntime = createAgentRuntimeMain({
   updateSession: (sessionId, state, event, opts) => updateSession(sessionId, state, event, opts),
   captureGhosttyTerminalId,
   clearCodexNotifyBubbles: (...args) => clearCodexNotifyBubbles(...args),
+  showCodexUserInputBubble: (...args) => showCodexUserInputBubble(...args),
+  clearCodexUserInputBubbles: (...args) => clearCodexUserInputBubbles(...args),
 });
 
 // ── HTTP server — delegated to src/server.js ──
@@ -1945,8 +1987,10 @@ const _serverCtx = {
   addPendingPermission,
   removePendingPermission,
   showPermissionBubble,
+  showCodexUserInputBubble,
+  clearCodexUserInputBubbles,
   maybeStartRemoteApproval,
-  replyOpencodePermission,
+  replyOpencodeFamilyPermission,
   syncPermissionShortcuts,
   permLog,
 };
@@ -2183,9 +2227,16 @@ function getFeishuApprovalSecretInfo() {
   });
 }
 
+// Anything that changes the live connection must be in here. `platform` in
+// particular: switching Feishu <-> Lark has to tear the client down so the WS
+// reconnects to the new host and the cached REST client (and its token cache,
+// which is per-domain) is dropped with it. `lang` is deliberately absent — the
+// translator reads it dynamically, so a language switch must not bounce the
+// long connection.
 function buildFeishuApprovalSignature(config, paths, secrets) {
   return JSON.stringify({
     enabled: config.enabled === true,
+    platform: config.platform,
     idType: config.idType,
     approverId: config.approverId,
     secretsEnvFilePath: paths.secretsEnvFilePath,
@@ -2208,11 +2259,20 @@ function getFeishuApprovalStatus() {
   return {
     ...clientStatus,
     enabled: config.enabled === true,
+    // The platform the runtime actually resolved, so the settings page renders
+    // the right brand/guide and a mismatch is visible while troubleshooting.
+    platform: config.platform,
     configured: ready.ready === true,
     reason: ready.reason || "",
     message: clientStatus.message || ready.message || "",
     connectionTimeoutSeconds: config.connectionTimeoutSeconds,
+    // Two different questions, deliberately two fields:
+    //   secretsStored     — is ANY secret on disk? (drives render gating only)
+    //   secretsConfigured — are the two REQUIRED ones both present?
+    // Conflating them lets a half-written env file (App ID but no App Secret,
+    // or just a Verification Token) render as a complete setup.
     secretsStored: !!(secrets.appId || secrets.appSecret || secrets.verificationToken || secrets.encryptKey),
+    secretsConfigured: !!(secrets.appId && secrets.appSecret),
   };
 }
 
@@ -2271,7 +2331,9 @@ async function startFeishuApprovalClient() {
     encryptKey: secrets.encryptKey,
     approverId: config.approverId,
     idType: config.idType,
+    platform: config.platform,
     connectionTimeoutSeconds: config.connectionTimeoutSeconds,
+    getLang: () => _settingsController.get("lang") || lang || "en",
     log: feishuApprovalLog,
     onStatusChange: () => broadcastFeishuApprovalStatus(),
   });
@@ -2317,12 +2379,15 @@ function queueFeishuApprovalSync(reason) {
   return feishuApprovalSyncPromise;
 }
 
+// Brand-neutral: this channel now serves Feishu and Lark, and `message` is the
+// untranslated fallback shown when the renderer has no mapping for `code`.
+// Naming one brand here would tell half the users their working setup is wrong.
 function feishuApprovalUnavailableMessage(status) {
   if (status && status.message) return status.message;
-  if (status && status.reason === "disabled") return "Feishu approval is disabled";
-  if (status && status.reason === "missing-secret") return "Feishu App ID and App Secret are not configured";
-  if (status && status.reason === "invalid-config") return "Feishu approval config is incomplete";
-  return "Feishu approval client is not running";
+  if (status && status.reason === "disabled") return "Remote approval is disabled";
+  if (status && status.reason === "missing-secret") return "App ID and App Secret are not configured";
+  if (status && status.reason === "invalid-config") return "Remote approval config is incomplete";
+  return "Remote approval client is not running";
 }
 
 // The `code` field lets the renderer map failures to localized, actionable
@@ -2356,14 +2421,17 @@ async function sendFeishuApprovalTest() {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60 * 1000);
   try {
+    // Title/detail go through the same dictionary the client uses for the
+    // buttons, so the test card can no longer mix an English heading with
+    // Chinese buttons.
     const decision = await client.requestApproval({
-      title: "Clawd Feishu approval test",
-      detail: "This is a settings test message. It is not attached to any agent permission request.",
+      title: translate("feishuCardTestTitle"),
+      detail: translate("feishuCardTestDetail"),
     }, { signal: controller.signal, rejectOnSendError: true });
     if (decision === "allow" || decision === "deny") {
       return { status: "ok", decision };
     }
-    return { status: "error", code: "no-button-response", message: "Feishu test did not receive a button response" };
+    return { status: "error", code: "no-button-response", message: "Test card did not receive a button response" };
   } catch (err) {
     return { status: "error", code: "card-send-failed", message: err && err.message ? err.message : String(err) };
   } finally {
@@ -2430,11 +2498,7 @@ function getTelegramApprovalStatus() {
 }
 
 function getPendingTelegramApprovalCount() {
-  return pendingPermissions.filter((entry) =>
-    entry
-    && !entry.isCodexNotify
-    && !entry.isKimiNotify
-  ).length;
+  return pendingPermissions.filter((entry) => entry && !isPassiveNotifyEntry(entry)).length;
 }
 
 function getTelegramNativeRunnerStatus() {
@@ -3188,6 +3252,7 @@ const settingsEffectRouter = createSettingsEffectRouter({
   syncPermissionShortcuts,
   dismissInteractivePermissionBubbles: () => callRuntimeMethod(_perm, "dismissInteractivePermissionBubbles"),
   clearCodexNotifyBubbles,
+  clearCodexUserInputBubbles,
   clearKimiNotifyBubbles,
   refreshPassiveNotifyAutoClose: () => callRuntimeMethod(_perm, "refreshPassiveNotifyAutoClose"),
   refreshPermissionAutoCloseForPolicy: () => callRuntimeMethod(_perm, "refreshPermissionAutoCloseForPolicy"),
@@ -3204,6 +3269,13 @@ const settingsEffectRouter = createSettingsEffectRouter({
   reclampPetAfterEdgePinningChange,
   exitMiniMode: () => exitMiniMode(),
   getMiniMode: () => _mini.getMiniMode(),
+  // #509: re-rest the pet on the newly selected idle visual right away, but
+  // only while actually idle — task/sleep/mini states pick it up on their
+  // next natural revert instead.
+  refreshIdleVisual: () => {
+    if (_state.getCurrentState() !== "idle") return;
+    _state.applyState("idle", _state.getSvgOverride("idle"));
+  },
   rebuildAllMenus,
   reconcilePowerSaveBlocker,
   logWarn: console.warn,
@@ -3426,6 +3498,7 @@ registerSessionIpc({
   getI18n: () => getDashboardI18nPayload(),
   focusSession: (sessionId, options) => focusDashboardSession(sessionId, options),
   hideSession: (sessionId) => hideDashboardSession(sessionId),
+  openSessionFolder: (sessionId) => openDashboardSessionFolder(sessionId),
   ackSessionCompletion: (sessionId) => _state.ackSessionCompletion(sessionId),
   setSessionAlias: (payload) => _settingsController.applyCommand("setSessionAlias", payload),
   showDashboard: (options) => showDashboard(options),
@@ -3500,7 +3573,7 @@ function createWindow() {
     initialVirtualBounds,
     preloadPath: path.join(__dirname, "preload.js"),
     loadFilePath: path.join(__dirname, "index.html"),
-    themeConfig: themeRuntime.getRendererConfig(),
+    themeConfig: buildRendererThemeConfig(),
     setRenderWindow: (createdWindow) => { win = createdWindow; },
     isQuitting: () => isQuitting,
     applyDockVisibility,
@@ -3618,7 +3691,7 @@ function createWindow() {
     setLowPowerIdlePaused(false);
   });
   win.webContents.on("did-finish-load", () => {
-    sendToRenderer("theme-config", themeRuntime.getRendererConfig());
+    sendToRenderer("theme-config", buildRendererThemeConfig());
     sendToRenderer("viewport-offset", petWindowRuntime.getViewportOffsetY());
     if (themeRuntime.isReloadInProgress()) return;
     syncRendererStateAfterLoad();
@@ -3866,6 +3939,10 @@ if (!gotTheLock) {
         hitWin.showInactive();
         keepOutOfTaskbar(hitWin);
       }
+      // #525: relaunching while the pet is nominally visible is a "where is my
+      // pet?" signal — showInactive() alone cannot clear a DWM cloak, so run
+      // the cloak recovery path too.
+      petWindowRuntime.recoverIfCloaked();
     }
     if (shouldOpenSettingsWindowFromArgv(commandLine)) {
       settingsWindowRuntime.openWhenReady();
@@ -3988,6 +4065,16 @@ if (!gotTheLock) {
       ),
     });
     systemWakeRecovery.start();
+    // #525: sleep/wake and lock/unlock are prime DWM-cloak moments. Hang the
+    // cloak recovery directly on powerMonitor rather than onRecovered above:
+    // onRecovered only fires after a renderer round-trip and is skipped on
+    // timeout (system-wake-recovery.js finishWithTimeout), while un-cloaking is
+    // a main-process concern that must not depend on renderer health. The two
+    // paths coexist; recoverIfCloaked() is a no-op when nothing is cloaked.
+    if (isWin) {
+      powerMonitor.on("resume", () => petWindowRuntime.recoverIfCloaked());
+      powerMonitor.on("unlock-screen", () => petWindowRuntime.recoverIfCloaked());
+    }
     // macOS: bridge the OS app-hidden state (⌘H / Dock right-click → 隐藏) to the
     // pet. Pet windows are setCanHide:NO, so the OS marks the app hidden but the
     // windows refuse to vanish, and an inactive-app Dock Hide fires no
@@ -4053,6 +4140,9 @@ if (!gotTheLock) {
   app.on("before-quit", () => {
     isQuitting = true;
     if (systemWakeRecovery) systemWakeRecovery.dispose();
+    // #525: release the IVirtualDesktopManager COM ref and pay back our own
+    // CoInitializeEx count (see win-cloak-recovery.js dispose()).
+    _cloakInspector.dispose();
     try { stopUpdateScheduler(); } catch {}
     releasePowerSaveBlocker();
     flushRuntimeStateToPrefs();

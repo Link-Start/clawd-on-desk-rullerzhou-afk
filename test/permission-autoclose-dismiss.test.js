@@ -296,11 +296,11 @@ describe("permission autoclose: no-decision dismiss semantics", () => {
     // status code / destroy / focusTerminal stay untouched.
     const { resolvePermissionEntry, pendingPermissions } = initPermission(ctx);
     const permEntry = makePermEntry({
-      isOpencode: true,
+      agentId: "opencode",
       res: null,
-      opencodeRequestId: "per_test",
-      opencodeBridgeUrl: "http://127.0.0.1:1/reply", // intentionally unreachable
-      opencodeBridgeToken: "token",
+      familyRequestId: "per_test",
+      familyBridgeUrl: "http://127.0.0.1:1/reply", // intentionally unreachable
+      familyBridgeToken: "token",
     });
     pendingPermissions.push(permEntry);
 

@@ -754,6 +754,21 @@
       return handled;
     }
     if (!changes || typeof changes !== "object") return false;
+    // #509: an idleVisual-only broadcast leaves the option list unchanged —
+    // patch the cached selection and re-sync the mounted picker instead of a
+    // full re-render (which would flicker the optimistic label away).
+    if (Object.keys(changes).length === 1 && Object.prototype.hasOwnProperty.call(changes, "idleVisual")) {
+      const info = runtime.animationOverridesData && runtime.animationOverridesData.idleDefaultVisual;
+      if (info) {
+        const stored = (changes.idleVisual || {})[info.themeId];
+        const valid = typeof stored === "string"
+          && info.options.some((option) => option.file === stored && !option.isThemeDefault);
+        info.selectedFile = valid ? stored : null;
+        const picker = state.mountedControls && state.mountedControls.idleVisualPicker;
+        if (picker && typeof picker.syncFromData === "function") picker.syncFromData();
+      }
+      return true;
+    }
     if (!Object.prototype.hasOwnProperty.call(changes, "themeOverrides")) return false;
     if (Object.keys(changes).length !== 1) return false;
     if (Object.prototype.hasOwnProperty.call(changes, "theme")
@@ -872,6 +887,168 @@
     return "";
   }
 
+  // #509: default idle visual picker — which look the pet rests in while
+  // idle. Options come from the active theme (states.idle + idleAnimations);
+  // selection applies live, so the pet itself is the preview.
+  function buildIdleVisualPickerRow() {
+    const info = runtime.animationOverridesData && runtime.animationOverridesData.idleDefaultVisual;
+    if (!info || !Array.isArray(info.options) || info.options.length <= 1) return null;
+    const defaultOption = info.options.find((option) => option.isThemeDefault) || info.options[0];
+
+    const wrap = document.createElement("div");
+    wrap.className = "anim-idle-visual-row";
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML =
+      `<div class="row-text">` +
+        `<span class="row-label"></span>` +
+        `<span class="row-desc"></span>` +
+      `</div>` +
+      `<div class="row-control">` +
+        `<div class="language-picker">` +
+          `<button type="button" class="language-picker-trigger" aria-haspopup="listbox" aria-expanded="false">` +
+            `<span class="language-picker-value"></span>` +
+            `<span class="language-picker-chevron" aria-hidden="true"></span>` +
+          `</button>` +
+          `<div class="language-picker-menu" role="listbox" aria-hidden="true"></div>` +
+        `</div>` +
+      `</div>`;
+    row.querySelector(".row-label").textContent = t("animIdleVisualLabel");
+    row.querySelector(".row-desc").textContent = t("animIdleVisualDesc");
+    const picker = row.querySelector(".language-picker");
+    const trigger = row.querySelector(".language-picker-trigger");
+    const valueEl = row.querySelector(".language-picker-value");
+    const menu = row.querySelector(".language-picker-menu");
+    trigger.setAttribute("aria-label", t("animIdleVisualLabel"));
+
+    const getLabel = (option) => (option.isThemeDefault ? t("animIdleVisualThemeDefault") : option.label || option.file);
+    const currentFile = info.selectedFile || defaultOption.file;
+    let activeFile = currentFile;
+    const options = [];
+    for (const optionInfo of info.options) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "language-picker-option";
+      option.setAttribute("role", "option");
+      option.setAttribute("data-file", optionInfo.file);
+      option.setAttribute("aria-selected", optionInfo.file === currentFile ? "true" : "false");
+      option.textContent = getLabel(optionInfo);
+      menu.appendChild(option);
+      options.push(option);
+    }
+    function getOption(file) {
+      return options.find((option) => option.dataset.file === file) || options[0] || null;
+    }
+    function syncDisplay(file) {
+      const selected = info.options.some((option) => option.file === file) ? file : defaultOption.file;
+      activeFile = selected;
+      const selectedInfo = info.options.find((option) => option.file === selected) || defaultOption;
+      valueEl.textContent = getLabel(selectedInfo);
+      const open = picker.classList.contains("open");
+      for (const option of options) {
+        const isSelected = option.dataset.file === selected;
+        option.classList.toggle("selected", isSelected);
+        option.setAttribute("aria-selected", isSelected ? "true" : "false");
+        option.tabIndex = open && isSelected ? 0 : -1;
+      }
+    }
+    function setOpen(open) {
+      picker.classList.toggle("open", open);
+      trigger.setAttribute("aria-expanded", open ? "true" : "false");
+      menu.setAttribute("aria-hidden", open ? "false" : "true");
+      syncDisplay(activeFile);
+      if (!open) return;
+      const option = getOption(activeFile);
+      if (option && typeof option.focus === "function") option.focus();
+    }
+    function chooseIdleVisual(next) {
+      if (next === activeFile) {
+        setOpen(false);
+        return;
+      }
+      syncDisplay(next);
+      setOpen(false);
+      const revertIfStillPending = () => {
+        const latest = runtime.animationOverridesData && runtime.animationOverridesData.idleDefaultVisual;
+        if (activeFile === next) syncDisplay((latest && latest.selectedFile) || defaultOption.file);
+      };
+      // Success needs no explicit refresh: the idleVisual broadcast lands in
+      // patchInPlace, which updates the cached selection and re-syncs this row.
+      window.settingsAPI.command("setIdleVisual", { themeId: info.themeId, file: next }).then((result) => {
+        if (!result || result.status !== "ok") {
+          const msg = (result && result.message) || "unknown error";
+          ops.showToast(t("toastSaveFailed") + msg, { error: true });
+          revertIfStillPending();
+        }
+      }).catch((err) => {
+        ops.showToast(t("toastSaveFailed") + ((err && err.message) || "unknown error"), { error: true });
+        revertIfStillPending();
+      });
+    }
+    trigger.addEventListener("click", () => {
+      setOpen(!picker.classList.contains("open"));
+    });
+    trigger.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        setOpen(true);
+      }
+    });
+    for (const option of options) {
+      option.addEventListener("click", () => chooseIdleVisual(option.dataset.file));
+      option.addEventListener("keydown", (event) => {
+        const index = options.indexOf(option);
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setOpen(false);
+          if (typeof trigger.focus === "function") trigger.focus();
+          return;
+        }
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          chooseIdleVisual(option.dataset.file);
+          return;
+        }
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          const delta = event.key === "ArrowDown" ? 1 : -1;
+          const nextOption = options[(index + delta + options.length) % options.length];
+          if (nextOption && typeof nextOption.focus === "function") nextOption.focus();
+        }
+      });
+    }
+    const closeOnOutsideClick = (event) => {
+      if (!picker.classList.contains("open")) return;
+      if (picker.contains(event.target)) return;
+      setOpen(false);
+    };
+    const closeOnEscape = (event) => {
+      if (event.key !== "Escape" || !picker.classList.contains("open")) return;
+      event.preventDefault();
+      setOpen(false);
+    };
+    if (document && typeof document.addEventListener === "function") {
+      document.addEventListener("click", closeOnOutsideClick);
+      document.addEventListener("keydown", closeOnEscape);
+      state.mountedControls.idleVisualPicker = {
+        syncFromData: () => {
+          if (!document.body || !document.body.contains(row)) return;
+          const latest = runtime.animationOverridesData && runtime.animationOverridesData.idleDefaultVisual;
+          syncDisplay((latest && latest.selectedFile) || defaultOption.file);
+        },
+        dispose: () => {
+          if (typeof document.removeEventListener === "function") {
+            document.removeEventListener("click", closeOnOutsideClick);
+            document.removeEventListener("keydown", closeOnEscape);
+          }
+        },
+      };
+    }
+    syncDisplay(currentFile);
+    wrap.appendChild(row);
+    return wrap;
+  }
+
   function buildAnimOverrideSection(section) {
     const wrapper = document.createElement("section");
     wrapper.className = "anim-override-section";
@@ -892,6 +1069,11 @@
       head.appendChild(subtitle);
     }
     wrapper.appendChild(head);
+
+    if (section.id === "idle") {
+      const idleVisualRow = buildIdleVisualPickerRow();
+      if (idleVisualRow) wrapper.appendChild(idleVisualRow);
+    }
 
     const list = document.createElement("div");
     list.className = "anim-override-list";

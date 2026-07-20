@@ -15,7 +15,7 @@ const {
   shouldBypassCCSubagentBubble,
   shouldBypassCodexBubble,
   shouldBypassCopilotBubble,
-  shouldBypassOpencodeBubble,
+  shouldBypassFamilyBubble,
 } = require("../src/server-route-permission");
 
 function makeReq(body) {
@@ -57,7 +57,7 @@ function makeCtx(overrides = {}) {
     updateSession: [],
     showPermissionBubble: [],
     sendPermissionResponse: [],
-    replyOpencodePermission: [],
+    replyOpencodeFamilyPermission: [],
     resolved: [],
     maybeStartRemoteApproval: [],
     addPendingPermission: [],
@@ -80,7 +80,7 @@ function makeCtx(overrides = {}) {
       res.writeHead(200);
       res.end(behavior);
     },
-    replyOpencodePermission: (payload) => calls.replyOpencodePermission.push(payload),
+    replyOpencodeFamilyPermission: (payload) => calls.replyOpencodeFamilyPermission.push(payload),
     resolvePermissionEntry: (entry, behavior, message) => calls.resolved.push({ entry, behavior, message }),
     maybeStartRemoteApproval: (entry) => calls.maybeStartRemoteApproval.push(entry),
     addPendingPermission(entry) {
@@ -137,9 +137,9 @@ describe("server-route-permission helpers", () => {
     assert.strictEqual(shouldBypassCodexBubble({
       isAgentPermissionsEnabled: (agentId) => agentId !== "codex",
     }), true);
-    assert.strictEqual(shouldBypassOpencodeBubble({
+    assert.strictEqual(shouldBypassFamilyBubble({
       isAgentPermissionsEnabled: (agentId) => agentId !== "opencode",
-    }), true);
+    }, "opencode"), true);
     assert.strictEqual(shouldBypassCopilotBubble({ hideBubbles: true }), true);
     assert.strictEqual(shouldBypassCopilotBubble({
       isAgentPermissionsEnabled: (agentId) => agentId !== "copilot-cli",
@@ -298,7 +298,7 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(res.body, "ok");
     assert.deepStrictEqual(res.recorder.map((entry) => entry.outcome).filter(Boolean), ["disabled"]);
     assert.deepStrictEqual(res.ctx.pendingPermissions, []);
-    assert.deepStrictEqual(res.ctx.calls.replyOpencodePermission, []);
+    assert.deepStrictEqual(res.ctx.calls.replyOpencodeFamilyPermission, []);
   });
 
   it("routes opencode permissions by hook_source when agent_id is missing", async () => {
@@ -317,7 +317,7 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(res.ctx.pendingPermissions.length, 1);
     const entry = res.ctx.pendingPermissions[0];
     assert.strictEqual(entry.agentId, "opencode");
-    assert.strictEqual(entry.isOpencode, true);
+    assert.strictEqual(entry.familyRequestId, "req-1");
     assert.deepStrictEqual(res.ctx.calls.updateSession, [[
       "opencode:s1",
       "notification",
@@ -348,7 +348,58 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.recorder.map((entry) => entry.outcome).filter(Boolean), ["accepted"]);
     assert.deepStrictEqual(res.ctx.pendingPermissions, []);
     assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
-    assert.deepStrictEqual(res.ctx.calls.replyOpencodePermission, []);
+    assert.deepStrictEqual(res.ctx.calls.replyOpencodeFamilyPermission, []);
+  });
+
+  it("silently drops opencode permissions during DND — no bubble, no bridge reply", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "opencode",
+      session_id: "opencode:dnd",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      request_id: "req-dnd",
+      bridge_url: "http://127.0.0.1:1234",
+      bridge_token: "token",
+    }), {
+      ctx: { doNotDisturb: true },
+    });
+
+    // Fire-and-forget: 200 ACK satisfies the plugin; skipping the bridge
+    // reply lets the TUI fall back to its own prompt.
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.body, "ok");
+    assert.deepStrictEqual(res.recorder.map((entry) => entry.outcome).filter(Boolean), ["dnd"]);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.ctx.calls.replyOpencodeFamilyPermission, []);
+  });
+
+  it("rescues a failed opencode bubble with an immediate bridge reject", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "opencode",
+      session_id: "opencode:boom",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      request_id: "req-boom",
+      bridge_url: "http://127.0.0.1:1234",
+      bridge_token: "token",
+    }), {
+      ctx: {
+        showPermissionBubble: () => { throw new Error("BrowserWindow boom"); },
+      },
+    });
+
+    assert.strictEqual(res.statusCode, 200);
+    // Ghost entry popped, TUI unblocked via reject — without this the plugin
+    // waits on the bridge until its own multi-minute timeout.
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.strictEqual(res.ctx.calls.replyOpencodeFamilyPermission.length, 1);
+    const reply = res.ctx.calls.replyOpencodeFamilyPermission[0];
+    assert.strictEqual(reply.agentId, "opencode");
+    assert.strictEqual(reply.reply, "reject");
+    assert.strictEqual(reply.requestId, "req-boom");
+    assert.strictEqual(reply.bridgeUrl, "http://127.0.0.1:1234");
+    assert.strictEqual(reply.bridgeToken, "token");
   });
 
   it("destroys the Claude/CodeBuddy connection during DND", async () => {
