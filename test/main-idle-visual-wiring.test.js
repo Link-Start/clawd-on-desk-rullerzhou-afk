@@ -5,21 +5,27 @@ const path = require("node:path");
 
 const MAIN_JS = path.join(__dirname, "..", "src", "main.js");
 
+function sectionBetween(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.notStrictEqual(start, -1, `missing section start: ${startMarker}`);
+  assert.notStrictEqual(end, -1, `missing section end: ${endMarker}`);
+  return source.slice(start, end);
+}
+
 describe("main default idle visual wiring", () => {
   const mainSource = fs.readFileSync(MAIN_JS, "utf8");
 
-  it("resolves the choice against the live theme and exposes it to both runtime ctxs", () => {
+  it("resolves the choice against the live theme and wires both named runtime ctxs", () => {
     assert.ok(mainSource.includes('require("./idle-visual")'));
     assert.match(
       mainSource,
       /function getIdleVisualChoice\(\) \{\s*return resolveIdleVisualChoice\(getActiveTheme\(\), _settingsController\.get\("idleVisual"\)\);/
     );
-    const ctxExposures = mainSource.match(/^  getIdleVisualChoice,$/gm) || [];
-    assert.strictEqual(
-      ctxExposures.length,
-      2,
-      "state ctx and tick ctx should both expose getIdleVisualChoice"
-    );
+    const stateCtx = sectionBetween(mainSource, "const _stateCtx = {", 'const _state = require("./state")');
+    const tickCtx = sectionBetween(mainSource, "const _tickCtx = {", 'const _tick = require("./tick")');
+    assert.ok(stateCtx.includes("  getIdleVisualChoice,"), "state ctx should expose the live choice");
+    assert.ok(tickCtx.includes("  getIdleVisualChoice,"), "tick ctx should expose the live choice");
   });
 
   it("stamps idleDefaultVisual on both renderer theme-config delivery paths", () => {

@@ -859,6 +859,52 @@ describe("renderer file-aware idle eye tracking", () => {
     assert.strictEqual(harness.api.eyeTarget, null);
   });
 
+  it("does not reattach stale eye tracking on eye move for a non-follow idle visual", () => {
+    const harness = createRendererHarness({
+      themeConfig: { idleFollowSvg: "clawd-idle-follow.svg" },
+    });
+    const nonFollowObject = restOnIdleVisual(
+      harness,
+      "clawd-idle-reading.svg",
+      { withEyes: true }
+    );
+
+    // Simulate tracking left behind by an older renderer or a theme reload,
+    // then replace the object's document so onEyeMove sees a stale target.
+    harness.api.attachEyeTracking(nonFollowObject);
+    assert.ok(harness.api.eyeTarget);
+    const replacementSvg = attachFakeSvgDocument(nonFollowObject, { withEyes: true });
+
+    harness.electronHandlers.onEyeMove(2, -1);
+
+    assert.strictEqual(harness.api.eyeTarget, null);
+    assert.equal(replacementSvg.elements.get("eyes-js").getAttribute("transform"), "");
+    assert.equal(
+      drainActiveTimers(harness, (timer) => timer.ms === 16 && !timer.cleared),
+      0,
+      "non-follow idle must not schedule an eye-target reattach retry"
+    );
+  });
+
+  it("detaches stale eye tracking when the same non-follow idle visual is re-entered", () => {
+    const harness = createRendererHarness({
+      themeConfig: { idleFollowSvg: "clawd-idle-follow.svg" },
+    });
+    const nonFollowObject = restOnIdleVisual(
+      harness,
+      "clawd-idle-reading.svg",
+      { withEyes: true }
+    );
+    harness.api.attachEyeTracking(nonFollowObject);
+    assert.ok(harness.api.eyeTarget);
+
+    harness.electronHandlers.onStateChange("idle", "clawd-idle-reading.svg");
+
+    assert.strictEqual(harness.api.clawdEl, nonFollowObject);
+    assert.strictEqual(harness.api.pendingNext, null, "same-file re-entry must not swap media");
+    assert.strictEqual(harness.api.eyeTarget, null);
+  });
+
   it("still attaches eye tracking for mini-idle regardless of the idle choice", () => {
     const harness = createRendererHarness({
       themeConfig: { idleFollowSvg: "clawd-idle-follow.svg" },

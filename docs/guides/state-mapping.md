@@ -6,6 +6,8 @@ Most lifecycle events from agents (Claude Code hooks, Codex JSONL, Copilot hooks
 
 Subagent events still map to the logical `juggling` state, but Clawd now chooses a tiered asset by live subagent count: 1 subagent uses `clawd-headphones-groove.svg`, while 2+ subagents use `clawd-working-juggling.svg`. The old Clawd conducting asset is retired; Calico and Cloudling still use their conducting animations for their 2+ subagent tier.
 
+The idle rows below describe the theme's stock behavior. Settings → Animation / Sound → Animation can instead choose any idle visual declared by the active theme as its persistent resting look. This changes only the visual shown while the logical state is `idle`: task, permission, completion, sleep, reaction, and roam states still take precedence and return to the selected look afterward. The choice is stored per theme and falls back to the theme default if the file disappears. Non-default idle visuals intentionally do not use cursor eye tracking or spin-to-dizzy.
+
 | Agent Event | State | Animation | Clawd | Calico | Cloudling |
 |---|---|---|---|---|---|
 | Idle (no activity) | idle | Eye-tracking follow | <img src="../../assets/gif/clawd-idle.gif" width="160"> | <img src="../../assets/gif/calico-idle.gif" width="130"> | <img src="../../assets/gif/cloudling-idle.gif" width="140"> |
