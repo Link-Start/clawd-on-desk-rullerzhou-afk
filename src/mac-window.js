@@ -195,6 +195,36 @@ function applyStationaryCollectionBehavior(browserWindow) {
   }
 }
 
+function runDeDelegateTransaction({
+  activeSpace,
+  level,
+  addToActiveSpace,
+  removeFromPrivateSpace,
+  setNativeLevel,
+  restoreStationary,
+  onFailure,
+}) {
+  if (!activeSpace) return false;
+
+  try {
+    // Give the window a valid user-Space home before removing its only known
+    // private-Space membership. Reversing these calls can strand the window
+    // off-screen when the active Space cannot be resolved.
+    addToActiveSpace();
+    removeFromPrivateSpace();
+    setNativeLevel(level);
+    return true;
+  } catch (err) {
+    // The add/remove/level sequence is one transaction from the caller's point
+    // of view. If any step fails, make the original stationary configuration
+    // visible and clickable again as far as the remaining native calls allow.
+    try { restoreStationary(); } catch {}
+    try { setNativeLevel(CGAssistiveTechHighWindowLevel); } catch {}
+    try { if (onFailure) onFailure(err); } catch {}
+    return false;
+  }
+}
+
 // #640 Phase 2 — reverse of applyStationaryCollectionBehavior's space delegation.
 // While a text field is focused the editing bubble drops to the normal window
 // level (#626), but the pet stays in the private absolute-level-100 space and
@@ -228,17 +258,36 @@ function deDelegateWindowFromStationarySpace(browserWindow, level = 0) {
       SLSGetActiveSpace,
     } = initSkyLight();
 
-    // 1. Explicitly leave the private absolute-level space.
-    SLSRemoveWindowsFromSpaces(connection, makeNSNumberArray(windowNumber), makeNSNumberArray(space));
-    // 2. Land in the current user space so the window keeps a valid on-screen home.
+    // Resolve the landing Space before mutating any window membership. If the
+    // lookup fails or returns 0, leave the stationary setup untouched so the
+    // caller can safely use the visible 18% fade fallback.
     const activeSpace = Number(BigInt(SLSGetActiveSpace(connection))) || 0;
-    if (activeSpace) {
-      SLSSpaceAddWindowsAndRemoveFromSpaces(connection, activeSpace, makeNSNumberArray(windowNumber), 7);
-    }
-    // 3. Drop the native level applyStationaryCollectionBehavior raised to
-    //    CGAssistiveTechHighWindowLevel (Electron's setAlwaysOnTop can't undo it).
-    msgVoidLong(nsWindow, selSetLevel, level);
-    return true;
+    if (!activeSpace) return false;
+
+    const windows = makeNSNumberArray(windowNumber);
+    const privateSpaces = makeNSNumberArray(space);
+    return runDeDelegateTransaction({
+      activeSpace,
+      level,
+      addToActiveSpace: () => {
+        SLSSpaceAddWindowsAndRemoveFromSpaces(connection, activeSpace, windows, 7);
+      },
+      removeFromPrivateSpace: () => {
+        SLSRemoveWindowsFromSpaces(connection, windows, privateSpaces);
+      },
+      setNativeLevel: (nextLevel) => {
+        msgVoidLong(nsWindow, selSetLevel, nextLevel);
+      },
+      restoreStationary: () => {
+        delegateWindowToStationarySpace(nsWindow);
+      },
+      onFailure: (err) => {
+        if (!warnedSkyLightFailure) {
+          console.warn("Clawd: failed to de-delegate window from stationary SkyLight space:", err.message);
+          warnedSkyLightFailure = true;
+        }
+      },
+    });
   } catch (err) {
     if (!warnedSkyLightFailure) {
       console.warn("Clawd: failed to de-delegate window from stationary SkyLight space:", err.message);
@@ -251,4 +300,7 @@ function deDelegateWindowFromStationarySpace(browserWindow, level = 0) {
 module.exports = {
   applyStationaryCollectionBehavior,
   deDelegateWindowFromStationarySpace,
+  __test: {
+    runDeDelegateTransaction,
+  },
 };
