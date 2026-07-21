@@ -5044,7 +5044,12 @@ describe("settings renderer browser environment", () => {
     assert.ok(harness.content.querySelector(".custom-agent-remove"));
     assert.ok(harness.content.querySelector(".custom-registration"));
     assert.ok(harness.content.querySelector(".custom-agent-copy"));
-    assert.strictEqual(harness.content.querySelector(".agent-badge.accent"), null);
+    assert.strictEqual(
+      harness.content
+        .querySelectorAll(".agent-badge")
+        .some((badge) => badge.classList.contains("accent")),
+      false
+    );
 
     const activity = harness.content.querySelector(".custom-agent-activity");
     assert.ok(!activity.textContent.includes("PreToolUse"));

@@ -227,6 +227,7 @@ describe("agent installation detector", () => {
     const homeDir = makeHome();
     const customExe = path.join(homeDir, "CustomAI.exe");
     writeText(customExe, "");
+    fs.chmodSync(customExe, 0o755);
 
     const report = detectAgentInstallations({
       homeDir,
