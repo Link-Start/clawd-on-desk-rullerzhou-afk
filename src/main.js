@@ -121,6 +121,7 @@ const {
   getProportionalPixelSize,
 } = require("./size-utils");
 const { keepOutOfTaskbar } = require("./taskbar");
+const { loadTrayNormalIcon, loadTrayFlashIcon } = require("./tray-flash-icon");
 const createTopmostRuntime = require("./topmost-runtime");
 const { WIN_TOPMOST_LEVEL } = createTopmostRuntime;
 const createThemeFadeSequencer = require("./theme-fade-sequencer");
@@ -1167,27 +1168,24 @@ function flashTaskbar() {
 
   // Cache the normal icon on first call
   if (!trayFlashNormalIcon) {
-    if (process.platform === "darwin") {
-      trayFlashNormalIcon = nativeImage.createFromPath(
-        path.join(__dirname, "../assets/tray-iconTemplate.png")
-      );
-      trayFlashNormalIcon.setTemplateImage(true);
-    } else {
-      trayFlashNormalIcon = nativeImage.createFromPath(
-        path.join(__dirname, "../assets/tray-icon.png")
-      ).resize({ width: 32, height: 32 });
-    }
+    trayFlashNormalIcon = loadTrayNormalIcon({
+      nativeImage,
+      platform: process.platform,
+      templatePath: path.join(__dirname, "../assets/tray-iconTemplate.png"),
+      iconPath: path.join(__dirname, "../assets/tray-icon.png"),
+    });
   }
 
-  // Cache the highlight icon (orange circle) on first call
+  // Cache the highlight icon (orange dot) on first call. #722: it has to come
+  // back at the same point size as the normal icon, otherwise each blink
+  // resizes the tray icon and reflows the menu bar.
   if (!trayFlashHighlightIcon) {
-    const flashPath = path.join(__dirname, "../assets/tray-icon-flash.png");
-    if (fs.existsSync(flashPath)) {
-      const img = nativeImage.createFromPath(flashPath).resize({ width: 32, height: 32 });
-      if (!img.isEmpty()) {
-        trayFlashHighlightIcon = img;
-      }
-    }
+    trayFlashHighlightIcon = loadTrayFlashIcon({
+      nativeImage,
+      platform: process.platform,
+      flashPath: path.join(__dirname, "../assets/tray-icon-flash.png"),
+      fileExists: (p) => fs.existsSync(p),
+    });
   }
 
   if (!trayFlashHighlightIcon) return;
