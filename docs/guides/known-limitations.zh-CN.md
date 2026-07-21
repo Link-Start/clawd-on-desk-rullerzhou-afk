@@ -12,6 +12,7 @@
 | **Antigravity CLI：无权限气泡（仅状态同步）** | Clawd **不会为 agy 弹任何权限气泡**。所有 Allow / Deny / Always-allow 决策都在 agy 自己的 5 选项终端菜单里完成（同意 / 同意并持久 / 拒绝 / 永远拒绝 / 永远拒绝并持久）。想要永久规则就在 agy 菜单里选择标有「Persist to settings.json」的选项 —— 规则落到 `~/.gemini/antigravity-cli/settings.json`，你也可以在那里清理。dogfooding 显示在它之上再加 Clawd bubble 会让单次任务变 8-10 次确认，因此设计上让 agy 完全拥有权限流程。桌宠仍通过 PreInvocation / PostToolUse / Stop hook 反映 working / idle / attention 状态。 |
 | **Cursor Agent：无权限气泡** | Cursor 在 hook 的 stdout JSON 里处理权限，而不是走 HTTP 阻塞式审批，Clawd 无法接管这条审批链路。 |
 | **Cursor Agent：启动恢复能力有限** | 启动时不做进程检测，否则任意 Cursor 编辑器进程都可能误判为活跃会话。Clawd 会保持 idle，直到收到第一条 hook 事件。 |
+| **自定义 HTTP Agent：仅状态，且需要发送端** | 注册可执行文件只会分配 ID 并公开 `/state` 合约，不会安装 hook、观察进程，也不能证明该应用是 AI 工具。应用或 adapter 必须读取 `~/.clawd/runtime.json` 的当前端口并主动上报。custom v1 不支持 `/permission`，审批仍在应用自己的界面完成。 |
 | **Hermes Agent：使用前需要安装集成** | Hermes 会显示在 Settings 里，但新安装默认是 Not installed。Clawd 只有在你显式安装该集成、且检测到真实 Hermes 安装后才会写入 plugin 文件。安装 Hermes 后，在 **Settings -> Agents -> Install** 里安装，或执行 `npm run install:hermes-plugin`。 |
 | **Hermes Agent：部分支持权限气泡** | Hermes plugin 事件已覆盖状态、会话、SessionEnd、工具活动、终端聚焦、clarify 交互提问气泡，以及 plugin 发起的权限气泡。Clawd 尚未完全取代 Hermes 原生审批菜单：在上游提供阻塞式审批结果 hook 前，`once` / `session` / `always` 的持久化仍由 Hermes 处理。Subagent 生命周期仍需上游提供成对的 start/stop 事件。 |
 | **Kiro CLI：无法区分会话** | Kiro CLI stdin JSON 不含 session_id，所有 Kiro 会话会被合并为单个追踪会话。 |

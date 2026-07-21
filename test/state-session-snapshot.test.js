@@ -676,4 +676,23 @@ describe("state-session-snapshot builder", () => {
     const flagged = buildSessionSnapshot(flaggedSessions, { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null });
     assert.notStrictEqual(sessionSnapshotSignature(base), sessionSnapshotSignature(flagged));
   });
+
+  it("exposes a resolved custom agent name and includes it in the snapshot signature", () => {
+    const sessions = new Map([
+      ["custom-session", session("working", { agentId: "custom-nova-0123456789ab" })],
+    ]);
+    const nova = buildSessionSnapshot(sessions, {
+      statePriority: STATE_PRIORITY,
+      getAgentIconUrl: () => null,
+      resolveAgentDisplayName: () => "Nova AI",
+    });
+    const renamed = buildSessionSnapshot(sessions, {
+      statePriority: STATE_PRIORITY,
+      getAgentIconUrl: () => null,
+      resolveAgentDisplayName: () => "Nova Desktop",
+    });
+
+    assert.strictEqual(nova.sessions[0].agentName, "Nova AI");
+    assert.notStrictEqual(sessionSnapshotSignature(nova), sessionSnapshotSignature(renamed));
+  });
 });

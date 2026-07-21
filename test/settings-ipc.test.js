@@ -188,6 +188,8 @@ function createHarness(overrides = {}) {
     getSoundMuted: overrides.getSoundMuted || (() => false),
     getSoundVolume: overrides.getSoundVolume || (() => 0.4),
     getAllAgents: overrides.getAllAgents || (() => []),
+    getHookServerPort: overrides.getHookServerPort,
+    getRecentHookEvents: overrides.getRecentHookEvents,
     detectAgentInstallations: overrides.detectAgentInstallations,
     checkForUpdates: (manual) => calls.push(["checkForUpdates", manual]),
     showTutorial: overrides.showTutorial || (() => {
@@ -608,11 +610,55 @@ test("settings IPC serves agent/about/update/external and remove-theme dialog he
       getAllAgents: () => [
         { id: "codex", name: "Codex", eventSource: "hook", capabilities: { permission: true } },
       ],
+      getHookServerPort: () => 23335,
+      getRecentHookEvents: ({ agentId }) => [{
+        timestamp: 12345,
+        agentId,
+        eventType: "PreToolUse",
+        route: "state",
+        outcome: "accepted",
+      }],
+      settingsController: {
+        getSnapshot: () => ({
+          lang: "en",
+          customApplications: [{
+            id: "custom-nova-ai-0123456789ab",
+            name: "Nova AI",
+            sourcePath: "C:\\NovaAI",
+            executablePath: "C:\\NovaAI\\NovaAI.exe",
+            processName: "NovaAI.exe",
+            category: "code",
+          }],
+        }),
+        applyUpdate: () => ({ status: "ok" }),
+        applyCommand: async () => ({ status: "ok" }),
+      },
     });
 
     assert.strictEqual(await ipcMain.invoke("settings:get-preview-sound-url"), "file:///preview.mp3");
     assert.deepStrictEqual(await ipcMain.invoke("settings:list-agents"), [
       { id: "codex", name: "Codex", eventSource: "hook", capabilities: { permission: true } },
+      {
+        id: "custom-nova-ai-0123456789ab",
+        name: "Nova AI",
+        category: "code",
+        eventSource: "custom-http",
+        custom: true,
+        sourcePath: "C:\\NovaAI",
+        executablePath: "C:\\NovaAI\\NovaAI.exe",
+        processName: "NovaAI.exe",
+        stateEndpoint: "http://127.0.0.1:23335/state",
+        lastStateEvent: { timestamp: 12345, eventType: "PreToolUse" },
+        capabilities: {
+          httpHook: true,
+          permissionApproval: false,
+          interactiveBubble: false,
+          notificationHook: true,
+          sessionEnd: true,
+          subagent: false,
+          managedIntegration: false,
+        },
+      },
     ]);
     assert.deepStrictEqual(await ipcMain.invoke("settings:get-about-info"), {
       version: "1.2.3",
@@ -645,6 +691,34 @@ test("settings IPC serves agent/about/update/external and remove-theme dialog he
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("settings IPC picks executable files and installation folders for discovery", async () => {
+  const selections = ["C:\\Tools\\agent.exe", "C:\\Tools\\Agent"];
+  const optionsSeen = [];
+  const { ipcMain } = createHarness({
+    dialog: {
+      showOpenDialog: async (_parent, options) => {
+        optionsSeen.push(options);
+        return { canceled: false, filePaths: [selections[optionsSeen.length - 1]] };
+      },
+      showMessageBox: async () => ({ response: 1 }),
+    },
+  });
+
+  assert.deepStrictEqual(await ipcMain.invoke("settings:pick-agent-discovery-path", { kind: "file" }), {
+    status: "ok",
+    path: selections[0],
+  });
+  assert.deepStrictEqual(await ipcMain.invoke("settings:pick-agent-discovery-path", { kind: "directory" }), {
+    status: "ok",
+    path: selections[1],
+  });
+  assert.deepStrictEqual(optionsSeen.map((options) => options.properties), [["openFile"], ["openDirectory"]]);
+  assert.deepStrictEqual(await ipcMain.invoke("settings:pick-agent-discovery-path", { kind: "anything" }), {
+    status: "error",
+    message: "pickAgentDiscoveryPath.kind must be file or directory",
+  });
 });
 
 test("settings IPC exposes read-only agent installation detection", async () => {

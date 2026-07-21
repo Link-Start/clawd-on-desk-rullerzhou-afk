@@ -48,7 +48,15 @@
 // prefs without writing them right back. Object-form entries must therefore
 // keep validate side-effect-free.
 
-const { CURRENT_VERSION } = require("./prefs");
+const {
+  CURRENT_VERSION,
+  MAX_CUSTOM_DISCOVERY_PATHS,
+  normalizePathList,
+} = require("./prefs");
+const {
+  MAX_CUSTOM_APPLICATIONS,
+  normalizeCustomApplications,
+} = require("./custom-applications");
 const {
   TEXT_SCALE_MIN,
   TEXT_SCALE_MAX,
@@ -85,6 +93,7 @@ const {
   resetAllShortcuts,
 } = require("./settings-actions-shortcuts");
 const {
+  addCustomApplication,
   clearAgentCleanupHints,
   clearAgentInstallHints,
   deployToWsl,
@@ -92,6 +101,9 @@ const {
   installAgentIntegration,
   dismissAgentInstallHints,
   removeFromWsl,
+  removeCustomApplication,
+  setAgentCustomDiscoveryPaths,
+  setAgentCustomPermissionUrl,
   setAgentFlag,
   setAgentPermissionMode,
   uninstallAgentIntegration,
@@ -421,6 +433,48 @@ const updateRegistry = {
       }
     }
     return { status: "ok" };
+  },
+
+  // Custom application commands commit these top-level prefs fields. Keep
+  // strict registry entries here because the controller rejects every command
+  // commit key that is not registered, even when prefs.js already knows it.
+  customToolDiscoveryPaths(value) {
+    if (!Array.isArray(value)) {
+      return { status: "error", message: "customToolDiscoveryPaths must be an array" };
+    }
+    const normalized = normalizePathList(value, { maxEntries: MAX_CUSTOM_DISCOVERY_PATHS + 1 });
+    if (
+      normalized.length !== value.length
+      || normalized.length > MAX_CUSTOM_DISCOVERY_PATHS
+      || normalized.some((entry, index) => entry !== value[index])
+    ) {
+      return {
+        status: "error",
+        message: `customToolDiscoveryPaths must contain at most ${MAX_CUSTOM_DISCOVERY_PATHS} normalized unique paths`,
+      };
+    }
+    return { status: "ok" };
+  },
+  customApplications(value) {
+    if (!Array.isArray(value) || value.length > MAX_CUSTOM_APPLICATIONS) {
+      return {
+        status: "error",
+        message: `customApplications must be an array with at most ${MAX_CUSTOM_APPLICATIONS} entries`,
+      };
+    }
+    const normalized = normalizeCustomApplications(value);
+    const allowedKeys = new Set(["id", "name", "sourcePath", "executablePath", "processName", "category"]);
+    const isNormalized = normalized.length === value.length && normalized.every((entry, index) => {
+      const original = value[index];
+      return original
+        && typeof original === "object"
+        && !Array.isArray(original)
+        && Object.keys(original).every((key) => allowedKeys.has(key))
+        && Object.keys(entry).every((key) => entry[key] === original[key]);
+    });
+    return isNormalized
+      ? { status: "ok" }
+      : { status: "error", message: "customApplications must contain normalized unique custom application entries" };
   },
 
   // ── Phase 2/3 placeholders — schema reserves these so applyUpdate accepts them ──
@@ -1400,6 +1454,7 @@ function setTextScaleForDisplay(payload, deps) {
 }
 
 const commandRegistry = {
+  addCustomApplication,
   removeTheme,
   installHooks,
   uninstallHooks,
@@ -1411,7 +1466,10 @@ const commandRegistry = {
   dismissAgentInstallHints,
   installAgentIntegration,
   removeFromWsl,
+  removeCustomApplication,
   repairAgentIntegration,
+  setAgentCustomDiscoveryPaths,
+  setAgentCustomPermissionUrl,
   uninstallAgentIntegration,
   repairLocalServer,
   repairDoctorIssue,

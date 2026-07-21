@@ -75,8 +75,21 @@ function createIntegrationSyncRuntime(options = {}) {
   const shouldSyncAgentIntegration = typeof options.shouldSyncAgentIntegration === "function"
     ? options.shouldSyncAgentIntegration
     : isAgentEnabled;
+  const getAgentIntegrationOptions = typeof options.getAgentIntegrationOptions === "function"
+    ? options.getAgentIntegrationOptions
+    : (() => ({}));
   const startClaudeSettingsWatcher = options.startClaudeSettingsWatcher;
   const stopClaudeSettingsWatcher = options.stopClaudeSettingsWatcher;
+
+  function readAgentIntegrationOptions(agentId) {
+    try {
+      const result = getAgentIntegrationOptions(agentId);
+      return result && typeof result === "object" ? result : {};
+    } catch (err) {
+      console.warn(`Clawd: failed to read ${agentId} integration options:`, err && err.message);
+      return {};
+    }
+  }
 
   function syncClawdHooks(options = {}) {
     const source = typeof options.source === "string" ? options.source : null;
@@ -160,11 +173,15 @@ function createIntegrationSyncRuntime(options = {}) {
     }
   }
 
-  function syncCodeBuddyHooks() {
+  function syncCodeBuddyHooks(options = {}) {
     try {
-      if (typeof ctx.syncCodeBuddyHooksImpl === "function") return ctx.syncCodeBuddyHooksImpl();
+      const permissionTarget = options.permissionTarget && typeof options.permissionTarget === "object"
+        ? options.permissionTarget
+        : { mode: "local" };
+      const syncOptions = { ...options, permissionTarget };
+      if (typeof ctx.syncCodeBuddyHooksImpl === "function") return ctx.syncCodeBuddyHooksImpl(syncOptions);
       const { registerCodeBuddyHooks } = require("../hooks/codebuddy-install.js");
-      const result = registerCodeBuddyHooks({ silent: true });
+      const result = registerCodeBuddyHooks({ silent: true, permissionTarget });
       if (hasPositiveCount(result.added) || hasPositiveCount(result.updated)) {
         console.log(`Clawd: synced CodeBuddy hooks (added ${result.added}, updated ${result.updated})`);
       }
@@ -551,7 +568,7 @@ function createIntegrationSyncRuntime(options = {}) {
     }
     const sync = AGENT_INTEGRATION_SYNCERS[agentId];
     if (typeof sync !== "function") return false;
-    const result = sync();
+    const result = sync(options);
     return result && typeof result === "object" ? result : true;
   }
 
@@ -630,7 +647,7 @@ function createIntegrationSyncRuntime(options = {}) {
     // Other agents' syncs are independent files and run in parallel — they do
     // not wait for Claude's (possibly queued/async) sync to settle.
     for (const [agentId, sync] of Object.entries(AGENT_INTEGRATION_SYNCERS)) {
-      if (shouldSyncAgentIntegration(agentId)) sync();
+      if (shouldSyncAgentIntegration(agentId)) sync(readAgentIntegrationOptions(agentId));
     }
   }
 

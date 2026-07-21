@@ -3,6 +3,10 @@
 const {
   AGENT_FLAGS,
   CODEX_PERMISSION_MODES,
+  MAX_CUSTOM_DISCOVERY_PATH_LENGTH,
+  MAX_CUSTOM_DISCOVERY_PATHS,
+  normalizeOptionalHttpUrl,
+  normalizePathList,
 } = require("./prefs");
 const {
   getCodexPermissionMode,
@@ -13,6 +17,14 @@ const {
   requireBoolean,
   requireString,
 } = require("./settings-validators");
+const { getAgent } = require("../agents/registry");
+const {
+  MAX_CUSTOM_APPLICATIONS,
+  identifyCustomApplication: defaultIdentifyCustomApplication,
+  isCustomApplicationId,
+  isCustomApplicationNamespace,
+  normalizeCustomApplications,
+} = require("./custom-applications");
 
 const AUTO_REPAIRABLE_AGENT_IDS = new Set([
   "claude-code",
@@ -58,6 +70,7 @@ const INSTALLABLE_AGENT_IDS = new Set([
   "qoderwork",
 ]);
 const SETTABLE_AGENT_FLAGS = AGENT_FLAGS.filter((flag) => flag !== "integrationInstalled");
+const CUSTOM_DISCOVERY_AGENT_IDS = new Set([...INSTALLABLE_AGENT_IDS, "custom"]);
 
 // setAgentFlag is atomic single-agent, single-flag toggle.
 // Payload `{ agentId, flag, value }` where flag is in AGENT_FLAGS.
@@ -87,6 +100,12 @@ function setAgentFlag(payload, deps) {
     return {
       status: "error",
       message: "setAgentFlag.subagentPermissionsEnabled only supports claude-code",
+    };
+  }
+  if (flag === "permissionsEnabled" && isCustomApplicationNamespace(agentId)) {
+    return {
+      status: "error",
+      message: "setAgentFlag.permissionsEnabled is not supported for custom state-only agents",
     };
   }
   const valueCheck = _validateAgentFlagValue(value);
@@ -146,7 +165,7 @@ function setAgentFlag(payload, deps) {
           isAgentIntegrationInstalled(snapshot, agentId)
           && typeof deps.syncIntegrationForAgent === "function"
         ) {
-          deps.syncIntegrationForAgent(agentId);
+          deps.syncIntegrationForAgent(agentId, buildAgentIntegrationOptions(snapshot, agentId));
         }
         if (typeof deps.startMonitorForAgent === "function") deps.startMonitorForAgent(agentId);
       }
@@ -177,6 +196,8 @@ const _validateUninstallAgentId = requireString("uninstallAgentIntegration.agent
 const _validateDismissInstallHintId = requireString("dismissAgentInstallHints.agentId");
 const _validateDismissCleanupHintId = requireString("dismissAgentCleanupHints.agentId");
 const _validateClearCleanupHintId = requireString("clearAgentCleanupHints.agentId");
+const _validateCustomPermissionUrlAgentId = requireString("setAgentCustomPermissionUrl.agentId");
+const _validateCustomDiscoveryPathsAgentId = requireString("setAgentCustomDiscoveryPaths.agentId");
 
 function setAgentPermissionMode(payload, deps) {
   if (!payload || typeof payload !== "object") {
@@ -257,6 +278,194 @@ function buildAgentCommit(snapshot, agentId, patch) {
   };
 }
 
+function buildAgentIntegrationOptions(snapshot, agentId) {
+  const entry = snapshot && snapshot.agents && snapshot.agents[agentId];
+  if (!entry || typeof entry !== "object") return {};
+  const options = {};
+  if (agentSupportsCustomPermissionUrl(agentId)) {
+    const customPermissionUrl = normalizeOptionalHttpUrl(entry.customPermissionUrl);
+    options.permissionTarget = customPermissionUrl
+      ? { mode: "custom", url: customPermissionUrl }
+      : { mode: "local" };
+  }
+  return options;
+}
+
+function agentSupportsCustomPermissionUrl(agentId) {
+  const agent = getAgent(agentId);
+  return !!(
+    agent
+    && agent.capabilities
+    && agent.capabilities.httpHook
+    && agent.capabilities.customPermissionUrl
+  );
+}
+
+function buildAgentIntegrationOptionsWithPatch(snapshot, agentId, patch) {
+  const currentAgents = (snapshot && snapshot.agents) || {};
+  const currentEntry = currentAgents[agentId] && typeof currentAgents[agentId] === "object"
+    ? currentAgents[agentId]
+    : {};
+  return buildAgentIntegrationOptions({
+    ...snapshot,
+    agents: {
+      ...currentAgents,
+      [agentId]: {
+        ...currentEntry,
+        ...patch,
+      },
+    },
+  }, agentId);
+}
+
+function setAgentCustomPermissionUrl(payload, deps = {}) {
+  if (!payload || typeof payload !== "object") {
+    return { status: "error", message: "setAgentCustomPermissionUrl: payload must be an object" };
+  }
+  const idCheck = _validateCustomPermissionUrlAgentId(payload.agentId);
+  if (idCheck.status !== "ok") return idCheck;
+  if (!agentSupportsCustomPermissionUrl(payload.agentId)) {
+    return {
+      status: "error",
+      message: `setAgentCustomPermissionUrl does not support ${payload.agentId}`,
+    };
+  }
+  if (typeof payload.value !== "string") {
+    return { status: "error", message: "setAgentCustomPermissionUrl.value must be a string" };
+  }
+  const value = normalizeOptionalHttpUrl(payload.value);
+  if (payload.value.trim() && !value) {
+    return { status: "error", message: "setAgentCustomPermissionUrl.value must be an http(s) URL" };
+  }
+  const snapshot = deps.snapshot || {};
+  const current = snapshot.agents && snapshot.agents[payload.agentId];
+  const currentValue = normalizeOptionalHttpUrl(current && current.customPermissionUrl);
+  if (currentValue === value) return { status: "ok", noop: true };
+  try {
+    if (
+      isAgentIntegrationInstalled(snapshot, payload.agentId)
+      && typeof deps.syncIntegrationForAgent === "function"
+    ) {
+      deps.syncIntegrationForAgent(
+        payload.agentId,
+        buildAgentIntegrationOptionsWithPatch(snapshot, payload.agentId, { customPermissionUrl: value })
+      );
+    }
+  } catch (err) {
+    return {
+      status: "error",
+      message: `setAgentCustomPermissionUrl side effect threw: ${err && err.message}`,
+    };
+  }
+  return {
+    status: "ok",
+    commit: buildAgentCommit(snapshot, payload.agentId, { customPermissionUrl: value }),
+  };
+}
+
+function setAgentCustomDiscoveryPaths(payload, deps = {}) {
+  if (!payload || typeof payload !== "object") {
+    return { status: "error", message: "setAgentCustomDiscoveryPaths: payload must be an object" };
+  }
+  const idCheck = _validateCustomDiscoveryPathsAgentId(payload.agentId);
+  if (idCheck.status !== "ok") return idCheck;
+  if (!CUSTOM_DISCOVERY_AGENT_IDS.has(payload.agentId)) {
+    return {
+      status: "error",
+      message: `setAgentCustomDiscoveryPaths does not support ${payload.agentId}`,
+    };
+  }
+  const rawPaths = Array.isArray(payload.value)
+    ? payload.value
+    : (typeof payload.value === "string" ? payload.value.split(/[;\n]/g) : []);
+  if (rawPaths.some((entry) => typeof entry !== "string")) {
+    return { status: "error", message: "setAgentCustomDiscoveryPaths.value must contain only strings" };
+  }
+  if (rawPaths.some((entry) => entry.replace(/\0/g, "").trim().length > MAX_CUSTOM_DISCOVERY_PATH_LENGTH)) {
+    return {
+      status: "error",
+      message: `Discovery paths must be at most ${MAX_CUSTOM_DISCOVERY_PATH_LENGTH} characters`,
+    };
+  }
+  const paths = normalizePathList(payload.value, { maxEntries: MAX_CUSTOM_DISCOVERY_PATHS + 1 });
+  if (paths.length > MAX_CUSTOM_DISCOVERY_PATHS) {
+    return { status: "error", message: `Discovery path limit reached (${MAX_CUSTOM_DISCOVERY_PATHS})` };
+  }
+  const snapshot = deps.snapshot || {};
+  const current = snapshot.agents && snapshot.agents[payload.agentId];
+  const currentPaths = payload.agentId === "custom"
+    ? normalizePathList(snapshot.customToolDiscoveryPaths)
+    : normalizePathList(current && current.customDiscoveryPaths);
+  if (paths.length === currentPaths.length && paths.every((value, index) => value === currentPaths[index])) {
+    return { status: "ok", noop: true };
+  }
+  return payload.agentId === "custom"
+    ? { status: "ok", commit: { customToolDiscoveryPaths: paths } }
+    : {
+      status: "ok",
+      commit: buildAgentCommit(snapshot, payload.agentId, { customDiscoveryPaths: paths }),
+    };
+}
+
+function addCustomApplication(payload, deps = {}) {
+  if (!payload || typeof payload !== "object" || typeof payload.path !== "string") {
+    return { status: "error", message: "addCustomApplication requires a path" };
+  }
+  const identify = deps.identifyCustomApplication || defaultIdentifyCustomApplication;
+  const application = normalizeCustomApplications([identify(payload.path)])[0] || null;
+  if (!application) {
+    return { status: "error", message: "No launchable application was found at this path" };
+  }
+  const responseApplication = { ...application, managedIntegration: false, permissionApproval: false };
+  const snapshot = deps.snapshot || {};
+  const current = Array.isArray(snapshot.customApplications) ? snapshot.customApplications : [];
+  if (current.some((entry) => entry && entry.id === application.id)) {
+    return { status: "ok", noop: true, application: responseApplication };
+  }
+  if (current.length >= MAX_CUSTOM_APPLICATIONS) {
+    return { status: "error", message: `Custom AI limit reached (${MAX_CUSTOM_APPLICATIONS})` };
+  }
+  const agents = snapshot.agents && typeof snapshot.agents === "object" ? snapshot.agents : {};
+  return {
+    status: "ok",
+    application: responseApplication,
+    commit: {
+      customApplications: [...current, application],
+      agents: {
+        ...agents,
+        [application.id]: {
+          integrationInstalled: false,
+          enabled: true,
+          permissionsEnabled: false,
+          notificationHookEnabled: true,
+        },
+      },
+    },
+  };
+}
+
+function removeCustomApplication(payload, deps = {}) {
+  const id = payload && typeof payload.id === "string" ? payload.id.trim() : "";
+  if (!isCustomApplicationId(id)) {
+    return { status: "error", message: "removeCustomApplication requires a valid custom agent id" };
+  }
+  const snapshot = deps.snapshot || {};
+  const current = Array.isArray(snapshot.customApplications) ? snapshot.customApplications : [];
+  if (!current.some((entry) => entry && entry.id === id)) return { status: "ok", noop: true };
+  if (typeof deps.clearSessionsByAgent === "function") deps.clearSessionsByAgent(id);
+  if (typeof deps.dismissPermissionsByAgent === "function") deps.dismissPermissionsByAgent(id);
+  if (typeof deps.clearRecentHookEvents === "function") deps.clearRecentHookEvents(id);
+  const agents = snapshot.agents && typeof snapshot.agents === "object" ? { ...snapshot.agents } : {};
+  delete agents[id];
+  return {
+    status: "ok",
+    commit: {
+      customApplications: current.filter((entry) => entry && entry.id !== id),
+      agents,
+    },
+  };
+}
+
 function withoutDismissedInstallHint(snapshot, agentId) {
   const current = snapshot && snapshot.dismissedAgentInstallHints;
   if (!current || typeof current !== "object" || Array.isArray(current)) return {};
@@ -300,7 +509,11 @@ async function installAgentIntegration(payload, deps = {}) {
   }
 
   try {
-    const result = await deps.syncIntegrationForAgent(agentId, { source: "settings-agent-install", automatic: false });
+    const result = await deps.syncIntegrationForAgent(agentId, {
+      ...buildAgentIntegrationOptions(snapshot, agentId),
+      source: "settings-agent-install",
+      automatic: false,
+    });
     if (result === false) {
       return { status: "error", message: `No automatic integration install is available for ${agentId}` };
     }
@@ -441,6 +654,7 @@ async function repairAgentIntegration(payload, deps) {
 
   try {
     const result = await repairFn(agentId, {
+      ...buildAgentIntegrationOptions(snapshot, agentId),
       forceCodexHooksFeature: agentId === "codex" && forceCodexHooksFeature,
     });
     if (result === false) {
@@ -557,6 +771,10 @@ setAgentPermissionMode.lockKey = "agentIntegration";
 installAgentIntegration.lockKey = "agentIntegration";
 uninstallAgentIntegration.lockKey = "agentIntegration";
 repairAgentIntegration.lockKey = "agentIntegration";
+setAgentCustomPermissionUrl.lockKey = "agentIntegration";
+setAgentCustomDiscoveryPaths.lockKey = "agentIntegration";
+addCustomApplication.lockKey = "agentIntegration";
+removeCustomApplication.lockKey = "agentIntegration";
 dismissAgentInstallHints.lockKey = "agentIntegration";
 dismissAgentCleanupHints.lockKey = "agentIntegration";
 clearAgentCleanupHints.lockKey = "agentIntegration";
@@ -619,14 +837,18 @@ removeFromWsl.lockKey = "agentIntegration";
 module.exports = {
   AUTO_REPAIRABLE_AGENT_IDS,
   INSTALLABLE_AGENT_IDS,
+  addCustomApplication,
   clearAgentCleanupHints,
   clearAgentInstallHints,
   deployToWsl,
   dismissAgentCleanupHints,
   dismissAgentInstallHints,
   installAgentIntegration,
+  removeCustomApplication,
   removeFromWsl,
+  setAgentCustomDiscoveryPaths,
   setAgentFlag,
+  setAgentCustomPermissionUrl,
   setAgentPermissionMode,
   uninstallAgentIntegration,
   repairAgentIntegration,

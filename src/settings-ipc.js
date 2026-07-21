@@ -14,6 +14,14 @@ const SOUND_OVERRIDE_DIALOG_STRINGS = {
   ja: { title: "音声ファイルを選択", filterName: "音声" },
 };
 
+const AGENT_DISCOVERY_DIALOG_STRINGS = {
+  en: { file: "Choose a tool executable", directory: "Choose a tool installation folder" },
+  zh: { file: "选择工具可执行文件", directory: "选择工具安装目录" },
+  "zh-TW": { file: "選擇工具執行檔", directory: "選擇工具安裝目錄" },
+  ko: { file: "도구 실행 파일 선택", directory: "도구 설치 폴더 선택" },
+  ja: { file: "ツールの実行ファイルを選択", directory: "ツールのインストールフォルダーを選択" },
+};
+
 const REMOVE_THEME_DIALOG_STRINGS = {
   en: {
     delete: "Delete",
@@ -88,11 +96,39 @@ function rememberRuntimeSoundOverrideFile({ getActiveTheme }, themeId, soundName
 }
 
 function mapAgentMetadata(agent) {
-  return {
+  const metadata = {
     id: agent.id,
     name: agent.name,
     eventSource: agent.eventSource,
     capabilities: agent.capabilities || {},
+  };
+  if (typeof agent.category === "string" && agent.category) {
+    metadata.category = agent.category;
+  }
+  return metadata;
+}
+
+function mapCustomApplicationMetadata(application, options = {}) {
+  return {
+    id: application.id,
+    name: application.name,
+    category: application.category || "code",
+    eventSource: "custom-http",
+    custom: true,
+    sourcePath: application.sourcePath,
+    executablePath: application.executablePath,
+    processName: application.processName,
+    stateEndpoint: options.stateEndpoint || "",
+    lastStateEvent: options.lastStateEvent || null,
+    capabilities: {
+      httpHook: true,
+      permissionApproval: false,
+      interactiveBubble: false,
+      notificationHook: true,
+      sessionEnd: true,
+      subagent: false,
+      managedIntegration: false,
+    },
   };
 }
 
@@ -130,6 +166,8 @@ function registerSettingsIpc(options = {}) {
     || (() => ({ percent: 100 }));
   const getAllAgents = requiredDependency(options.getAllAgents, "getAllAgents");
   const detectAgentInstallations = options.detectAgentInstallations || defaultDetectAgentInstallations;
+  const getHookServerPort = options.getHookServerPort || (() => null);
+  const getRecentHookEvents = options.getRecentHookEvents || (() => []);
   const checkForUpdates = options.checkForUpdates || (() => {});
   const showTutorial = options.showTutorial || (() => ({
     status: "error",
@@ -390,27 +428,66 @@ function registerSettingsIpc(options = {}) {
 
   handle("settings:list-agents", () => {
     try {
-      return getAllAgents().map(mapAgentMetadata);
+      const snapshot = settingsController.getSnapshot();
+      const custom = Array.isArray(snapshot.customApplications)
+        ? snapshot.customApplications.map((application) => {
+          const port = getHookServerPort();
+          const stateEvents = getRecentHookEvents({ agentId: application.id })
+            .filter((event) => event && event.route === "state" && event.outcome === "accepted");
+          const lastStateEvent = stateEvents.length > 0 ? stateEvents[stateEvents.length - 1] : null;
+          return mapCustomApplicationMetadata(application, {
+            stateEndpoint: Number.isInteger(port) ? `http://127.0.0.1:${port}/state` : "",
+            lastStateEvent: lastStateEvent
+              ? { timestamp: lastStateEvent.timestamp, eventType: lastStateEvent.eventType }
+              : null,
+          });
+        })
+        : [];
+      return [...getAllAgents().map(mapAgentMetadata), ...custom];
     } catch (err) {
       console.warn("Clawd: settings:list-agents failed:", err && err.message);
       return [];
     }
   });
 
+  handle("settings:pick-agent-discovery-path", async (event, payload) => {
+    const kind = payload && payload.kind;
+    if (kind !== "file" && kind !== "directory") {
+      return { status: "error", message: "pickAgentDiscoveryPath.kind must be file or directory" };
+    }
+    const lang = getLang();
+    const strings = AGENT_DISCOVERY_DIALOG_STRINGS[lang] || AGENT_DISCOVERY_DIALOG_STRINGS.en;
+    try {
+      const result = await dialog.showOpenDialog(getDialogParent(event), {
+        title: strings[kind],
+        properties: [kind === "file" ? "openFile" : "openDirectory"],
+      });
+      if (!result || result.canceled || !Array.isArray(result.filePaths) || !result.filePaths[0]) {
+        return { status: "cancel" };
+      }
+      return { status: "ok", path: result.filePaths[0] };
+    } catch (err) {
+      return { status: "error", message: `agent discovery path picker failed: ${err && err.message}` };
+    }
+  });
+
   handle("settings:detect-agent-installations", async (_ev, opts) => {
     try {
       const options = opts && typeof opts === "object" ? opts : {};
+      const detectorOptions = { fs, path, now, snapshot: settingsController.getSnapshot() };
       if (options.refreshWsl) {
         const { refreshWslDetection } = require("./agent-installation-detector");
-        await refreshWslDetection({ fs, path, now, skipDefaultIntegrations: false });
-        return detectAgentInstallations({ fs, path, now });
+        await refreshWslDetection({ ...detectorOptions, skipDefaultIntegrations: false });
+        return detectAgentInstallations(detectorOptions);
       }
-      return detectAgentInstallations({ fs, path, now });
+      return detectAgentInstallations(detectorOptions);
     } catch (err) {
       console.warn("Clawd: settings:detect-agent-installations failed:", err && err.message);
       return {
         checkedAt: now(),
         agents: [],
+        customAgents: [],
+        customTools: [],
         skippedAgentIds: [],
         wslAgents: [],
         wslDistros: [],

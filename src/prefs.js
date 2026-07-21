@@ -18,6 +18,10 @@
 
 const fs = require("fs");
 const path = require("path");
+const {
+  isCustomApplicationNamespace,
+  normalizeCustomApplications,
+} = require("./custom-applications");
 const { isPlainObject } = require("./theme-loader");
 const { normalizeShortcuts, getDefaultShortcuts } = require("./shortcut-actions");
 const { isValidDisplaySnapshot } = require("./work-area");
@@ -275,7 +279,7 @@ const SCHEMA = {
       // antigravity branch). Default kept as false so legacy reads don't see a
       // stale "true" implying bubbles are enabled.
       "antigravity-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: false },
-      "codebuddy": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
+      "codebuddy": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true, customPermissionUrl: "" },
       // WorkBuddy shares CodeBuddy's Claude-Code-compatible hook protocol but
       // uses a distinct data dir (~/.workbuddy-ai; legacy: ~/.workbuddy). Opt-in like every other
       // non-default agent — agent-gate.js fail-opens missing entries, so this
@@ -300,6 +304,16 @@ const SCHEMA = {
       "qoderwork": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
     }),
     normalize: normalizeAgents,
+  },
+  customToolDiscoveryPaths: {
+    type: "array",
+    defaultFactory: () => [],
+    normalize: normalizePathList,
+  },
+  customApplications: {
+    type: "array",
+    defaultFactory: () => [],
+    normalize: normalizeCustomApplications,
   },
   dismissedAgentInstallHints: {
     type: "object",
@@ -401,7 +415,8 @@ const SCHEMA = {
   pendingUpdateVersion: { type: "string", default: "" },
   // Versions the user explicitly dismissed (clicked Later on the scheduler
   // bubble after actually seeing it). Object map of `{ "v0.9.0": true }`
-  // because prefs.js does not support `type: "array"` (see isValidValue).
+  // Keep this as a true-only object map so membership remains explicit and
+  // older prefs readers do not need array-specific dismissal semantics.
   dismissedUpdateVersions: {
     type: "object",
     defaultFactory: () => ({}),
@@ -437,6 +452,7 @@ function getDefaults() {
 
 function isValidValue(field, value) {
   if (value === undefined || value === null) return false;
+  if (field.type === "array") return Array.isArray(value);
   if (field.type === "object") {
     return typeof value === "object" && !Array.isArray(value);
   }
@@ -459,7 +475,7 @@ function validate(raw) {
     // off across restarts even if a value somehow landed on disk.
     if (field.ephemeral) continue;
     let value = raw[key];
-    if (field.type === "object" && typeof field.normalize === "function") {
+    if ((field.type === "object" || field.type === "array") && typeof field.normalize === "function") {
       value = field.normalize(value, out[key]);
     }
     if (isValidValue(field, value)) {
@@ -467,6 +483,11 @@ function validate(raw) {
     }
     // else: keep default already in `out`
   }
+  if (!("customToolDiscoveryPaths" in raw)) {
+    const legacy = raw.agents && raw.agents.custom && raw.agents.custom.customDiscoveryPaths;
+    out.customToolDiscoveryPaths = normalizePathList(legacy);
+  }
+  normalizeCustomAgentGates(out);
   normalizeStaleTriple(out);
   return out;
 }
@@ -680,6 +701,42 @@ const AGENT_FLAGS = [
   "nativeNotificationSoundEnabled",
 ];
 const CODEX_PERMISSION_MODES = ["native", "intercept"];
+const MAX_CUSTOM_DISCOVERY_PATHS = 64;
+const MAX_CUSTOM_DISCOVERY_PATH_LENGTH = 2048;
+
+function normalizePathList(value, options = {}) {
+  const raw = Array.isArray(value)
+    ? value
+    : (typeof value === "string" ? value.split(/[;\n]/g) : []);
+  const platform = typeof options.platform === "string" ? options.platform : process.platform;
+  const maxEntries = Number.isInteger(options.maxEntries) && options.maxEntries >= 0
+    ? options.maxEntries
+    : MAX_CUSTOM_DISCOVERY_PATHS;
+  const out = [];
+  const seen = new Set();
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const trimmed = entry.replace(/\0/g, "").trim().slice(0, MAX_CUSTOM_DISCOVERY_PATH_LENGTH);
+    const compareKey = platform === "win32" ? trimmed.toLowerCase() : trimmed;
+    if (!trimmed || seen.has(compareKey)) continue;
+    seen.add(compareKey);
+    out.push(trimmed);
+    if (out.length >= maxEntries) break;
+  }
+  return out;
+}
+
+function normalizeOptionalHttpUrl(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? trimmed : "";
+  } catch {
+    return "";
+  }
+}
 
 function normalizeDismissedUpdateVersions(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -731,6 +788,9 @@ function normalizeAgents(value, defaultsValue) {
   if (!value || typeof value !== "object") return defaultsValue;
   const out = { ...defaultsValue };
   for (const id of Object.keys(value)) {
+    // Early #652 builds stored shared path checks as a phantom agent. The
+    // dedicated top-level field now owns that data; never rehydrate this id.
+    if (id === "custom") continue;
     const entry = value[id];
     if (!entry || typeof entry !== "object") continue;
     const base = (defaultsValue && defaultsValue[id])
@@ -753,8 +813,48 @@ function normalizeAgents(value, defaultsValue) {
       merged.permissionMode = entry.permissionMode;
       touched = true;
     }
+    if (Object.prototype.hasOwnProperty.call(base, "customPermissionUrl")) {
+      const customPermissionUrl = normalizeOptionalHttpUrl(entry.customPermissionUrl);
+      if (customPermissionUrl || typeof entry.customPermissionUrl === "string") {
+        merged.customPermissionUrl = customPermissionUrl;
+        touched = true;
+      }
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(base, "customDiscoveryPaths")
+      || Object.prototype.hasOwnProperty.call(entry, "customDiscoveryPaths")
+    ) {
+      const customDiscoveryPaths = normalizePathList(entry.customDiscoveryPaths);
+      if (customDiscoveryPaths.length > 0 || Object.prototype.hasOwnProperty.call(entry, "customDiscoveryPaths")) {
+        merged.customDiscoveryPaths = customDiscoveryPaths;
+        touched = true;
+      }
+    }
     if (touched) out[id] = merged;
   }
+  return out;
+}
+
+function normalizeCustomAgentGates(out) {
+  const applications = Array.isArray(out.customApplications) ? out.customApplications : [];
+  const registeredIds = new Set(applications.map((application) => application.id));
+  const agents = out.agents && typeof out.agents === "object" ? { ...out.agents } : {};
+
+  for (const id of Object.keys(agents)) {
+    if (isCustomApplicationNamespace(id) && !registeredIds.has(id)) delete agents[id];
+  }
+  for (const application of applications) {
+    const current = agents[application.id];
+    agents[application.id] = {
+      integrationInstalled: false,
+      enabled: current && typeof current.enabled === "boolean" ? current.enabled : true,
+      permissionsEnabled: false,
+      notificationHookEnabled: current && typeof current.notificationHookEnabled === "boolean"
+        ? current.notificationHookEnabled
+        : true,
+    };
+  }
+  out.agents = agents;
   return out;
 }
 
@@ -1069,4 +1169,8 @@ module.exports = {
   mapLocaleToLang,
   normalizeThemeOverrides,
   normalizeShortcuts,
+  normalizeOptionalHttpUrl,
+  normalizePathList,
+  MAX_CUSTOM_DISCOVERY_PATHS,
+  MAX_CUSTOM_DISCOVERY_PATH_LENGTH,
 };

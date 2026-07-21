@@ -56,7 +56,7 @@ function makeRuntime(overrides = {}) {
     syncAntigravityHooksImpl: () => calls.push({ name: "antigravity" }),
     syncCursorHooksImpl: () => calls.push({ name: "cursor" }),
     syncCopilotHooksImpl: () => calls.push({ name: "copilot" }),
-    syncCodeBuddyHooksImpl: () => calls.push({ name: "codebuddy" }),
+    syncCodeBuddyHooksImpl: (options) => calls.push({ name: "codebuddy", options }),
     syncWorkBuddyHooksImpl: () => calls.push({ name: "workbuddy" }),
     syncKiroHooksImpl: () => calls.push({ name: "kiro" }),
     syncKimiHooksImpl: () => calls.push({ name: "kimi" }),
@@ -342,6 +342,52 @@ describe("integration sync runtime", () => {
 
     assert.ok(result === true || (result && typeof result === "object"));
     assert.deepStrictEqual(calls.map((entry) => entry.name), ["copilot"]);
+  });
+
+  it("passes custom integration options to CodeBuddy sync", () => {
+    const { runtime, calls } = makeRuntime();
+
+    runtime.syncIntegrationForAgent("codebuddy", {
+      permissionTarget: { mode: "custom", url: "https://approval.example.test/permission" },
+    });
+
+    assert.deepStrictEqual(calls, [{
+      name: "codebuddy",
+      options: { permissionTarget: { mode: "custom", url: "https://approval.example.test/permission" } },
+    }]);
+  });
+
+  it("reads saved custom integration options during startup sync", () => {
+    const { runtime, calls } = makeRuntime({
+      shouldSyncAgentIntegration: (agentId) => agentId === "codebuddy",
+      getAgentIntegrationOptions: (agentId) => (
+        agentId === "codebuddy"
+          ? { permissionTarget: { mode: "custom", url: "https://approval.example.test/permission" } }
+          : {}
+      ),
+    });
+
+    runtime.syncEnabledStartupIntegrations();
+
+    assert.deepStrictEqual(calls, [{
+      name: "codebuddy",
+      options: { permissionTarget: { mode: "custom", url: "https://approval.example.test/permission" } },
+    }]);
+  });
+
+  it("uses an explicit local target when CodeBuddy sync is called without saved options", () => {
+    let received = null;
+    const { runtime } = makeRuntime({
+      ctx: { syncCodeBuddyHooksImpl: null },
+    });
+    const modulePath = require.resolve("../hooks/codebuddy-install.js");
+
+    withPatchedExport(modulePath, "registerCodeBuddyHooks", (options) => {
+      received = options;
+      return { added: 0, updated: 0, skipped: 9 };
+    }, () => runtime.syncCodeBuddyHooks());
+
+    assert.deepStrictEqual(received.permissionTarget, { mode: "local" });
   });
 
   it("syncIntegrationForAgent treats count-style zero writes as a missing local integration", () => {

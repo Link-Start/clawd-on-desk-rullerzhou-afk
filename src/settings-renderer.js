@@ -99,6 +99,13 @@ if (window.settingsAPI && typeof window.settingsAPI.onChanged === "function") {
   window.settingsAPI.onChanged((payload) => core.ops.applyChanges(payload));
 }
 
+if (window.settingsAPI && typeof window.settingsAPI.onAgentActivity === "function") {
+  window.settingsAPI.onAgentActivity((payload) => {
+    const tab = core.tabs.agents;
+    if (tab && typeof tab.applyAgentActivity === "function") tab.applyAgentActivity(payload);
+  });
+}
+
 if (window.settingsAPI && typeof window.settingsAPI.onAnimationPreviewPosterReady === "function") {
   window.settingsAPI.onAnimationPreviewPosterReady((payload) => core.ops.applyAnimationPreviewPoster(payload));
 }

@@ -214,6 +214,10 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
   const getAgentIconUrl = typeof options.getAgentIconUrl === "function"
     ? options.getAgentIconUrl
     : () => null;
+  const resolveAgentDisplayName = typeof options.resolveAgentDisplayName === "function"
+    ? options.resolveAgentDisplayName
+    : () => "";
+  const agentId = (session && session.agentId) || null;
   const state = (session && session.state) || "idle";
   const hiddenFromHud = shouldAutoClearDetachedSession(session, badge, options)
     || isSupersededLocalCodexProcessSession(id, session, options.latestLocalCodexProcessIds);
@@ -225,8 +229,9 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
   const source = deriveSourceInfo(session && session.host);
   return {
     id,
-    agentId: (session && session.agentId) || null,
-    iconUrl: getAgentIconUrl(session && session.agentId),
+    agentId,
+    agentName: resolveAgentDisplayName(agentId),
+    iconUrl: getAgentIconUrl(agentId),
     state,
     badge,
     hiddenFromHud,
@@ -379,6 +384,7 @@ function sessionSnapshotSignature(snapshot) {
       displayTitle: entry.displayTitle,
       cwd: entry.cwd,
       agentId: entry.agentId,
+      agentName: entry.agentName,
       sourcePid: entry.sourcePid,
       wtHwnd: entry.wtHwnd,
       canFocus: entry.canFocus,

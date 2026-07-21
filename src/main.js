@@ -95,6 +95,7 @@ const { createTelegramApprovalSidecar } = require("./telegram-approval-sidecar")
 const telegramApprovalSettings = require("./telegram-approval-settings");
 const discordPresenceSettings = require("./discord-presence-settings");
 const { createDiscordPresenceBridge } = require("./discord-presence-rpc");
+const { resolveAgentDisplayName } = require("./agent-display-name");
 const { FeishuApprovalClient } = require("./feishu-approval-client");
 const feishuApprovalSettings = require("./feishu-approval-settings");
 const {
@@ -135,7 +136,7 @@ const {
 } = require("./session-focus");
 const { focusCodexThreadTarget } = require("./session-focus-handoff");
 const { isSessionInProgress } = require("./state-session-snapshot");
-const { getAllAgents } = require("../agents/registry");
+const { getAllAgents, getAgent } = require("../agents/registry");
 // ── Autoplay policy: allow sound playback without user gesture ──
 // MUST be set before any BrowserWindow is created (before app.whenReady)
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
@@ -301,6 +302,26 @@ function _readSystemOpenAtLogin() {
   ).openAtLogin;
 }
 
+function _getAgentIntegrationOptions(agentId) {
+  const agents = _settingsController && _settingsController.get("agents");
+  const entry = agents && agents[agentId];
+  if (!entry || typeof entry !== "object") return {};
+  const options = {};
+  const agent = getAgent(agentId);
+  const capabilities = (agent && agent.capabilities) || {};
+  if (capabilities.httpHook && capabilities.customPermissionUrl) {
+    const customPermissionUrl = prefsModule.normalizeOptionalHttpUrl(entry.customPermissionUrl);
+    options.permissionTarget = customPermissionUrl
+      ? { mode: "custom", url: customPermissionUrl }
+      : { mode: "local" };
+  }
+  return options;
+}
+
+function _resolveAgentDisplayName(agentId) {
+  return resolveAgentDisplayName(agentId, _settingsController.get("customApplications"));
+}
+
 function _deferredResizePet(sizeKey) {
   // Bound to _menu.resizeWindow after menu module is created below. Settings
   // panel's size slider commands route through here so they get the same
@@ -363,7 +384,8 @@ const _settingsController = createSettingsController({
     setOpenAtLogin: _writeSystemOpenAtLogin,
     startMonitorForAgent: (id) => agentRuntime && agentRuntime.startMonitorForAgent(id),
     stopMonitorForAgent: (id) => agentRuntime && agentRuntime.stopMonitorForAgent(id),
-    syncIntegrationForAgent: (id, options) => agentRuntime ? agentRuntime.syncIntegrationForAgent(id, options) : false,
+    syncIntegrationForAgent: (id, options) =>
+      agentRuntime ? agentRuntime.syncIntegrationForAgent(id, options) : false,
     repairIntegrationForAgent: (id, options) =>
       agentRuntime ? agentRuntime.repairIntegrationForAgent(id, options) : false,
     stopIntegrationForAgent: (id) => agentRuntime ? agentRuntime.stopIntegrationForAgent(id) : false,
@@ -391,6 +413,8 @@ const _settingsController = createSettingsController({
     restartClawd: _restartClawdNow,
     clearSessionsByAgent: (id) => agentRuntime ? agentRuntime.clearSessionsByAgent(id) : 0,
     dismissPermissionsByAgent: (id, options) => agentRuntime ? agentRuntime.dismissPermissionsByAgent(id, options) : 0,
+    clearRecentHookEvents: (id) => _server.clearRecentHookEvents(id),
+    identifyCustomApplication: (sourcePath) => require("./custom-applications").identifyCustomApplication(sourcePath),
     resizePet: _deferredResizePet,
     getActiveSessionAliasKeys: () =>
       _state && typeof _state.getActiveSessionAliasKeys === "function"
@@ -1557,6 +1581,7 @@ const _stateCtx = {
   // boundary) keeps the gate consistent for hook / log-poll / plugin paths.
   isAgentNotificationHookEnabled: (agentId) =>
     _isAgentNotificationHookEnabled({ agents: _settingsController.get("agents") }, agentId),
+  resolveAgentDisplayName: _resolveAgentDisplayName,
   miniPeekIn: () => miniPeekIn(),
   miniPeekOut: () => miniPeekOut(),
   buildContextMenu: () => buildContextMenu(),
@@ -1966,6 +1991,20 @@ const _serverCtx = {
   get PASSTHROUGH_TOOLS() { return PASSTHROUGH_TOOLS; },
   get STATE_SVGS() { return _state.STATE_SVGS; },
   get sessions() { return sessions; },
+  getCustomAgentIds: () => (_settingsController.get("customApplications") || [])
+    .map((application) => application && application.id)
+    .filter(Boolean),
+  onHookEventRecorded: (event) => {
+    if (!event || event.route !== "state" || event.outcome !== "accepted") return;
+    const registered = (_settingsController.get("customApplications") || [])
+      .some((application) => application && application.id === event.agentId);
+    if (!registered) return;
+    broadcastSettingsWindow("settings:agent-activity", {
+      agentId: event.agentId,
+      timestamp: event.timestamp,
+      eventType: event.eventType,
+    });
+  },
   // #627 residual: synchronous server-side wt_hwnd sample for UserPromptSubmit
   // (src/server-route-state.js). Initialized once above; never re-created per
   // request.
@@ -1974,6 +2013,7 @@ const _serverCtx = {
   isAgentEnabled: (agentId) => _isAgentEnabled({ agents: _settingsController.get("agents") }, agentId),
   shouldSyncAgentIntegration: (agentId) =>
     _shouldSyncAgentIntegration({ agents: _settingsController.get("agents") }, agentId),
+  getAgentIntegrationOptions: _getAgentIntegrationOptions,
   isAgentPermissionsEnabled: (agentId) => _isAgentPermissionsEnabled({ agents: _settingsController.get("agents") }, agentId),
   isAgentSubagentPermissionsEnabled: (agentId) => _isAgentSubagentPermissionsEnabled({ agents: _settingsController.get("agents") }, agentId),
   isCodexNativeNotificationSoundEnabled: () => _isCodexNativeNotificationSoundEnabled({ agents: _settingsController.get("agents") }),
@@ -3389,6 +3429,7 @@ registerDoctorIpc({
   getPrefsSnapshot: () => _settingsController.getSnapshot(),
   getDoNotDisturb: () => doNotDisturb,
   getLocale: () => _settingsController.get("lang") || "en",
+  resolveAgentDisplayName: _resolveAgentDisplayName,
 });
 
 // ── Remote SSH (Phase 2) ──
@@ -3483,6 +3524,8 @@ registerSettingsIpc({
   getSoundMuted: () => soundMuted,
   getSoundVolume: () => soundVolume,
   getAllAgents,
+  getHookServerPort: () => getHookServerPort(),
+  getRecentHookEvents: (options) => _server.getRecentHookEvents(options),
   checkForUpdates,
   showTutorial: () => {
     _tutorial.open();

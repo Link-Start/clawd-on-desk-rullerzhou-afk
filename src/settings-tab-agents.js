@@ -15,6 +15,7 @@
     { id: "intercept", labelKey: "codexPermissionModeIntercept" },
   ];
   const INSTALL_HINT_CONFIDENCES = new Set(["high", "medium"]);
+  const CUSTOM_TOOL_SCAN_STATUS_MIN_MS = 1200;
   let agentHintActionPending = false;
   let agentInstallHintResetPending = false;
   let agentCleanupHintResetPending = false;
@@ -40,69 +41,157 @@
     subtitle.textContent = t("agentsSubtitle");
     parent.appendChild(subtitle);
 
-    // Scan toolbar — always available on Windows (wslSupported) so a failed
-    // auto scan still leaves the user a manual retry path.
-    const hints = runtime.agentInstallationHints;
-    const wslDistros = hints && Array.isArray(hints.wslDistros) ? hints.wslDistros : [];
-    const wslPending = !!(hints && hints.wslPending);
-    const wslSupported = !!(hints && hints.wslSupported);
-    if (wslSupported || wslDistros.length > 0 || wslPending) {
-      const toolbar = document.createElement("div");
-      toolbar.className = "agent-scan-toolbar";
+    const metadata = runtime.agentMetadata || [];
+    const agents = typeof sortAgentMetadataForSettings === "function"
+      ? sortAgentMetadataForSettings(metadata)
+      : metadata;
+    const categorized = categorizeAgentsForSections(agents);
+    const subtab = resolveAgentsSubtab(categorized);
 
-      const scanBtn = document.createElement("button");
-      scanBtn.type = "button";
-      scanBtn.className = "soft-btn agent-instance-scan-btn";
-      scanBtn.textContent = t("agentInstanceScanWsl");
-      scanBtn.title = t("agentInstanceScanWslDesc");
-      scanBtn.addEventListener("click", async () => {
-        scanBtn.disabled = true;
-        scanBtn.textContent = t("agentInstanceScanning");
-        try {
-          if (ops && typeof ops.fetchAgentInstallationHints === "function") {
-            await ops.fetchAgentInstallationHints({ refreshWsl: true });
-          }
-          ops.requestRender({ content: true });
-        } catch (err) {
-          console.warn("WSL scan failed:", err && err.message);
-        } finally {
-          scanBtn.disabled = false;
-          scanBtn.textContent = t("agentInstanceScanWsl");
-        }
-      });
-      toolbar.appendChild(scanBtn);
+    parent.appendChild(buildAgentSubtabRow(subtab, categorized));
 
-      if (wslPending) {
-        const status = document.createElement("span");
-        status.className = "agent-scan-status";
-        status.textContent = t("agentInstanceScanning") + "...";
-        toolbar.appendChild(status);
+    // Each banner lives in the subtab it acts on: "install what we detected"
+    // is what the discover subtab is for, and "your integration outlived its
+    // agent" is about the connected list.
+    if (subtab === "discover") {
+      const recommendedHints = getRecommendedInstallHints();
+      if (recommendedHints.length > 0) {
+        parent.appendChild(buildAgentInstallHintBanner(recommendedHints));
       }
-
-      parent.appendChild(toolbar);
+      renderDiscoverSubtab(parent, categorized);
+      return;
     }
 
-    const recommendedHints = getRecommendedInstallHints();
-    if (recommendedHints.length > 0) {
-      parent.appendChild(buildAgentInstallHintBanner(recommendedHints));
-    }
     const cleanupHints = getRecommendedCleanupHints();
     if (cleanupHints.length > 0) {
       parent.appendChild(buildAgentCleanupHintBanner(cleanupHints));
     }
+    renderConnectedSubtab(parent, categorized, metadata.length === 0);
+  }
 
-    if (!runtime.agentMetadata || runtime.agentMetadata.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "placeholder";
-      empty.innerHTML = `<div class="placeholder-desc">${helpers.escapeHtml(t("agentsEmpty"))}</div>`;
-      parent.appendChild(empty);
+  // "connected" unless nothing is connected yet — a first run would otherwise
+  // open on an empty list instead of the agents it could add. Once the user
+  // picks a subtab their choice is pinned for the rest of the session.
+  function resolveAgentsSubtab(categorized) {
+    if (runtime.agentsSubtab === "connected" || runtime.agentsSubtab === "discover") {
+      return runtime.agentsSubtab;
+    }
+    return categorized.connected.length > 0 ? "connected" : "discover";
+  }
+
+  function renderConnectedSubtab(parent, categorized, noAgentsAtAll) {
+    if (categorized.connected.length > 0) {
+      // No section title: the subtab pill already says "Connected".
+      const section = helpers.buildSection("", buildAgentRows(categorized.connected));
+      section.classList.add("agent-section", "agent-section-connected");
+      parent.appendChild(section);
       return;
     }
+    const empty = document.createElement("div");
+    empty.className = "placeholder";
+    const message = noAgentsAtAll ? t("agentsEmpty") : t("agentsConnectedEmpty");
+    empty.innerHTML = `<div class="placeholder-desc">${helpers.escapeHtml(message)}</div>`;
+    parent.appendChild(empty);
+  }
 
-    const agents = typeof sortAgentMetadataForSettings === "function"
-      ? sortAgentMetadataForSettings(runtime.agentMetadata)
-      : runtime.agentMetadata;
-    renderAgentSections(parent, agents);
+  function renderDiscoverSubtab(parent, categorized) {
+    if (categorized.recommended.length > 0) {
+      const section = helpers.buildSection(
+        t("agentSectionRecommended"),
+        buildAgentRows(categorized.recommended)
+      );
+      section.classList.add("agent-section", "agent-section-recommended");
+      parent.appendChild(section);
+    }
+    parent.appendChild(buildCustomToolsSection());
+    if (categorized.unavailable.length > 0) {
+      parent.appendChild(buildUnavailableSection(categorized.unavailable));
+    }
+  }
+
+  // A catalog of what Clawd supports, not a to-do list — collapsed by default
+  // so the two actionable blocks above it stay in view, and searchable because
+  // it is long enough that scanning it by eye is the slow path.
+  function buildUnavailableSection(agents) {
+    const rows = agents.map((agent) => {
+      const row = buildAgentGroup(agent);
+      row.dataset.agentSearch = `${agent.name || ""} ${agent.id || ""}`.toLowerCase();
+      return row;
+    });
+
+    const count = document.createElement("span");
+    count.className = "agent-section-count";
+
+    function applyFilter() {
+      const query = (runtime.agentsUnavailableQuery || "").trim().toLowerCase();
+      let shown = 0;
+      for (const row of rows) {
+        const matches = !query || String(row.dataset.agentSearch || "").includes(query);
+        row.classList.toggle("agent-row-filtered-out", !matches);
+        if (matches) shown += 1;
+      }
+      // Counts what is on screen, so the number always matches what you see.
+      count.textContent = String(shown);
+    }
+
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "agent-section-search";
+    search.placeholder = t("agentSearchPlaceholder");
+    search.value = runtime.agentsUnavailableQuery || "";
+    // The input sits inside the collapsible header, whose click and Enter/Space
+    // handlers would otherwise toggle the group out from under the typist.
+    const stopHeaderToggle = (event) => {
+      if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+    };
+    search.addEventListener("click", stopHeaderToggle);
+    search.addEventListener("keydown", stopHeaderToggle);
+
+    function commitQuery(event) {
+      runtime.agentsUnavailableQuery = (event && event.target && event.target.value) || "";
+      applyFilter();
+      // Typing into a collapsed catalog would filter rows nobody can see.
+      if (runtime.agentsUnavailableQuery && group.classList.contains("collapsed")) {
+        const header = group.querySelector(".collapsible-group-header");
+        // HTMLElement.click() in the browser; the test DOM has no click(), but
+        // its dispatchEvent takes a plain descriptor.
+        if (header && typeof header.click === "function") header.click();
+        else if (header) header.dispatchEvent({ type: "click", bubbles: false });
+      }
+    }
+
+    // Mid-composition the field holds pinyin/kana keystrokes rather than a
+    // query, and filtering on those empties the list under the candidate
+    // window while the user is still picking a character.
+    let composing = false;
+    search.addEventListener("compositionstart", () => { composing = true; });
+    search.addEventListener("compositionend", (event) => {
+      composing = false;
+      commitQuery(event);
+    });
+    search.addEventListener("input", (event) => {
+      if (composing) return;
+      commitQuery(event);
+    });
+
+    const summary = document.createElement("div");
+    summary.className = "agent-section-summary";
+    summary.appendChild(search);
+    summary.appendChild(count);
+
+    const group = helpers.buildCollapsibleGroup({
+      id: "agents:unavailable",
+      title: t("agentSectionUnavailable"),
+      summary,
+      children: rows,
+      defaultCollapsed: true,
+      className: "agent-unavailable-group",
+    });
+    applyFilter();
+
+    const section = helpers.buildSection("", [group]);
+    section.classList.add("agent-section", "agent-section-unavailable");
+    return section;
   }
 
   function getAgentMetadata(agentId) {
@@ -158,21 +247,6 @@
     });
   }
 
-  function getInstallationHint(agentId) {
-    const hints = runtime.agentInstallationHints;
-    const entries = hints && Array.isArray(hints.agents) ? hints.agents : [];
-    return entries.find((entry) => entry && entry.agentId === agentId) || null;
-  }
-
-  function hasRecommendedLocalInstall(agentId) {
-    const entry = getInstallationHint(agentId);
-    return !!(
-      entry
-      && entry.detectedInstalled === true
-      && INSTALL_HINT_CONFIDENCES.has(entry.confidence)
-    );
-  }
-
   function categorizeAgentsForSections(agents) {
     const sections = {
       connected: [],
@@ -181,6 +255,15 @@
     };
     for (const agent of agents) {
       if (!agent || !agent.id) continue;
+      // A custom agent only exists in metadata once it has been registered,
+      // and registering is what connects it — there is nothing left to install,
+      // so it belongs with the connected agents whether or not its path still
+      // resolves. A vanished path surfaces through its own row, not by
+      // demoting the agent into the discover subtab.
+      if (agent.custom) {
+        sections.connected.push(agent);
+        continue;
+      }
       if (readers.readAgentIntegrationInstalled(agent.id)) {
         sections.connected.push(agent);
       } else if (hasRecommendedLocalInstall(agent.id)) {
@@ -192,20 +275,351 @@
     return sections;
   }
 
-  function renderAgentSections(parent, agents) {
-    const categorized = categorizeAgentsForSections(agents);
-    const specs = [
-      ["connected", "agentSectionConnected", "agent-section-connected"],
-      ["recommended", "agentSectionRecommended", "agent-section-recommended"],
-      ["unavailable", "agentSectionUnavailable", "agent-section-unavailable"],
+  function hasRecommendedLocalInstall(agentId) {
+    const entry = getInstallationHint(agentId);
+    return !!(
+      entry
+      && entry.detectedInstalled === true
+      && INSTALL_HINT_CONFIDENCES.has(entry.confidence)
+    );
+  }
+
+  function getInstallationHint(agentId, custom = false) {
+    const hints = runtime.agentInstallationHints;
+    const entries = custom
+      ? (hints && Array.isArray(hints.customAgents) ? hints.customAgents : [])
+      : (hints && Array.isArray(hints.agents) ? hints.agents : []);
+    return entries.find((entry) => entry && entry.agentId === agentId) || null;
+  }
+
+  function buildAgentRows(agents) {
+    return agents.map((agent) => buildAgentGroup(agent));
+  }
+
+  // Splits the tab into "agent list" and "discover and add". The list is the
+  // default because it is what the tab is for; manual discovery is the fallback
+  // for when the built-in scan came up empty.
+  function buildAgentSubtabRow(current, categorized) {
+    const row = document.createElement("div");
+    row.className = "agents-subtabs";
+
+    const group = document.createElement("div");
+    group.className = "segmented";
+    group.setAttribute("role", "tablist");
+    const entries = [
+      { key: "connected", label: t("agentsSubtabConnected"), count: 0 },
+      // Counts what the user can act on right now, so the badge stays a
+      // to-do marker: agents detected locally but not connected yet.
+      { key: "discover", label: t("agentsSubtabDiscover"), count: categorized.recommended.length },
     ];
-    for (const [key, titleKey, className] of specs) {
-      const sectionAgents = categorized[key];
-      if (!Array.isArray(sectionAgents) || sectionAgents.length === 0) continue;
-      const groups = sectionAgents.map((agent) => buildAgentGroup(agent));
-      const section = helpers.buildSection(t(titleKey), groups);
-      section.classList.add("agent-section", className);
-      parent.appendChild(section);
+    for (const entry of entries) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = entry.label;
+      btn.setAttribute("role", "tab");
+      btn.setAttribute("aria-selected", entry.key === current ? "true" : "false");
+      if (entry.key === current) btn.classList.add("active");
+      if (entry.count > 0) {
+        const badge = document.createElement("span");
+        badge.className = "agents-subtab-count";
+        badge.textContent = String(entry.count);
+        btn.appendChild(badge);
+      }
+      btn.addEventListener("click", () => {
+        if (runtime.agentsSubtab === entry.key) return;
+        runtime.agentsSubtab = entry.key;
+        ops.requestRender({ content: true });
+      });
+      group.appendChild(btn);
+    }
+    row.appendChild(group);
+
+    // WSL rescan belongs to the connected subtab: it re-detects built-in
+    // agents installed inside distros, and its results render as instance rows
+    // inside the agent cards — not as custom-tool discovery hits.
+    if (current === "connected") {
+      const wslScanControl = buildWslScanControl();
+      if (wslScanControl) row.appendChild(wslScanControl);
+    }
+    return row;
+  }
+
+  function buildCustomToolsSection() {
+    const row = document.createElement("div");
+    row.className = "row-sub custom-tool-discovery-row";
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("rowCustomToolsDiscoveryPathsDesc");
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const control = document.createElement("div");
+    control.className = "custom-tool-discovery-control";
+    const addButton = document.createElement("button");
+    addButton.type = "button";
+    addButton.className = "soft-btn accent custom-tool-path-picker";
+    addButton.textContent = t("customToolManualAdd");
+    addButton.addEventListener("click", () => addPickedCustomDiscoveryPath(addButton));
+    control.appendChild(addButton);
+    const scanButton = document.createElement("button");
+    scanButton.type = "button";
+    scanButton.className = "soft-btn custom-tool-scan";
+    scanButton.textContent = t("customToolRescan");
+    const scanStatus = document.createElement("span");
+    scanStatus.className = "custom-tool-scan-status";
+    scanStatus.textContent = getCustomToolScanStatusText();
+    scanButton.addEventListener("click", async () => {
+      const scanStartedAt = Date.now();
+      scanButton.disabled = true;
+      scanStatus.classList.remove("failed");
+      scanStatus.classList.add("pending");
+      scanStatus.textContent = t("customToolScanStatusScanning");
+      try {
+        if (ops && typeof ops.fetchAgentInstallationHints === "function") {
+          await ops.fetchAgentInstallationHints({ force: true });
+        }
+        const remainingStatusMs = CUSTOM_TOOL_SCAN_STATUS_MIN_MS - (Date.now() - scanStartedAt);
+        if (remainingStatusMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, remainingStatusMs));
+        }
+        scanStatus.textContent = getCustomToolScanStatusText();
+      } catch (err) {
+        scanStatus.classList.add("failed");
+        scanStatus.textContent = t("customToolScanStatusFailed");
+      } finally {
+        scanStatus.classList.remove("pending");
+        scanButton.disabled = false;
+      }
+    });
+    control.appendChild(scanButton);
+    control.appendChild(scanStatus);
+    row.appendChild(control);
+    const rows = [row, ...buildCustomToolResultRows()];
+    // No section title: the subtab pill already names this half of the tab.
+    const section = helpers.buildSection("", rows);
+    section.classList.add("agent-custom-tools-section");
+    return section;
+  }
+
+  function buildWslScanControl() {
+    const hints = runtime.agentInstallationHints;
+    const wslDistros = hints && Array.isArray(hints.wslDistros) ? hints.wslDistros : [];
+    const wslPending = !!(hints && hints.wslPending);
+    const wslSupported = !!(hints && hints.wslSupported);
+    if (!(wslSupported || wslDistros.length > 0 || wslPending)) return null;
+
+    const control = document.createElement("div");
+    control.className = "custom-tool-wsl-scan";
+    const scanButton = document.createElement("button");
+    scanButton.type = "button";
+    scanButton.className = "soft-btn agent-instance-scan-btn";
+    scanButton.textContent = t("agentInstanceScanWsl");
+    scanButton.title = t("agentInstanceScanWslDesc");
+    scanButton.addEventListener("click", async () => {
+      scanButton.disabled = true;
+      scanButton.textContent = t("agentInstanceScanning");
+      try {
+        if (ops && typeof ops.fetchAgentInstallationHints === "function") {
+          await ops.fetchAgentInstallationHints({ refreshWsl: true });
+        }
+        ops.requestRender({ content: true });
+      } catch (err) {
+        console.warn("WSL scan failed:", err && err.message);
+      } finally {
+        scanButton.disabled = false;
+        scanButton.textContent = t("agentInstanceScanWsl");
+      }
+    });
+    control.appendChild(scanButton);
+
+    if (wslPending) {
+      const status = document.createElement("span");
+      status.className = "agent-scan-status";
+      status.textContent = t("agentInstanceScanning") + "...";
+      control.appendChild(status);
+    }
+    return control;
+  }
+
+  function getCustomToolScanStatusText() {
+    if (runtime.agentInstallationHintsPending) return t("customToolScanStatusScanning");
+    const checkedAt = runtime.agentInstallationHints && runtime.agentInstallationHints.checkedAt;
+    if (!Number.isFinite(checkedAt)) return t("customToolScanStatusIdle");
+    let time = new Date(checkedAt).toLocaleTimeString();
+    try {
+      time = new Intl.DateTimeFormat((state.snapshot && state.snapshot.lang) || "en", {
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(new Date(checkedAt));
+    } catch {}
+    return t("customToolScanStatusComplete").replace("{time}", time);
+  }
+
+  async function addPickedCustomDiscoveryPath(button) {
+    if (!window.settingsAPI || typeof window.settingsAPI.pickAgentDiscoveryPath !== "function") {
+      ops.showToast(t("toastSaveFailed") + "path picker unavailable", { error: true });
+      return;
+    }
+    if (!window.settingsAPI || typeof window.settingsAPI.command !== "function") {
+      ops.showToast(t("toastSaveFailed") + "settings API unavailable", { error: true });
+      return;
+    }
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = t("customToolScanStatusScanning");
+    try {
+      const result = await window.settingsAPI.pickAgentDiscoveryPath("directory");
+      if (!result || result.status === "cancel") return;
+      if (result.status !== "ok" || typeof result.path !== "string" || !result.path) {
+        ops.showToast(t("toastSaveFailed") + ((result && result.message) || "path picker failed"), { error: true });
+        return;
+      }
+      const paths = readers.readAgentCustomDiscoveryPaths("custom").slice();
+      if (!paths.includes(result.path)) paths.push(result.path);
+      const response = await window.settingsAPI.command("setAgentCustomDiscoveryPaths", {
+        agentId: "custom",
+        value: paths,
+      });
+      if (!response || response.status !== "ok") {
+        throw new Error((response && response.message) || "failed to save discovery path");
+      }
+      if (ops && typeof ops.fetchAgentInstallationHints === "function") {
+        await ops.fetchAgentInstallationHints({ force: true });
+      }
+      ops.requestRender({ content: true });
+    } catch (err) {
+      ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+
+  function buildCustomToolResultRows() {
+    const configuredPaths = readers.readAgentCustomDiscoveryPaths("custom");
+    const results = typeof readers.readCustomToolDetectionResults === "function"
+      ? readers.readCustomToolDetectionResults()
+      : [];
+    if (configuredPaths.length === 0 && results.length === 0) return [];
+    if (results.length === 0) {
+      return configuredPaths.map((path) => buildCustomToolResultRow({
+        path,
+        detectedInstalled: null,
+      }));
+    }
+    return results.map(buildCustomToolResultRow);
+  }
+
+  function getCustomToolResultStatusText(result) {
+    if (result.detectedInstalled === true) return t("customToolNotRecognized");
+    if (result.detectedInstalled === false) return t("customToolDetectionMissing");
+    return t("customToolDetectionPending");
+  }
+
+  function buildCustomToolResultRow(result) {
+    const row = document.createElement("div");
+    // `.row` so the path and its action share one line, like every other row.
+    row.className = "row row-sub custom-tool-result-row";
+    row.classList.toggle("custom-tool-result-found", result.detectedInstalled === true);
+    row.classList.toggle("custom-tool-result-missing", result.detectedInstalled === false);
+
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    if (result.application) {
+      label.textContent = result.application.name;
+    } else {
+      // Raw path, not a name — mono + truncated, with the full value on hover.
+      label.classList.add("custom-tool-result-path");
+      label.textContent = result.path || "";
+      if (result.path) label.title = result.path;
+    }
+    text.appendChild(label);
+    const desc = document.createElement("span");
+    desc.className = "row-desc custom-tool-result-detail";
+    // result.detail is an untranslated detector string that restates the
+    // status, so unrecognized paths explain themselves here instead — one
+    // sentence, one language, no trailing badge repeating it.
+    desc.textContent = result.application
+      ? `${result.application.executablePath} · ${result.application.id}`
+      : getCustomToolResultStatusText(result);
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    if (result.application) {
+      const status = document.createElement(result.application.added ? "span" : "button");
+      status.className = result.application.added
+        ? "custom-tool-result-status"
+        : "soft-btn accent custom-tool-add";
+      status.textContent = result.application.added ? t("customToolAdded") : t("customToolAdd");
+      if (!result.application.added) {
+        status.type = "button";
+        status.addEventListener("click", () => addCustomApplication(result, status));
+      }
+      row.appendChild(status);
+    }
+    if (result.path) {
+      const removePathButton = document.createElement("button");
+      removePathButton.type = "button";
+      removePathButton.className = "soft-btn danger custom-tool-remove-path";
+      removePathButton.textContent = t("customToolRemovePath");
+      removePathButton.addEventListener("click", () => removeCustomDiscoveryPath(result.path, removePathButton));
+      row.appendChild(removePathButton);
+    }
+    return row;
+  }
+
+  async function removeCustomDiscoveryPath(pathToRemove, button) {
+    if (!window.settingsAPI || typeof window.settingsAPI.command !== "function") return;
+    button.disabled = true;
+    try {
+      const paths = readers.readAgentCustomDiscoveryPaths("custom")
+        .filter((entry) => entry !== pathToRemove);
+      const response = await window.settingsAPI.command("setAgentCustomDiscoveryPaths", {
+        agentId: "custom",
+        value: paths,
+      });
+      if (!response || response.status !== "ok") {
+        throw new Error((response && response.message) || "failed to remove discovery path");
+      }
+      if (ops && typeof ops.fetchAgentInstallationHints === "function") {
+        await ops.fetchAgentInstallationHints({ force: true });
+      }
+      ops.requestRender({ content: true });
+    } catch (err) {
+      button.disabled = false;
+      ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+    }
+  }
+
+  async function refreshCustomAgentUi() {
+    if (window.settingsAPI && typeof window.settingsAPI.listAgents === "function") {
+      const list = await window.settingsAPI.listAgents();
+      if (ops && typeof ops.applyAgentMetadata === "function") ops.applyAgentMetadata(list);
+      else runtime.agentMetadata = Array.isArray(list) ? list : [];
+    }
+    if (ops && typeof ops.fetchAgentInstallationHints === "function") {
+      await ops.fetchAgentInstallationHints({ force: true });
+    }
+    ops.requestRender({ content: true });
+  }
+
+  async function addCustomApplication(result, button) {
+    button.disabled = true;
+    try {
+      const response = await window.settingsAPI.command("addCustomApplication", { path: result.path });
+      if (!response || response.status !== "ok") throw new Error((response && response.message) || "add failed");
+      ops.showToast(t("customToolAdded"));
+      // The AI is now a connected agent, so land the user where it appears
+      // and where its toggles live.
+      runtime.agentsSubtab = "connected";
+      await refreshCustomAgentUi();
+    } catch (err) {
+      ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+      button.disabled = false;
     }
   }
 
@@ -606,19 +1020,55 @@
         esBadge.className = "agent-badge";
         esBadge.textContent = t(esKey);
         badges.appendChild(esBadge);
-        integrationBadge = document.createElement("span");
-        integrationBadge.className = "agent-badge integration";
-        badges.appendChild(integrationBadge);
+        if (agent.custom) {
+          const registrationBadge = document.createElement("span");
+          registrationBadge.className = "agent-badge integration custom-registration";
+          registrationBadge.textContent = t("customToolRegistered");
+          badges.appendChild(registrationBadge);
+          // A registered custom AI stays in Connected even when its executable
+          // disappears, so the missing binary has to say so on the row itself —
+          // it used to be reported by the agent dropping into another section.
+          const customHint = getInstallationHint(agent.id, true);
+          if (customHint && customHint.detectedInstalled === false) {
+            const missingBadge = document.createElement("span");
+            missingBadge.className = "agent-badge custom-missing";
+            missingBadge.textContent = t("customToolDetectionMissing");
+            badges.appendChild(missingBadge);
+          }
+        } else {
+          integrationBadge = document.createElement("span");
+          integrationBadge.className = "agent-badge integration";
+          badges.appendChild(integrationBadge);
+        }
         if (agent.capabilities && agent.capabilities.permissionApproval) {
           const permBadge = document.createElement("span");
           permBadge.className = "agent-badge accent";
           permBadge.textContent = t("badgePermissionBubble");
           badges.appendChild(permBadge);
         }
-        syncAgentIntegrationBadge(integrationBadge, agent.id);
+        if (!agent.custom) syncAgentIntegrationBadge(integrationBadge, agent.id);
         text.appendChild(badges);
       },
       buildExtraControls: (ctrl) => {
+        if (agent.custom) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "soft-btn danger custom-agent-remove";
+          button.textContent = t("customToolRemove");
+          button.addEventListener("click", async () => {
+            button.disabled = true;
+            try {
+              const result = await window.settingsAPI.command("removeCustomApplication", { id: agent.id });
+              if (!result || result.status !== "ok") throw new Error((result && result.message) || "remove failed");
+              await refreshCustomAgentUi();
+            } catch (err) {
+              ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+              button.disabled = false;
+            }
+          });
+          ctrl.appendChild(button);
+          return;
+        }
         const button = buildAgentIntegrationActionButton(agent);
         const meta = state.mountedControls.agentIntegrationActions.get(agent.id);
         if (meta) {
@@ -633,6 +1083,65 @@
   function buildAgentDetailRows(agent) {
     const rows = [];
     const caps = agent.capabilities || {};
+    if (agent.custom) {
+      const payloadExample = JSON.stringify({
+        agent_id: agent.id,
+        session_id: "your-session-id",
+        state: "working",
+        event: "PreToolUse",
+      });
+      const lastStateEvent = agent.lastStateEvent && Number.isFinite(agent.lastStateEvent.timestamp)
+        ? agent.lastStateEvent
+        : null;
+      const activityText = formatCustomAgentActivity(lastStateEvent);
+      for (const [labelKey, value] of [
+        ["customAgentRegisteredDesc", t("customAgentRegisteredExternal")],
+        ["customToolAgentId", agent.id],
+        ["customAgentStateEndpoint", agent.stateEndpoint || "http://127.0.0.1:<runtime-port>/state"],
+        ["customAgentPayloadExample", payloadExample],
+        ["customAgentActivity", activityText],
+        ["customToolExecutable", agent.executablePath],
+        ["customToolSourcePath", agent.sourcePath],
+      ]) {
+        const row = document.createElement("div");
+        row.className = "row row-sub custom-agent-detail";
+        const text = document.createElement("div");
+        text.className = "row-text";
+        const label = document.createElement("span");
+        label.className = "row-label";
+        label.textContent = t(labelKey);
+        const desc = document.createElement("span");
+        desc.className = "row-desc";
+        if (labelKey === "customAgentPayloadExample") desc.classList.add("custom-agent-payload");
+        if (labelKey === "customAgentActivity") {
+          desc.classList.add("custom-agent-activity");
+          desc.dataset.agentId = agent.id;
+        }
+        desc.textContent = value || "";
+        text.appendChild(label);
+        text.appendChild(desc);
+        row.appendChild(text);
+        if (["customToolAgentId", "customAgentStateEndpoint", "customAgentPayloadExample"].includes(labelKey)) {
+          const copyButton = document.createElement("button");
+          copyButton.type = "button";
+          copyButton.className = "soft-btn custom-agent-copy";
+          copyButton.textContent = t("customAgentCopy");
+          copyButton.addEventListener("click", async () => {
+            try {
+              if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+                throw new Error("clipboard unavailable");
+              }
+              await navigator.clipboard.writeText(value || "");
+              ops.showToast(t("customAgentCopied"));
+            } catch (err) {
+              ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+            }
+          });
+          row.appendChild(copyButton);
+        }
+        rows.push(row);
+      }
+    }
     if (agent.id === "claude-code") {
       rows.push(...buildClaudeHookManagementRows());
     }
@@ -720,9 +1229,56 @@
         },
       }));
     }
+    if (caps.httpHook && caps.customPermissionUrl) {
+      rows.push(buildAgentTextInputRow({
+        agentId: agent.id,
+        command: "setAgentCustomPermissionUrl",
+        labelKey: "rowCodeBuddyCompatiblePermissionUrl",
+        descKey: "rowCodeBuddyCompatiblePermissionUrlDesc",
+        placeholderKey: "rowCodeBuddyCompatiblePermissionUrlPlaceholder",
+        value: () => readers.readAgentCustomPermissionUrl(agent.id),
+      }));
+    }
     // WSL instances: show detected agent installations across distros
     rows.push(...buildAgentInstanceRows(agent));
     return rows;
+  }
+
+  function formatCustomAgentActivity(lastStateEvent) {
+    return lastStateEvent && Number.isFinite(lastStateEvent.timestamp)
+      ? t("customAgentLastState")
+        .replace("{event}", lastStateEvent.eventType || "state")
+        .replace("{time}", new Date(lastStateEvent.timestamp).toLocaleTimeString())
+      : t("customAgentWaiting");
+  }
+
+  function applyAgentActivity(payload) {
+    if (
+      !payload
+      || typeof payload.agentId !== "string"
+      || !Number.isFinite(payload.timestamp)
+    ) return false;
+    const index = (runtime.agentMetadata || []).findIndex((agent) => (
+      agent && agent.custom === true && agent.id === payload.agentId
+    ));
+    if (index < 0) return false;
+    const lastStateEvent = {
+      timestamp: payload.timestamp,
+      eventType: typeof payload.eventType === "string" ? payload.eventType : null,
+    };
+    runtime.agentMetadata[index] = {
+      ...runtime.agentMetadata[index],
+      lastStateEvent,
+    };
+    if (state.activeTab !== "agents") return true;
+    const content = document.getElementById("content");
+    if (!content || typeof content.querySelectorAll !== "function") return true;
+    for (const element of content.querySelectorAll(".custom-agent-activity")) {
+      if (element.dataset && element.dataset.agentId === payload.agentId) {
+        element.textContent = formatCustomAgentActivity(lastStateEvent);
+      }
+    }
+    return true;
   }
 
   // ── WSL instance rows ─────────────────────────────────────────────
@@ -1152,6 +1708,81 @@
     return row;
   }
 
+  function buildAgentTextInputRow({
+    agentId,
+    command,
+    labelKey,
+    descKey,
+    placeholderKey,
+    value,
+  }) {
+    const row = document.createElement("div");
+    row.className = "row row-sub agent-text-input-row";
+
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t(labelKey);
+    text.appendChild(label);
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t(descKey);
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const ctrl = document.createElement("div");
+    ctrl.className = "row-control agent-text-input-control";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = typeof value === "function" ? value() : "";
+    input.placeholder = t(placeholderKey);
+    input.spellcheck = false;
+    input.addEventListener("click", (ev) => ev.stopPropagation());
+    input.addEventListener("keydown", (ev) => {
+      ev.stopPropagation();
+      if (ev.key === "Enter") input.blur();
+    });
+    input.addEventListener("change", () => {
+      saveAgentTextInput(input, { agentId, command });
+    });
+    ctrl.appendChild(input);
+    row.appendChild(ctrl);
+    row._settingsInput = input;
+    row._settingsControl = ctrl;
+    return row;
+  }
+
+  async function saveAgentTextInput(input, { agentId, command }) {
+    if (!window.settingsAPI || typeof window.settingsAPI.command !== "function") {
+      ops.showToast(t("toastSaveFailed") + "settings API unavailable", { error: true });
+      return { status: "error", message: "settings API unavailable" };
+    }
+    const nextValue = input.value;
+    input.disabled = true;
+    try {
+      const result = await window.settingsAPI.command(command, {
+        agentId,
+        value: nextValue,
+      });
+      if (!result || result.status !== "ok") {
+        const msg = (result && result.message) || "unknown error";
+        ops.showToast(t("toastSaveFailed") + msg, { error: true });
+        return result || { status: "error", message: msg };
+      }
+      ops.showToast(t("toastAgentCustomSaved"));
+      if (command === "setAgentCustomDiscoveryPaths" && typeof ops.fetchAgentInstallationHints === "function") {
+        await ops.fetchAgentInstallationHints({ force: true });
+      }
+      return result;
+    } catch (err) {
+      ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+      return { status: "error", message: err && err.message };
+    } finally {
+      input.disabled = false;
+    }
+  }
+
   function patchInPlace(changes) {
     const keys = changes ? Object.keys(changes) : [];
     if (!(keys.length === 1 && keys[0] === "agents")) return false;
@@ -1190,6 +1821,7 @@
     core.tabs.agents = {
       render,
       patchInPlace,
+      applyAgentActivity,
     };
   }
 

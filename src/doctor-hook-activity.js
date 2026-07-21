@@ -125,8 +125,9 @@ function scanFileMtimeActivity(options = {}) {
   ].filter(Boolean);
 }
 
-function eventSummary(events) {
-  const agents = uniqueSorted(events.map((event) => event.agentId));
+function eventSummary(events, resolveAgentDisplayName) {
+  const resolve = typeof resolveAgentDisplayName === "function" ? resolveAgentDisplayName : (agentId) => agentId;
+  const agents = uniqueSorted(events.map((event) => resolve(event.agentId)));
   const outcomes = uniqueSorted(events.map((event) => event.outcome));
   return { agents, outcomes };
 }
@@ -138,7 +139,7 @@ function evaluateConnectionTest(input = {}) {
   const dropped = events.filter((event) => event && typeof event.outcome === "string" && event.outcome.startsWith("dropped-"));
 
   if (accepted.length) {
-    const summary = eventSummary(accepted);
+    const summary = eventSummary(accepted, input.resolveAgentDisplayName);
     return {
       status: "http-verified",
       level: null,
@@ -147,7 +148,7 @@ function evaluateConnectionTest(input = {}) {
   }
 
   if (dropped.length) {
-    const summary = eventSummary(dropped);
+    const summary = eventSummary(dropped, input.resolveAgentDisplayName);
     return {
       status: "http-dropped",
       level: "warning",
@@ -184,7 +185,11 @@ async function runConnectionTest(options = {}) {
   const fileActivity = Array.isArray(options.fileActivity)
     ? options.fileActivity
     : scanFileMtimeActivity({ ...options, since: startedAt });
-  const evaluated = evaluateConnectionTest({ events, fileActivity });
+  const evaluated = evaluateConnectionTest({
+    events,
+    fileActivity,
+    resolveAgentDisplayName: options.resolveAgentDisplayName,
+  });
   return {
     id: "hook-event-waterline",
     startedAt: new Date(startedAt).toISOString(),

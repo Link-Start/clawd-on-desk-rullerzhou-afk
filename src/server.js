@@ -97,12 +97,16 @@ function shouldDropForDnd() {
   return !!ctx.doNotDisturb;
 }
 
-function recordHookEvent(data, route, outcome) {
-  return recordHookEventInBuffer(recentHookEvents, data, route, outcome, { now: nowFn });
+function recordHookEvent(identity, data, route, outcome) {
+  const recorded = recordHookEventInBuffer(recentHookEvents, identity, data, route, outcome, { now: nowFn });
+  if (recorded && typeof ctx.onHookEventRecorded === "function") {
+    try { ctx.onHookEventRecorded(recorded); } catch {}
+  }
+  return recorded;
 }
 
-function createRequestHookRecorder(data, defaultRoute) {
-  return createSingleRequestHookEventRecorder(recordHookEvent, data, defaultRoute);
+function createRequestHookRecorder(identity, data, defaultRoute) {
+  return createSingleRequestHookEventRecorder(recordHookEvent, identity, data, defaultRoute);
 }
 
 function getRecentHookEvents(options = {}) {
@@ -128,6 +132,12 @@ function shouldSyncAgentIntegration(agentId) {
     return ctx.shouldSyncAgentIntegration(agentId) !== false;
   }
   return isAgentEnabled(agentId);
+}
+
+function getAgentIntegrationOptions(agentId) {
+  if (typeof ctx.getAgentIntegrationOptions !== "function") return {};
+  const result = ctx.getAgentIntegrationOptions(agentId);
+  return result && typeof result === "object" ? result : {};
 }
 
 function getHookServerPort() {
@@ -419,6 +429,7 @@ const integrationSync = createIntegrationSyncRuntime({
   shouldManageClaudeHooks,
   isAgentEnabled,
   shouldSyncAgentIntegration,
+  getAgentIntegrationOptions,
   startClaudeSettingsWatcher,
   stopClaudeSettingsWatcher,
 });
@@ -477,7 +488,7 @@ function clearClaudeHookGuardAfterClaudeSync(agentId, result) {
   return result;
 }
 
-function syncIntegrationForAgent(agentId, options) {
+function syncIntegrationForAgent(agentId, options = {}) {
   return clearClaudeHookGuardAfterClaudeSync(agentId, syncIntegrationForAgentBase(agentId, options));
 }
 

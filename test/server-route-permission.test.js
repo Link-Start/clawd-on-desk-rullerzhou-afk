@@ -108,12 +108,14 @@ function callPermissionPost(body, overrides = {}) {
     const recorder = [];
     handlePermissionPost(makeReq(body), res, {
       ctx,
-      createRequestHookRecorder: (data, route) => {
-        recorder.push({ data, route });
+      createRequestHookRecorder: (identity, data, route) => {
+        recorder.push({ identity, data, route });
         return {
           accepted: () => recorder.push({ outcome: "accepted" }),
           droppedByDisabled: () => recorder.push({ outcome: "disabled" }),
           droppedByDnd: () => recorder.push({ outcome: "dnd" }),
+          droppedInvalidAgent: () => recorder.push({ outcome: "invalid-agent" }),
+          droppedUnsupported: () => recorder.push({ outcome: "unsupported" }),
         };
       },
       ...overrides.options,
@@ -584,6 +586,35 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, [entry]);
     assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [entry]);
     assert.deepStrictEqual(res.recorder.map((item) => item.outcome).filter(Boolean), ["accepted"]);
+  });
+
+  it("returns no-decision for a currently registered state-only custom AI", async () => {
+    const id = "custom-nova-ai-0123456789ab";
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: id,
+      session_id: "nova:sid",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      tool_use_id: "tool-custom-1",
+    }), { ctx: { getCustomAgentIds: () => [id] } });
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.ctx.pendingPermissions.length, 0);
+    assert.deepStrictEqual(res.recorder.map((item) => item.outcome).filter(Boolean), ["unsupported"]);
+  });
+
+  it("rejects stale custom ids without creating a Claude permission bubble", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "custom-stale-0123456789ab",
+      hook_source: "copilot-hook",
+      session_id: "stale:sid",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    }));
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.ctx.pendingPermissions.length, 0);
+    assert.strictEqual(res.ctx.calls.showPermissionBubble.length, 0);
+    assert.deepStrictEqual(res.recorder.map((item) => item.outcome).filter(Boolean), ["invalid-agent"]);
   });
 
   it("starts remote approval only after a Claude bubble is shown", async () => {
