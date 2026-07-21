@@ -225,6 +225,17 @@ test("Dashboard renders the resolved custom agent name instead of its raw id", a
   assert.doesNotMatch(renderedText, /custom-nova/);
 });
 
+test("Dashboard keeps curated labels for built-in agents", async () => {
+  const { root } = await loadDashboard([
+    session("codex", { agentId: "codex", agentName: "Codex CLI" }),
+  ]);
+
+  const meta = byClass(root, "meta")[0];
+  const renderedText = meta.children.map((child) => child.textContent || "").join("");
+  assert.match(renderedText, /Codex/);
+  assert.doesNotMatch(renderedText, /Codex CLI/);
+});
+
 test("Dashboard folder click sends only id and exposes open failure", async () => {
   const { root, openCalls } = await loadDashboard([session("local")], { status: "error", message: "denied" });
   await byClass(root, "open-folder-button")[0].dispatch("click");

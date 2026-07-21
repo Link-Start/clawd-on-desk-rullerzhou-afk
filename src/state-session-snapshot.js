@@ -216,7 +216,7 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     : () => null;
   const resolveAgentDisplayName = typeof options.resolveAgentDisplayName === "function"
     ? options.resolveAgentDisplayName
-    : (agentId) => agentId || "";
+    : () => "";
   const agentId = (session && session.agentId) || null;
   const state = (session && session.state) || "idle";
   const hiddenFromHud = shouldAutoClearDetachedSession(session, badge, options)

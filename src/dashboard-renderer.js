@@ -246,7 +246,7 @@ function badgeLabel(badge) {
 }
 
 function agentLabel(agentId, agentName) {
-  return agentName || AGENT_LABELS[agentId] || agentId || t("dashboardUnknownAgent");
+  return AGENT_LABELS[agentId] || agentName || agentId || t("dashboardUnknownAgent");
 }
 
 function agentFallback(agentId, agentName) {

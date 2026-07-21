@@ -382,6 +382,65 @@ describe("CodeBuddy hook installer", () => {
     assert.deepStrictEqual(readJson(settingsPath).hooks.PermissionRequest[0], customHook);
   });
 
+  it("repairs an invalid marker-owned URL in preserve mode without blocking command hooks", () => {
+    const settingsPath = makeTempSettingsFile({
+      hooks: {
+        PermissionRequest: [{
+          matcher: "",
+          hooks: [{
+            name: CLAWD_PERMISSION_HOOK_NAME,
+            type: "http",
+            url: "ws://relay.internal/permission",
+            timeout: 30,
+          }],
+        }],
+      },
+    });
+
+    const result = registerCodeBuddyHooks({
+      silent: true,
+      settingsPath,
+      nodeBin: "/usr/local/bin/node",
+      permissionTarget: { mode: "preserve" },
+    });
+
+    assert.strictEqual(result.added, CODEBUDDY_HOOK_EVENTS.length);
+    const settings = readJson(settingsPath);
+    for (const event of CODEBUDDY_HOOK_EVENTS) {
+      assert.strictEqual(settings.hooks[event].length, 1, event);
+    }
+    const hook = settings.hooks.PermissionRequest[0].hooks[0];
+    assert.strictEqual(__test.isManagedPermissionUrl(hook.url), true);
+    assert.strictEqual(hook.timeout, 30);
+  });
+
+  it("repairs a marker-owned hook with no URL instead of appending a duplicate", () => {
+    const settingsPath = makeTempSettingsFile({
+      hooks: {
+        PermissionRequest: [{
+          matcher: "",
+          hooks: [{
+            name: CLAWD_PERMISSION_HOOK_NAME,
+            type: "http",
+            timeout: 30,
+          }],
+        }],
+      },
+    });
+
+    registerCodeBuddyHooks({
+      silent: true,
+      settingsPath,
+      nodeBin: "/usr/local/bin/node",
+    });
+
+    const entries = readJson(settingsPath).hooks.PermissionRequest;
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0].hooks.length, 1);
+    assert.strictEqual(__test.isManagedPermissionUrl(entries[0].hooks[0].url), true);
+    assert.strictEqual(entries[0].hooks[0].timeout, 30);
+  });
+
   it("uses explicit local/custom targets while preserving adjacent hook fields", () => {
     const settingsPath = makeTempSettingsFile({
       hooks: {

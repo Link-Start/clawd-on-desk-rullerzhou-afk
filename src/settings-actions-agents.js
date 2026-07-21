@@ -22,6 +22,7 @@ const {
   MAX_CUSTOM_APPLICATIONS,
   identifyCustomApplication: defaultIdentifyCustomApplication,
   isCustomApplicationId,
+  isCustomApplicationNamespace,
   normalizeCustomApplications,
 } = require("./custom-applications");
 
@@ -99,6 +100,12 @@ function setAgentFlag(payload, deps) {
     return {
       status: "error",
       message: "setAgentFlag.subagentPermissionsEnabled only supports claude-code",
+    };
+  }
+  if (flag === "permissionsEnabled" && isCustomApplicationNamespace(agentId)) {
+    return {
+      status: "error",
+      message: "setAgentFlag.permissionsEnabled is not supported for custom state-only agents",
     };
   }
   const valueCheck = _validateAgentFlagValue(value);

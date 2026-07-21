@@ -213,6 +213,17 @@ test("settings agent actions save custom discovery paths for the shared custom s
   ]);
 });
 
+test("settings agent actions reject permission gates for custom state-only agents", () => {
+  const result = agentCommands.setAgentFlag({
+    agentId: "custom-nova-ai-0123456789ab",
+    flag: "permissionsEnabled",
+    value: true,
+  }, { snapshot: prefs.getDefaults() });
+
+  assert.strictEqual(result.status, "error");
+  assert.match(result.message, /state-only/);
+});
+
 test("settings agent actions preserve semicolons in array paths and reject overflow", () => {
   const snapshot = prefs.getDefaults();
   const valid = agentCommands.setAgentCustomDiscoveryPaths({

@@ -104,37 +104,10 @@ function uniqueStrings(values) {
   return [...new Set(values.filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim()))];
 }
 
-function pascalFromAgentId(agentId) {
-  return String(agentId || "").split(/[^a-z0-9]+/i).filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("");
-}
-
-function commonWindowsAppPaths(descriptor, options) {
-  if ((options.platform || process.platform) !== "win32") return [];
-  const env = options.env || process.env;
-  const names = uniqueStrings([
-    descriptor.agentName,
-    descriptor.agentName && descriptor.agentName.replace(/\s+/g, ""),
-    descriptor.agentId,
-    pascalFromAgentId(descriptor.agentId),
-  ]);
-  const roots = uniqueStrings([
-    options.homeDir || os.homedir(),
-    env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, "Programs"),
-    env.LOCALAPPDATA,
-    env.PROGRAMFILES,
-    env["PROGRAMFILES(X86)"],
-  ]);
-  return uniqueStrings(roots.flatMap((root) => names.map((name) => path.join(root, name, `${name}.exe`))));
-}
-
 function finalizeAgentPaths(descriptor, paths, options) {
   return {
     ...paths,
-    commandPaths: uniqueStrings([
-      ...(paths.commandPaths || []),
-      ...commonWindowsAppPaths(descriptor, options),
-    ]),
+    commandPaths: uniqueStrings(paths.commandPaths || []),
     customDiscoveryPaths: customDiscoveryPathsForAgent(options, descriptor.agentId),
   };
 }
@@ -334,10 +307,6 @@ function detectInstallation(descriptor, paths, options) {
   const fsImpl = options.fs;
   const custom = detectCustomDiscoveryPath(paths.customDiscoveryPaths, options);
   if (custom) return custom;
-  const appPath = (paths.commandPaths || []).find((candidate) => fileExists(fsImpl, candidate));
-  if (appPath) {
-    return installationResult(true, "high", "app-path", `${descriptor.agentName || descriptor.agentId} application was found at ${appPath}`);
-  }
   switch (descriptor.agentId) {
     case "gemini-cli":
       return detectGeminiInstallation(descriptor, paths, options);

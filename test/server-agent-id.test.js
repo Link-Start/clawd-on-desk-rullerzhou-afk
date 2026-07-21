@@ -81,6 +81,15 @@ describe("resolveHookAgentId", () => {
     });
   });
 
+  it("rejects ASCII case variants of the reserved custom namespace", () => {
+    for (const agentId of ["CUSTOM-nova-ai-0123456789ab", "Custom-BROKEN"]) {
+      const resolved = resolveHookAgentId({ agent_id: agentId, hook_source: "copilot-hook" });
+      assert.strictEqual(resolved.rejected, true);
+      assert.strictEqual(resolved.source, "rejected-custom");
+      assert.strictEqual(resolved.rawAgentId, agentId);
+    }
+  });
+
   it("truncates overlong rejected custom ids for diagnostics", () => {
     const resolved = resolveHookAgentId({ agent_id: `custom-${"x".repeat(200)}` });
     assert.strictEqual(resolved.rejected, true);

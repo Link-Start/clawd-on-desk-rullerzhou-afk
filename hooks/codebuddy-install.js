@@ -69,6 +69,17 @@ function normalizePermissionTarget(value) {
   throw new Error("permissionTarget.mode must be local, custom, or preserve");
 }
 
+function normalizePreservedPermissionUrl(value) {
+  try {
+    return normalizeCustomPermissionUrl(value);
+  } catch {
+    // Preserve is a best-effort compatibility mode for config that already
+    // exists on disk. A malformed marker-owned URL must not prevent the
+    // command hooks from being installed; repair it to the local endpoint.
+    return "";
+  }
+}
+
 function isManagedPermissionHook(hook) {
   if (!hook || hook.type !== "http") return false;
   return hook.name === CLAWD_PERMISSION_HOOK_NAME || isManagedPermissionUrl(hook.url);
@@ -95,7 +106,7 @@ function resolvePermissionUrl(permissionTarget, existingHook, hookPort) {
     && existingHook.name === CLAWD_PERMISSION_HOOK_NAME
     && !isManagedPermissionUrl(existingHook.url)
   ) {
-    return normalizeCustomPermissionUrl(existingHook.url) || buildPermissionUrl(hookPort);
+    return normalizePreservedPermissionUrl(existingHook.url) || buildPermissionUrl(hookPort);
   }
   return buildPermissionUrl(hookPort);
 }
@@ -229,7 +240,7 @@ function registerCodeBuddyHooks(options = {}) {
     const innerHooks = entry.hooks;
     if (Array.isArray(innerHooks)) {
       for (const h of innerHooks) {
-        if (!h || h.type !== "http" || typeof h.url !== "string") continue;
+        if (!h || h.type !== "http") continue;
         // Only URLs we wrote ourselves are eligible for the in-place port
         // refresh; foreign endpoints are skipped and we append our own entry.
         if (!isManagedPermissionHook(h)) continue;
@@ -239,7 +250,7 @@ function registerCodeBuddyHooks(options = {}) {
         break;
       }
     }
-    if (!permFound && entry.type === "http" && typeof entry.url === "string" && isManagedPermissionHook(entry)) {
+    if (!permFound && entry.type === "http" && isManagedPermissionHook(entry)) {
       permFound = true;
       if (entry.name !== CLAWD_PERMISSION_HOOK_NAME) { entry.name = CLAWD_PERMISSION_HOOK_NAME; changed = true; }
       if (entry.url !== permissionUrl) { entry.url = permissionUrl; updated++; changed = true; }
@@ -327,6 +338,7 @@ module.exports = {
     isManagedPermissionHook,
     isManagedPermissionUrl,
     normalizeCustomPermissionUrl,
+    normalizePreservedPermissionUrl,
     normalizePermissionTarget,
     parsePermissionTargetArgv,
     resolvePermissionUrl,

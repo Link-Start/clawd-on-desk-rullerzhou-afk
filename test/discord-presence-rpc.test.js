@@ -61,14 +61,14 @@ test("buildPresencePayload exposes ONLY agent + coarse state + icon by default",
   assert.ok(out.assets && out.assets.large_image); // icon present
 });
 
-test("buildPresencePayload prefers the resolved custom agent name", () => {
+test("buildPresencePayload keeps custom executable names out of public presence", () => {
   const out = buildPresencePayload({
     agentId: "custom-nova-0123456789ab",
     agentName: "Nova AI",
     state: "working",
   });
 
-  assert.strictEqual(out.details, "Nova AI");
+  assert.strictEqual(out.details, "Custom agent");
 });
 
 test("buildPresencePayload adds the project name ONLY when privacyShowProject is on", () => {

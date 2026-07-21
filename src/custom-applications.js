@@ -29,7 +29,7 @@ function isCustomApplicationId(value) {
 }
 
 function isCustomApplicationNamespace(value) {
-  return typeof value === "string" && value.startsWith("custom-");
+  return typeof value === "string" && value.toLowerCase().startsWith("custom-");
 }
 
 function isLaunchable(filePath, stat, platform, pathApi) {

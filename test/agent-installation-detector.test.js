@@ -274,7 +274,7 @@ describe("agent installation detector", () => {
     assert.strictEqual(missing.customAgents[0].detectedInstalled, false);
   });
 
-  it("discovers supported agents in common Windows application roots", () => {
+  it("does not infer built-in agent installs from generic Windows app-name guesses", () => {
     const root = makeHome();
     const localAppData = path.join(root, "LocalAppData");
     const executable = path.join(localAppData, "Programs", "Nova AI", "Nova AI.exe");
@@ -291,10 +291,9 @@ describe("agent installation detector", () => {
       platform: "win32",
       env: { LOCALAPPDATA: localAppData },
     });
-    assert.strictEqual(result.detectedInstalled, true);
-    assert.strictEqual(result.confidence, "high");
-    assert.strictEqual(result.reason, "app-path");
-    assert.match(result.detail, /Nova AI\.exe/);
+    assert.strictEqual(result.detectedInstalled, false);
+    assert.strictEqual(result.confidence, "low");
+    assert.strictEqual(result.reason, "not-found");
   });
 
   describe("kimi dual-generation detection (#563)", () => {

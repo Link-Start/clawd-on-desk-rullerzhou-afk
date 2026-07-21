@@ -415,7 +415,8 @@ const SCHEMA = {
   pendingUpdateVersion: { type: "string", default: "" },
   // Versions the user explicitly dismissed (clicked Later on the scheduler
   // bubble after actually seeing it). Object map of `{ "v0.9.0": true }`
-  // because prefs.js does not support `type: "array"` (see isValidValue).
+  // Keep this as a true-only object map so membership remains explicit and
+  // older prefs readers do not need array-specific dismissal semantics.
   dismissedUpdateVersions: {
     type: "object",
     defaultFactory: () => ({}),
