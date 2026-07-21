@@ -1231,6 +1231,19 @@ html, body {
   background: rgba(0, 0, 0, 0.05);
   color: var(--text-secondary);
 }
+/* Registered custom AI whose executable is gone. Amber like hook-warning:
+   the agent is still connected and can still report state, but the binary it
+   was registered from is no longer where it was found. */
+.agent-badge.custom-missing {
+  background: rgba(180, 120, 20, 0.14);
+  color: #9a6700;
+}
+@media (prefers-color-scheme: dark) {
+  .agent-badge.custom-missing {
+    background: rgba(246, 195, 67, 0.16);
+    color: #f6c343;
+  }
+}
 /* Installed but the hook is broken/disabled/needs-review — amber warning.
    Distinct from green (healthy) and muted (not installed). */
 .agent-badge.integration.hook-warning {

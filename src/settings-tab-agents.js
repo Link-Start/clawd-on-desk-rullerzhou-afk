@@ -1025,6 +1025,16 @@
           registrationBadge.className = "agent-badge integration custom-registration";
           registrationBadge.textContent = t("customToolRegistered");
           badges.appendChild(registrationBadge);
+          // A registered custom AI stays in Connected even when its executable
+          // disappears, so the missing binary has to say so on the row itself —
+          // it used to be reported by the agent dropping into another section.
+          const customHint = getInstallationHint(agent.id, true);
+          if (customHint && customHint.detectedInstalled === false) {
+            const missingBadge = document.createElement("span");
+            missingBadge.className = "agent-badge custom-missing";
+            missingBadge.textContent = t("customToolDetectionMissing");
+            badges.appendChild(missingBadge);
+          }
         } else {
           integrationBadge = document.createElement("span");
           integrationBadge.className = "agent-badge integration";

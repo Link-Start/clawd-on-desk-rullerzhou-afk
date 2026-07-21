@@ -804,6 +804,7 @@ function loadAgentsTabForTest({
           rowCustomToolsDiscoveryPathsDesc: "Choose an AI installation folder.",
           customToolManualAdd: "Choose AI installation folder",
           customToolNotRecognized: "No launchable application found",
+          customToolDetectionMissing: "Path missing",
           agentInstanceScanWsl: "Scan WSL",
           agentInstanceScanWslDesc: "Rescan WSL distros",
           customToolRescan: "Rescan",
@@ -4626,6 +4627,30 @@ describe("settings renderer browser environment", () => {
       ["Nova AI", "QoderWork"]
     );
     assert.strictEqual(harness.content.querySelector(".agent-section-recommended"), null);
+    // Its executable resolves, so no missing-binary badge yet.
+    assert.strictEqual(connected.querySelector(".custom-missing"), null);
+
+    // Losing the executable no longer moves the agent out of Connected, so the
+    // row itself has to report it.
+    harness.core.runtime.agentInstallationHints = {
+      checkedAt: 2,
+      agents: [],
+      customAgents: [{ agentId: id, detectedInstalled: false, confidence: "high" }],
+      customTools: [],
+      skippedAgentIds: [],
+    };
+    harness.core.ops.requestRender({ content: true });
+    harness.raf.flush();
+
+    const stillConnected = harness.content.querySelector(".agent-section-connected");
+    assert.deepStrictEqual(
+      stillConnected.querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
+      ["Nova AI", "QoderWork"],
+      "a vanished executable must not evict the agent from Connected"
+    );
+    const missing = stillConnected.querySelector(".custom-missing");
+    assert.ok(missing, "the row reports the missing executable");
+    assert.strictEqual(missing.textContent, "Path missing");
   });
 
   it("renders Custom AI detection under one manual folder picker", () => {
