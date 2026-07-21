@@ -47,6 +47,12 @@ describe("wsl-deploy", () => {
       assert.strictEqual(getAgentInstallScriptName("opencode"), null);
       assert.strictEqual(getAgentInstallScriptName("openclaw"), null);
     });
+
+    it("excludes workbuddy (no standalone Linux/WSL runtime)", () => {
+      // WorkBuddy ships only as a macOS/Windows Electron desktop app, so there
+      // is no in-WSL settings.json to deploy hooks into. See AGENT_INSTALL_SCRIPT.
+      assert.strictEqual(getAgentInstallScriptName("workbuddy"), null);
+    });
   });
 
   describe("getAgentUninstallCommand", () => {

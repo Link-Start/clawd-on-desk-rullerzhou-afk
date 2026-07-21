@@ -4,8 +4,12 @@ const path = require("path");
 const { pathToFileURL } = require("node:url");
 
 async function loadSessionIdModule() {
-  const modulePath = path.join(__dirname, "..", "hooks", "opencode-plugin", "session-ids.mjs");
-  return import(pathToFileURL(modulePath).href);
+  // session-ids moved into the shared family core (plan §3.2). Merge the
+  // prefix-independent module exports with the opencode-prefixed helper set so
+  // the assertions below keep their original call shape.
+  const modulePath = path.join(__dirname, "..", "hooks", "opencode-family-plugin", "session-ids.mjs");
+  const mod = await import(pathToFileURL(modulePath).href);
+  return { ...mod, ...mod.createSessionIdHelpers("opencode:") };
 }
 
 async function loadPluginModule() {
@@ -17,18 +21,18 @@ describe("opencode plugin session ids", () => {
   it("namespaces raw opencode session ids before sending them to Clawd", async () => {
     const mod = await loadSessionIdModule();
 
-    assert.strictEqual(mod.normalizeOpencodeSessionId("ses_123"), "opencode:ses_123");
-    assert.strictEqual(mod.normalizeOpencodeSessionId("  ses_123  "), "opencode:ses_123");
-    assert.strictEqual(mod.normalizeOpencodeSessionId("opencode:ses_123"), "opencode:ses_123");
-    assert.strictEqual(mod.normalizeOpencodeSessionId(""), null);
+    assert.strictEqual(mod.normalizeSessionId("ses_123"), "opencode:ses_123");
+    assert.strictEqual(mod.normalizeSessionId("  ses_123  "), "opencode:ses_123");
+    assert.strictEqual(mod.normalizeSessionId("opencode:ses_123"), "opencode:ses_123");
+    assert.strictEqual(mod.normalizeSessionId(""), null);
   });
 
   it("falls back to the latest opencode session instead of bare default", async () => {
     const mod = await loadSessionIdModule();
 
-    assert.strictEqual(mod.resolveOpencodeSessionId(null, "ses_latest"), "opencode:ses_latest");
-    assert.strictEqual(mod.resolveOpencodeSessionId(null, "opencode:ses_latest"), "opencode:ses_latest");
-    assert.strictEqual(mod.resolveOpencodeSessionId(null, null), "opencode:default");
+    assert.strictEqual(mod.resolveSessionId(null, "ses_latest"), "opencode:ses_latest");
+    assert.strictEqual(mod.resolveSessionId(null, "opencode:ses_latest"), "opencode:ses_latest");
+    assert.strictEqual(mod.resolveSessionId(null, null), "opencode:default");
   });
 
   it("extracts event.properties.sessionID and top-level event.sessionID", async () => {

@@ -327,10 +327,9 @@ describe("auto-pilot: per-agent allow wire formats", () => {
         const permEntry = makePermEntry({
           res: null,
           agentId: "opencode",
-          isOpencode: true,
-          opencodeRequestId: "per_test_123",
-          opencodeBridgeUrl: `http://127.0.0.1:${port}`,
-          opencodeBridgeToken: "tok_test",
+          familyRequestId: "per_test_123",
+          familyBridgeUrl: `http://127.0.0.1:${port}`,
+          familyBridgeToken: "tok_test",
         });
         perm.pendingPermissions.push(permEntry);
         perm.showPermissionBubble(permEntry);
@@ -338,7 +337,7 @@ describe("auto-pilot: per-agent allow wire formats", () => {
       });
     });
 
-    // Auto-pilot does not set opencodeAlwaysPicked, so the reply is "once"
+    // Auto-pilot does not set familyAlwaysPicked, so the reply is "once"
     // (single-call allow), authenticated with the bridge token.
     assert.equal(received.body.request_id, "per_test_123");
     assert.equal(received.body.reply, "once");

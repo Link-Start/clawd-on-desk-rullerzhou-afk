@@ -17,6 +17,7 @@ const {
   buildToolInputFingerprint,
 } = require("./server-permission-utils");
 const { resolveHookAgentId } = require("./server-agent-id");
+const { isOpencodeFamily } = require("../agents/opencode-family");
 
 const MAX_PERMISSION_BODY_BYTES = 524288;
 
@@ -52,9 +53,11 @@ function shouldBypassCCSubagentBubble(ctx, toolName, agentId, hookIdentity) {
   return !ctx.isAgentSubagentPermissionsEnabled(agentId);
 }
 
-function shouldBypassOpencodeBubble(ctx) {
+function shouldBypassFamilyBubble(ctx, agentId) {
   if (typeof ctx.isAgentPermissionsEnabled !== "function") return false;
-  return !ctx.isAgentPermissionsEnabled("opencode");
+  // Sub-gates stay per-agent: the registry parameterizes the check, it does
+  // not merge the user-facing switches (plan §3.5).
+  return !ctx.isAgentPermissionsEnabled(agentId);
 }
 
 function shouldBypassCodexBubble(ctx) {
@@ -402,28 +405,28 @@ function handlePermissionPost(req, res, options) {
     const { agentId } = hookIdentity;
 
     try {
-      // ── opencode branch ──
-      // opencode plugin (agents/opencode.js) posts fire-and-forget. We
-      // always 200 ACK immediately; the user's decision routes through
-      // a separate REST call to opencode's own server (see permission.js
-      // replyOpencodePermission). This means no res is retained on the
+      // ── opencode-family branch (opencode + opencode-derived runtimes) ──
+      // The family plugin (hooks/opencode-family-plugin/) posts fire-and-forget.
+      // We always 200 ACK immediately; the user's decision routes through
+      // the plugin's reverse bridge (see permission.js
+      // replyOpencodeFamilyPermission). This means no res is retained on the
       // permEntry, no res.on("close") abort handler, and hideBubbles
       // degrades to "TUI only" (plugin doesn't wait on us).
       //
-      // DND handling is branch-specific: opencode cannot observe the
+      // DND handling is branch-specific: the plugin cannot observe the
       // HTTP response (fire-and-forget), so a generic HTTP deny would
       // leave the TUI hanging until timeout. Instead we route DND
       // through the same reverse bridge the plugin uses for replies.
-      if (agentId === "opencode") {
+      if (isOpencodeFamily(agentId)) {
         res.writeHead(200, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
         res.end("ok");
 
         // Agent gate: same silent-drop semantics as DND — plugin is
         // fire-and-forget, so 200 ACK satisfies it; skipping the bridge
-        // reply lets the opencode TUI fall back to its built-in prompt.
-        if (typeof ctx.isAgentEnabled === "function" && !ctx.isAgentEnabled("opencode")) {
+        // reply lets the host TUI fall back to its built-in prompt.
+        if (typeof ctx.isAgentEnabled === "function" && !ctx.isAgentEnabled(agentId)) {
           recordRequestHookEvent.droppedByDisabled();
-          ctx.permLog("opencode disabled → silent drop, TUI fallback");
+          ctx.permLog(`${agentId} disabled → silent drop, TUI fallback`);
           return;
         }
 
@@ -437,41 +440,41 @@ function handlePermissionPost(req, res, options) {
         const alwaysCandidates = Array.isArray(data.always) ? data.always : [];
         const patterns = Array.isArray(data.patterns) ? data.patterns : [];
 
-        ctx.permLog(`opencode perm: tool=${toolName} session=${sessionId} req=${requestId} bridge=${bridgeUrl} always=${alwaysCandidates.length}`);
+        ctx.permLog(`${agentId} perm: tool=${toolName} session=${sessionId} req=${requestId} bridge=${bridgeUrl} always=${alwaysCandidates.length}`);
 
         // bridge_url/bridge_token are required — this is the reverse
         // channel Clawd uses to send the decision back to the plugin,
-        // which then calls opencode's in-process Hono route. Without it
+        // which then calls the host's in-process Hono route. Without it
         // we have no way to resolve the pending permission.
         if (!requestId || !bridgeUrl || !bridgeToken) {
           const missing = !requestId ? "request_id" : (!bridgeUrl ? "bridge_url" : "bridge_token");
           recordRequestHookEvent.accepted();
-          ctx.permLog(`SKIPPED opencode perm: missing ${missing}`);
+          ctx.permLog(`SKIPPED ${agentId} perm: missing ${missing}`);
           return;
         }
 
-        // DND: drop silently — do NOT reply via bridge. opencode TUI
+        // DND: drop silently — do NOT reply via bridge. The host TUI
         // will fall back to its built-in permission prompt so the user
         // can confirm in the terminal themselves. Spike 2026-04-06
         // confirmed this works: TUI shows Allow/Reject without hanging.
         if (ctx.doNotDisturb) {
           recordRequestHookEvent.droppedByDnd();
-          ctx.permLog(`opencode DND → silent drop, TUI fallback — request=${requestId}`);
+          ctx.permLog(`${agentId} DND → silent drop, TUI fallback — request=${requestId}`);
           return;
         }
 
         if (isHeadlessPermissionRequest(ctx, sessionId, data)) {
           recordRequestHookEvent.accepted();
-          ctx.permLog(`opencode headless session=${sessionId} → silent drop, TUI fallback — request=${requestId}`);
+          ctx.permLog(`${agentId} headless session=${sessionId} → silent drop, TUI fallback — request=${requestId}`);
           return;
         }
 
         // No HTTP connection to hold open — only degradation is to
         // not render a bubble and let the TUI prompt handle it.
-        const opencodeSubGateBypass = shouldBypassOpencodeBubble(ctx);
-        if (!arePermissionBubblesEnabled(ctx) || opencodeSubGateBypass) {
+        const familySubGateBypass = shouldBypassFamilyBubble(ctx, agentId);
+        if (!arePermissionBubblesEnabled(ctx) || familySubGateBypass) {
           recordRequestHookEvent.accepted();
-          ctx.permLog(`opencode bubble hidden: tool=${toolName} — TUI fallback (permissionBubblesEnabled=${arePermissionBubblesEnabled(ctx)} subGateBypass=${opencodeSubGateBypass})`);
+          ctx.permLog(`${agentId} bubble hidden: tool=${toolName} — TUI fallback (permissionBubblesEnabled=${arePermissionBubblesEnabled(ctx)} subGateBypass=${familySubGateBypass})`);
           return;
         }
 
@@ -486,13 +489,16 @@ function handlePermissionPost(req, res, options) {
           toolInput,
           resolvedSuggestion: null,
           createdAt: Date.now(),
-          agentId: "opencode",
-          isOpencode: true,
-          opencodeRequestId: requestId,
-          opencodeBridgeUrl: bridgeUrl,
-          opencodeBridgeToken: bridgeToken,
-          opencodeAlwaysCandidates: alwaysCandidates,
-          opencodePatterns: patterns,
+          // Public identity field — generic consumers (focus, logging, remote
+          // approval, disable-agent sweep) key off it; never replace it with a
+          // family-specific field (plan §3.5).
+          agentId,
+          // Neutral family bridge fields — one vocabulary for every member.
+          familyRequestId: requestId,
+          familyBridgeUrl: bridgeUrl,
+          familyBridgeToken: bridgeToken,
+          familyAlwaysCandidates: alwaysCandidates,
+          familyPatterns: patterns,
         };
         addPendingPermission(ctx, permEntry);
         // Play notification animation on the pet body so the bubble doesn't
@@ -500,8 +506,8 @@ function handlePermissionPost(req, res, options) {
         // and the Elicitation branch below. state.js:581 has a special
         // PermissionRequest branch that setStates notification without
         // mutating session state — so working/thinking is preserved for resolve.
-        ctx.updateSession(sessionId, "notification", "PermissionRequest", { agentId: "opencode" });
-        ctx.permLog(`opencode showing bubble: tool=${toolName} session=${sessionId}`);
+        ctx.updateSession(sessionId, "notification", "PermissionRequest", { agentId });
+        ctx.permLog(`${agentId} showing bubble: tool=${toolName} session=${sessionId}`);
         recordRequestHookEvent.accepted();
         try {
           ctx.showPermissionBubble(permEntry);
@@ -510,12 +516,12 @@ function handlePermissionPost(req, res, options) {
           // window-positioning crash, etc), we have already 200-ACKed
           // the plugin and it is waiting for a bridge reply. Without
           // this rescue the permEntry would linger in pendingPermissions
-          // until the opencode TUI hits its own timeout (minutes).
+          // until the host TUI hits its own timeout (minutes).
           // Pop the ghost entry and send an immediate reject so the
           // TUI unblocks and the user can re-answer in the terminal.
-          ctx.permLog(`opencode bubble failed: ${bubbleErr && bubbleErr.message} — reject via bridge`);
-          removePendingPermission(ctx, permEntry, "opencode-bubble-failed");
-          ctx.replyOpencodePermission({ bridgeUrl, bridgeToken, requestId, reply: "reject", toolName });
+          ctx.permLog(`${agentId} bubble failed: ${bubbleErr && bubbleErr.message} — reject via bridge`);
+          removePendingPermission(ctx, permEntry, `${agentId}-bubble-failed`);
+          ctx.replyOpencodeFamilyPermission({ agentId, bridgeUrl, bridgeToken, requestId, reply: "reject", toolName });
         }
         return;
       }
@@ -1278,7 +1284,7 @@ module.exports = {
   shouldBypassCodexBubble,
   shouldBypassQwenCodeBubble,
   shouldBypassCopilotBubble,
-  shouldBypassOpencodeBubble,
+  shouldBypassFamilyBubble,
   arePermissionBubblesEnabled,
   shouldInterceptCodexPermission,
   shouldMuteCodexNativeNotificationSound,

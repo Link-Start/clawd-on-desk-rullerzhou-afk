@@ -3,6 +3,7 @@
 const {
   applyStationaryCollectionBehavior: defaultApplyStationaryCollectionBehavior,
 } = require("./mac-window");
+const { animateWindowOpacity } = require("./window-opacity-transition");
 
 const WIN_TOPMOST_LEVEL = "pop-up-menu";  // above taskbar-level UI
 const MAC_TOPMOST_LEVEL = "screen-saver"; // above fullscreen apps on macOS
@@ -14,6 +15,13 @@ const TOPMOST_WATCHDOG_MS = 5_000;
 // this polls ~1s instead of riding the slow watchdog (which left a ~5s window).
 const FOCUSABLE_POLL_MS = 1_000;
 const HWND_RECOVERY_DELAY_MS = 1000;
+// #640: while a bubble text field is focused AND the pet visually overlaps that
+// bubble, the pet fades to this opacity and its hit window goes click-through.
+// The pet lives in the SkyLight private space (always above the editing bubble,
+// which drops to the normal level — #626), so until a native de-delegation
+// exists this is the polite way to keep the input box readable and clickable.
+const IME_EDIT_PET_FADE_OPACITY = 0.18;
+const IME_EDIT_PET_FADE_MS = 160;
 
 function isLiveWindow(win) {
   return !!(win && typeof win.isDestroyed === "function" && !win.isDestroyed());
@@ -21,6 +29,28 @@ function isLiveWindow(win) {
 
 function defaultGetter(value) {
   return typeof value === "function" ? value : () => value;
+}
+
+// Accepts both rect shapes in use across the codebase: window bounds are
+// { x, y, width, height } while hit-geometry rects (getHitRectScreen) are
+// { left, top, right, bottom }.
+function normalizeRect(rect) {
+  if (!rect) return null;
+  if (Number.isFinite(rect.x) && Number.isFinite(rect.width)) {
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  }
+  if (Number.isFinite(rect.left) && Number.isFinite(rect.right)) {
+    return { x: rect.left, y: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top };
+  }
+  return null;
+}
+
+function rectsIntersect(rawA, rawB) {
+  const a = normalizeRect(rawA);
+  const b = normalizeRect(rawB);
+  if (!a || !b) return false;
+  if (a.width <= 0 || a.height <= 0 || b.width <= 0 || b.height <= 0) return false;
+  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 
 function createTopmostRuntime(options = {}) {
@@ -34,6 +64,13 @@ function createTopmostRuntime(options = {}) {
   const getContextMenuOwner = options.getContextMenuOwner || (() => null);
   const getNearestWorkArea = options.getNearestWorkArea || (() => null);
   const getPetWindowBounds = options.getPetWindowBounds || (() => null);
+  // #640: tight screen-space rect of the visible pet sprite (the pet window
+  // frame is much larger than what's drawn). Falls back to the window bounds
+  // when unset, which only makes the overlap test more conservative.
+  const getHitRectScreen = options.getHitRectScreen || (() => null);
+  const imeEditingFadeMs = Number.isFinite(options.imeEditingFadeMs)
+    ? options.imeEditingFadeMs
+    : IME_EDIT_PET_FADE_MS;
   const getShowDock = options.getShowDock || (() => true);
   const isDragLocked = options.isDragLocked || (() => false);
   const isMiniAnimating = options.isMiniAnimating || (() => false);
@@ -61,6 +98,11 @@ function createTopmostRuntime(options = {}) {
   // fullscreen ends because dragging needs it (#545). No-op off Windows / when
   // unset. (#538 drag focus-steal)
   const setHitWinFocusable = options.setHitWinFocusable || (() => {});
+  // #525: cloak self-heal hook, run at the tail of each watchdog tick. The
+  // callee (pet-window-runtime recoverIfCloaked) carries its own guards and
+  // exponential backoff; the watchdog only decides WHEN it's appropriate to
+  // try at all (see the fullscreen stand-down at the call site).
+  const recoverCloakedPet = options.recoverCloakedPet || (() => {});
   const setForceEyeResend = options.setForceEyeResend || (() => {});
   const applyPetWindowPosition = options.applyPetWindowPosition || (() => {});
   const syncHitWin = options.syncHitWin || (() => {});
@@ -80,6 +122,14 @@ function createTopmostRuntime(options = {}) {
   let focusablePoll = null;
   let hwndRecoveryTimer = null;
   let pendingNudgeRestore = null;
+  // #640 editing-overlap dodge state: true while the pet is faded +
+  // click-through because it overlaps the bubble being typed into.
+  let imeEditingPetDodge = false;
+  // Tracked separately from the dodge boolean: the hit window's click-through
+  // write is deferred while a drag is in flight (see syncImeEditingPetDodge),
+  // so "what we want" and "what we last wrote" can legitimately differ.
+  let imeEditingHitIgnoreApplied = false;
+  let imeEditingFadeCancel = null;
 
   function reassertWinTopmost() {
     if (!isWin) return;
@@ -149,6 +199,90 @@ function createTopmostRuntime(options = {}) {
     apply(getUpdateBubbleWindow());
     apply(getSessionHudWindow());
     apply(getContextMenuOwner());
+    syncImeEditingPetDodge();
+  }
+
+  function findImeEditingBubble() {
+    for (const perm of getPendingPermissions() || []) {
+      const bubble = perm && perm.bubble;
+      if (isLiveWindow(bubble) && bubble.__clawdMacImeEditing) return bubble;
+    }
+    return null;
+  }
+
+  function fadePetWindow(targetOpacity) {
+    if (imeEditingFadeCancel) imeEditingFadeCancel.cancelled = true;
+    const signal = { cancelled: false };
+    imeEditingFadeCancel = signal;
+    const win = getWin();
+    if (!isLiveWindow(win) || typeof win.setOpacity !== "function") return;
+    animateWindowOpacity(win, targetOpacity, {
+      durationMs: imeEditingFadeMs,
+      cancelSignal: signal,
+      setTimeout: setTimeoutFn,
+      clearTimeout: clearTimeoutFn,
+    });
+  }
+
+  // #640: while a bubble text field is focused (permission.js handleImeEditing,
+  // macOS only) AND the pet sprite overlaps that bubble, the pet politely steps
+  // back: its render window fades to IME_EDIT_PET_FADE_OPACITY and the hit
+  // window stops intercepting clicks, so the box being typed into stays
+  // readable and clickable underneath. The pet stays in the SkyLight private
+  // space — always above the editing bubble, which #626 drops to the normal
+  // level — so until a native space de-delegation exists (#640 phase 2) this
+  // fade is the mitigation. Edge-triggered on the overlap state; every
+  // transition path funnels here: handleImeEditing calls reapplyMacVisibility,
+  // pet moves call this directly (main.js), and every pendingPermissions
+  // add/remove calls this via notifyPermissionsChanged (permission.js) — that
+  // last one covers bubbles that leave the list while their text field still
+  // holds focus (Enter submit, auto-close), where no blur ever fires.
+  // The hit window's ignore-mouse has exactly one other writer — the Windows
+  // settings-size-preview protection (pet-window-runtime.js) — which is
+  // platform-disjoint with this macOS-only path, so the two never fight.
+  // The render window's opacity has one other writer, the theme-switch fade
+  // (theme-fade-sequencer.js): its restore target asks getPetTargetOpacity()
+  // below instead of assuming 1, so a mid-edit theme reload lands back on the
+  // faded value rather than snapping the pet opaque over the input box.
+  function syncImeEditingPetDodge() {
+    if (!isMac) return;
+    const editingBubble = findImeEditingBubble();
+    let overlap = false;
+    if (editingBubble && typeof editingBubble.getBounds === "function") {
+      const petBounds = getPetWindowBounds();
+      let petRect = null;
+      try { petRect = getHitRectScreen(petBounds); } catch { petRect = null; }
+      if (!petRect) petRect = petBounds;
+      let bubbleRect = null;
+      try { bubbleRect = editingBubble.getBounds(); } catch { bubbleRect = null; }
+      overlap = rectsIntersect(petRect, bubbleRect);
+    }
+    if (overlap !== imeEditingPetDodge) {
+      imeEditingPetDodge = overlap;
+      fadePetWindow(overlap ? IME_EDIT_PET_FADE_OPACITY : 1);
+    }
+    // The click-through write is deferred while a drag is in flight: an
+    // established macOS mouse-tracking session keeps delivering the drag's
+    // events, but Electron's setIgnoreMouseEvents contract makes no promise
+    // about toggling mid-gesture — flipping it here could strand the drag
+    // with dragLocked stuck true. The fade above still runs mid-drag (that
+    // transition is the hands-on-verified experience); the ignore-mouse state
+    // is applied on the next sync after the drag ends (pet-interaction-ipc
+    // re-runs this on drag-lock release).
+    if (isDragLocked()) return;
+    if (imeEditingHitIgnoreApplied === imeEditingPetDodge) return;
+    const hitWin = getHitWin();
+    if (isLiveWindow(hitWin) && typeof hitWin.setIgnoreMouseEvents === "function") {
+      hitWin.setIgnoreMouseEvents(imeEditingPetDodge);
+      imeEditingHitIgnoreApplied = imeEditingPetDodge;
+    }
+  }
+
+  // #640: the render window's baseline opacity as far as the dodge is
+  // concerned. External opacity writers that restore "full" opacity (the
+  // theme-switch fade) must ask this instead of hardcoding 1.
+  function getPetTargetOpacity() {
+    return imeEditingPetDodge ? IME_EDIT_PET_FADE_OPACITY : 1;
   }
 
   function isNearWorkAreaEdge(bounds, tolerance = 2) {
@@ -278,6 +412,11 @@ function createTopmostRuntime(options = {}) {
       reassertWindowAndTaskbar(getWin(), { skipTopmost });
       reassertWindowAndTaskbar(getHitWin(), { skipTopmost });
 
+      // #525: periodic cloak self-heal. Skipped while standing down for a
+      // fullscreen app — recovery calls showInactive()/setAlwaysOnTop, exactly
+      // the interference stand-down exists to avoid (§8.3).
+      if (!skipTopmost) recoverCloakedPet();
+
       for (const perm of getPendingPermissions()) {
         const bubble = perm && perm.bubble;
         if (isLiveWindow(bubble) && bubble.isVisible()) {
@@ -348,11 +487,17 @@ function createTopmostRuntime(options = {}) {
       hwndRecoveryTimer = null;
     }
     pendingNudgeRestore = null;
+    if (imeEditingFadeCancel) {
+      imeEditingFadeCancel.cancelled = true;
+      imeEditingFadeCancel = null;
+    }
   }
 
   return {
     reassertWinTopmost,
     reapplyMacVisibility,
+    syncImeEditingPetDodge,
+    getPetTargetOpacity,
     isNearWorkAreaEdge,
     scheduleHwndRecovery,
     guardAlwaysOnTop,
@@ -366,6 +511,7 @@ function createTopmostRuntime(options = {}) {
 
 createTopmostRuntime.WIN_TOPMOST_LEVEL = WIN_TOPMOST_LEVEL;
 createTopmostRuntime.MAC_TOPMOST_LEVEL = MAC_TOPMOST_LEVEL;
+createTopmostRuntime.IME_EDIT_PET_FADE_OPACITY = IME_EDIT_PET_FADE_OPACITY;
 createTopmostRuntime.TOPMOST_WATCHDOG_MS = TOPMOST_WATCHDOG_MS;
 createTopmostRuntime.FOCUSABLE_POLL_MS = FOCUSABLE_POLL_MS;
 createTopmostRuntime.HWND_RECOVERY_DELAY_MS = HWND_RECOVERY_DELAY_MS;

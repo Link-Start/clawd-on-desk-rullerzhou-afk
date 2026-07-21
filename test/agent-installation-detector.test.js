@@ -320,4 +320,36 @@ describe("agent installation detector", () => {
       assert.ok(kimi.clawdIntegration.detail.includes(".kimi-code"));
     });
   });
+
+  describe("WorkBuddy dual-generation detection", () => {
+    it("prefers current ~/.workbuddy-ai when current and legacy directories both exist", () => {
+      const homeDir = makeHome();
+      mkdirp(path.join(homeDir, ".workbuddy-ai"));
+      mkdirp(path.join(homeDir, ".workbuddy"));
+
+      const report = detectAgentInstallations({ homeDir, now: 1, env: {} });
+      const workbuddy = byId(report, "workbuddy");
+
+      assert.strictEqual(workbuddy.detectedInstalled, true);
+      assert.strictEqual(workbuddy.confidence, "high");
+      assert.ok(workbuddy.detail.includes(".workbuddy-ai"), workbuddy.detail);
+    });
+
+    it("falls back to legacy ~/.workbuddy and finds its Clawd marker", () => {
+      const homeDir = makeHome();
+      writeJson(path.join(homeDir, ".workbuddy", "settings.json"), {
+        hooks: {
+          Stop: [{ hooks: [{ type: "command", command: '"node" "/app/hooks/workbuddy-hook.js"' }] }],
+        },
+      });
+
+      const report = detectAgentInstallations({ homeDir, now: 1, env: {} });
+      const workbuddy = byId(report, "workbuddy");
+
+      assert.strictEqual(workbuddy.detectedInstalled, true);
+      assert.ok(workbuddy.detail.includes(".workbuddy"), workbuddy.detail);
+      assert.strictEqual(workbuddy.clawdIntegration.detected, true);
+      assert.ok(workbuddy.clawdIntegration.detail.includes(".workbuddy"));
+    });
+  });
 });

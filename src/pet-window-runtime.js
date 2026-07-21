@@ -21,6 +21,7 @@ const {
   needsFinalClampAdjustment: needsFinalClampAdjustmentRaw,
   materializeVirtualBounds: materializeVirtualBoundsRaw,
 } = require("./drag-position");
+const { classifyCloakState } = require("./win-cloak-recovery");
 
 const noop = () => {};
 const DEFAULT_CRASH_RELOAD_LIMIT = 5;
@@ -127,8 +128,17 @@ function createPetWindowRuntime(options = {}) {
   const buildTrayMenu = options.buildTrayMenu || noop;
   const buildContextMenu = options.buildContextMenu || noop;
   const reapplyMacVisibility = options.reapplyMacVisibility || noop;
+  // #640: re-run the editing-overlap dodge whenever the hit geometry syncs —
+  // the hitbox can change without the window moving (state switches between
+  // hitboxes, theme reload), which changes the overlap answer.
+  const syncImeEditingPetDodge = options.syncImeEditingPetDodge || noop;
   const reassertWinTopmost = options.reassertWinTopmost || noop;
   const scheduleHwndRecovery = options.scheduleHwndRecovery || noop;
+  // #525: DWM cloak probe + un-cloak primitives (win-cloak-recovery.js).
+  // Absent/unavailable inspector degrades every cloak path to a no-op.
+  const cloakInspector = options.cloakInspector || null;
+  const isMiniAnimating = options.isMiniAnimating || (() => false);
+  const now = options.now || (() => Date.now());
   const isNearWorkAreaEdge = options.isNearWorkAreaEdge || (() => false);
   const flushRuntimeStateToPrefs = options.flushRuntimeStateToPrefs || noop;
   const handleMiniDisplayChange = options.handleMiniDisplayChange || noop;
@@ -247,14 +257,28 @@ function createPetWindowRuntime(options = {}) {
     return petHidden;
   }
 
+  // #525: clear an abnormal DWM cloak before showing. showInactive() alone
+  // does NOT un-cloak (hide/show cycling is unreliable for that — plan §1.2-B);
+  // DwmSetWindowAttribute(DWMWA_CLOAK, FALSE) is the direct primitive. Windows
+  // parked on another virtual desktop are deliberately left alone.
+  function uncloakIfAbnormal(win) {
+    if (!cloakInspector || !cloakInspector.available || !isLiveWindow(win)) return false;
+    const flag = cloakInspector.readCloakState(win);
+    const verdict = classifyCloakState(flag, flag === 0 ? true : cloakInspector.isOnCurrentVirtualDesktop(win));
+    if (verdict !== "recover") return false;
+    return cloakInspector.uncloak(win);
+  }
+
   function showPetWindows() {
     const win = getRenderWindow();
     if (isLiveWindow(win)) {
+      uncloakIfAbnormal(win);
       win.showInactive();
       keepOutOfTaskbar(win);
     }
     const hitWin = getHitWindow();
     if (isLiveWindow(hitWin)) {
+      uncloakIfAbnormal(hitWin);
       hitWin.showInactive();
       keepOutOfTaskbar(hitWin);
     }
@@ -299,6 +323,81 @@ function createPetWindowRuntime(options = {}) {
 
   function togglePetVisibility() {
     return setPetHidden(!petHidden);
+  }
+
+  // ── #525: self-healing for cloaked-yet-supposedly-visible windows ──
+  //
+  // Called from the 5s topmost watchdog, powerMonitor resume/unlock, and the
+  // second-instance handler. Deliberately NOT wired into togglePetVisibility:
+  // hide must always mean hide (a cloak-aware toggle polarity degenerates into
+  // "can never hide" on machines whose cloak flag reads permanently non-zero —
+  // the exact regression review round 2026-07-16 blocked in the external
+  // patch). Recovery failures back off exponentially so a stubborn cloak never
+  // turns the watchdog into a 5s hide/show strobe.
+  const CLOAK_BACKOFF_BASE_MS = 5_000;
+  const CLOAK_BACKOFF_MAX_MS = 300_000;
+  let cloakFailStreak = 0;
+  let cloakCooldownUntil = 0;
+
+  function recoverIfCloaked() {
+    if (!cloakInspector || !cloakInspector.available) return "unavailable";
+    if (petHidden) return "hidden";
+    if (getMiniTransitioning() || isMiniAnimating() || dragLocked) return "busy";
+    if (settingsSizePreviewSyncFrozen) return "frozen";
+    if (now() < cloakCooldownUntil) return "backoff";
+
+    const targets = [getRenderWindow(), getHitWindow()].filter(isLiveWindow);
+    if (!targets.length) return "no-window";
+
+    let attempted = false;
+    let touched = false;
+    let stillCloaked = false;
+    for (const win of targets) {
+      const flag = cloakInspector.readCloakState(win);
+      if (flag === 0) continue;
+      const verdict = classifyCloakState(flag, cloakInspector.isOnCurrentVirtualDesktop(win));
+      if (verdict !== "recover") continue;
+      attempted = true;
+      // Fail-open contract: if the DWM un-cloak call itself fails, do NOT go
+      // on to touch the window (show/taskbar/topmost would be a behavior
+      // change over the pre-#525 no-op, and a fail-open re-read of 0 could
+      // then mislabel the round "recovered"). Count it as a failure and let
+      // the backoff decide when to try again.
+      if (!cloakInspector.uncloak(win)) {
+        stillCloaked = true;
+        continue;
+      }
+      win.showInactive();
+      keepOutOfTaskbar(win);
+      touched = true;
+      if (cloakInspector.readCloakState(win) !== 0) stillCloaked = true;
+    }
+    if (!attempted) {
+      // Nothing abnormal this round: the previous fault (if any) resolved on
+      // its own, so the NEXT independent fault must start from a fresh 10s
+      // backoff instead of inheriting an escalated cooldown.
+      cloakFailStreak = 0;
+      cloakCooldownUntil = 0;
+      return "clean";
+    }
+
+    // Same fail-open contract as above, second exit: a round where every
+    // un-cloak call failed must not re-assert topmost either — that would
+    // setAlwaysOnTop both windows on a path where native calls are failing.
+    if (touched) reassertWinTopmost();
+    if (!stillCloaked) {
+      cloakFailStreak = 0;
+      cloakCooldownUntil = 0;
+      scheduleHwndRecovery();
+      return "recovered";
+    }
+    cloakFailStreak += 1;
+    const backoff = Math.min(
+      CLOAK_BACKOFF_BASE_MS * 2 ** cloakFailStreak,
+      CLOAK_BACKOFF_MAX_MS
+    );
+    cloakCooldownUntil = now() + backoff;
+    return "failed";
   }
 
   function bringPetToPrimaryDisplay() {
@@ -488,6 +587,10 @@ function createPetWindowRuntime(options = {}) {
       hitWin.setShape([{ x: 0, y: 0, width: w, height: h }]);
     }
     repositionSessionHud();
+    // #640: the hit rect just (re)resolved — state switches and theme reloads
+    // change hitboxes without moving the window, so the overlap answer can
+    // flip right here. Cheap + edge-triggered inside.
+    syncImeEditingPetDodge();
   }
 
   function getInitialHitWindowBounds(renderBounds = getPetWindowBounds()) {
@@ -632,7 +735,10 @@ function createPetWindowRuntime(options = {}) {
     // setShape: native hit region, no per-pixel alpha dependency.
     // hitWin has no visual content, so clipping is irrelevant.
     hitWin.setShape([{ x: 0, y: 0, width: initialHitWindowBounds.width, height: initialHitWindowBounds.height }]);
-    hitWin.setIgnoreMouseEvents(false); // PERMANENT: never toggle outside settings preview protection.
+    // Baseline: interactive. Only two writers may toggle this — the Windows
+    // settings-size-preview protection (below) and the macOS editing-overlap
+    // dodge (#640, topmost-runtime.js). They are platform-disjoint.
+    hitWin.setIgnoreMouseEvents(false);
     if (isMac) hitWin.setFocusable(false);
     hitWin.showInactive();
     keepOutOfTaskbar(hitWin);
@@ -875,6 +981,7 @@ function createPetWindowRuntime(options = {}) {
     isPetHidden,
     setPetHidden,
     togglePetVisibility,
+    recoverIfCloaked,
     bringPetToPrimaryDisplay,
     getViewportOffsetY,
     setViewportOffsetY,

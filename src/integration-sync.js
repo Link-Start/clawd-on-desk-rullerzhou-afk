@@ -91,12 +91,16 @@ function createIntegrationSyncRuntime(options = {}) {
     }
   }
 
-  function syncClawdHooks() {
+  function syncClawdHooks(options = {}) {
+    const source = typeof options.source === "string" ? options.source : null;
+    const automatic = options.automatic !== false;
     try {
       if (typeof ctx.syncClawdHooksImpl === "function") {
         return ctx.syncClawdHooksImpl({
           autoStart: ctx.autoStartWithClaude,
           port: getHookServerPort(),
+          source,
+          automatic,
         });
       }
       const { registerHooks, registerClaudeStatusline } = require("../hooks/install.js");
@@ -181,6 +185,21 @@ function createIntegrationSyncRuntime(options = {}) {
     } catch (err) {
       console.warn("Clawd: failed to sync CodeBuddy hooks:", err.message);
       return { status: "error", message: err && err.message ? err.message : "Failed to sync CodeBuddy hooks" };
+    }
+  }
+
+  function syncWorkBuddyHooks() {
+    try {
+      if (typeof ctx.syncWorkBuddyHooksImpl === "function") return ctx.syncWorkBuddyHooksImpl();
+      const { registerWorkBuddyHooks } = require("../hooks/workbuddy-install.js");
+      const result = registerWorkBuddyHooks({ silent: true });
+      if (hasPositiveCount(result.added) || hasPositiveCount(result.updated)) {
+        console.log(`Clawd: synced WorkBuddy hooks (added ${result.added}, updated ${result.updated})`);
+      }
+      return normalizeCountSyncResult(result, "WorkBuddy", "workbuddy-not-installed");
+    } catch (err) {
+      console.warn("Clawd: failed to sync WorkBuddy hooks:", err.message);
+      return { status: "error", message: err && err.message ? err.message : "Failed to sync WorkBuddy hooks" };
     }
   }
 
@@ -330,6 +349,24 @@ function createIntegrationSyncRuntime(options = {}) {
     }
   }
 
+  function syncMimocodePlugin() {
+    try {
+      if (typeof ctx.syncMimocodePluginImpl === "function") return ctx.syncMimocodePluginImpl();
+      const { registerMimocodePlugin } = require("../hooks/mimocode-install.js");
+      const result = registerMimocodePlugin({ silent: true });
+      if (result.added || result.created) {
+        console.log(`Clawd: synced mimocode plugin (added=${result.added}, created=${result.created})`);
+      }
+      if (result && result.reason === "mimocode-not-found") {
+        return asSkipped(result, "mimocode-not-found", "mimocode is not installed; skipped plugin sync");
+      }
+      return asOk(result);
+    } catch (err) {
+      console.warn("Clawd: failed to sync mimocode plugin:", err.message);
+      return { status: "error", message: err && err.message ? err.message : "Failed to sync mimocode plugin" };
+    }
+  }
+
   function syncPiExtension() {
     try {
       if (typeof ctx.syncPiExtensionImpl === "function") return ctx.syncPiExtensionImpl();
@@ -473,12 +510,14 @@ function createIntegrationSyncRuntime(options = {}) {
     "cursor-agent": syncCursorHooks,
     "copilot-cli": syncCopilotHooks,
     codebuddy: syncCodeBuddyHooks,
+    workbuddy: syncWorkBuddyHooks,
     "kiro-cli": syncKiroHooks,
     "kimi-cli": syncKimiHooks,
     "qwen-code": syncQwenHooks,
     codewhale: syncCodewhaleHooks,
     codex: syncCodexHooks,
     opencode: syncOpencodePlugin,
+    mimocode: syncMimocodePlugin,
     pi: syncPiExtension,
     openclaw: syncOpenClawPlugin,
     hermes: syncHermesPlugin,
@@ -493,11 +532,34 @@ function createIntegrationSyncRuntime(options = {}) {
     openclaw: repairOpenClawPlugin,
   });
 
+  function isClaudeSyncErrorResult(result) {
+    return !!(result && typeof result === "object" && result.status === "error");
+  }
+
   function syncIntegrationForAgent(agentId, options = {}) {
     if (agentId === "claude-code") {
       if (!shouldManageClaudeHooks()) return false;
-      const result = syncClawdHooks();
-      startClaudeSettingsWatcher();
+      const result = syncClawdHooks(options);
+      // Claude watcher baseline seeding reads settings.json, so it must not run
+      // until this sync has actually settled — an in-flight (queued) async sync
+      // must not be mistaken for a completed one. Synchronous/test-injected
+      // seams (no .then) keep the prior immediate-start behavior.
+      //
+      // The watcher only starts when the sync actually succeeded: Settings
+      // Agent Install/Enable call this path with the agent's installed/enabled
+      // state still contingent on THIS result — starting the watcher on
+      // failure would leave it running for an agent prefs still show as
+      // disabled/uninstalled. (Doctor Fix's repairIntegrationForAgent()
+      // below starts the watcher unconditionally instead, since by the time
+      // it runs, enabled is already an established precondition independent
+      // of this particular repair's outcome.)
+      if (result && typeof result === "object" && typeof result.then === "function") {
+        return result.then((resolved) => {
+          if (!isClaudeSyncErrorResult(resolved)) startClaudeSettingsWatcher();
+          return resolved;
+        });
+      }
+      if (!isClaudeSyncErrorResult(result)) startClaudeSettingsWatcher();
       return result && typeof result === "object" ? result : true;
     }
     const sync = AGENT_INTEGRATION_SYNCERS[agentId];
@@ -508,7 +570,20 @@ function createIntegrationSyncRuntime(options = {}) {
 
   function repairIntegrationForAgent(agentId, options = {}) {
     if (agentId === "claude-code") {
-      return syncIntegrationForAgent(agentId);
+      // Doctor Fix only runs once claude-code is already confirmed installed
+      // and enabled (checked by the caller before invoking repair) — that
+      // state does not depend on this repair's outcome, so the watcher
+      // belongs running regardless of whether this specific attempt verifies
+      // healthy. start() is idempotent, so this is a no-op if it's already up.
+      const result = syncIntegrationForAgent(agentId, { source: "doctor", automatic: false });
+      if (result && typeof result === "object" && typeof result.then === "function") {
+        return result.then((resolved) => {
+          startClaudeSettingsWatcher();
+          return resolved;
+        });
+      }
+      startClaudeSettingsWatcher();
+      return result;
     }
     const repair = AGENT_INTEGRATION_REPAIRERS[agentId];
     if (typeof repair !== "function") return false;
@@ -558,9 +633,15 @@ function createIntegrationSyncRuntime(options = {}) {
 
   function syncEnabledStartupIntegrations() {
     if (shouldManageClaudeHooks() && shouldSyncAgentIntegration("claude-code")) {
-      syncClawdHooks();
-      startClaudeSettingsWatcher();
+      const result = syncClawdHooks({ source: "startup", automatic: true });
+      if (result && typeof result === "object" && typeof result.then === "function") {
+        result.then(() => startClaudeSettingsWatcher());
+      } else {
+        startClaudeSettingsWatcher();
+      }
     }
+    // Other agents' syncs are independent files and run in parallel — they do
+    // not wait for Claude's (possibly queued/async) sync to settle.
     for (const [agentId, sync] of Object.entries(AGENT_INTEGRATION_SYNCERS)) {
       if (shouldSyncAgentIntegration(agentId)) sync(readAgentIntegrationOptions(agentId));
     }
@@ -573,12 +654,14 @@ function createIntegrationSyncRuntime(options = {}) {
     syncCursorHooks,
     syncCopilotHooks,
     syncCodeBuddyHooks,
+    syncWorkBuddyHooks,
     syncKiroHooks,
     syncKimiHooks,
     syncQwenHooks,
     syncCodewhaleHooks,
     syncCodexHooks,
     syncOpencodePlugin,
+    syncMimocodePlugin,
     syncPiExtension,
     syncOpenClawPlugin,
     syncHermesPlugin,

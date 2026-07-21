@@ -798,3 +798,174 @@ describe("tick free roam cancellation (#569)", () => {
     assert.equal(ctx.roamCancels, 0, "idlePaused suppresses roam cursor cancellation");
   });
 });
+
+// #509: user-selected default idle visual as the tick resting sprite.
+describe("tick default idle visual", () => {
+  let cursor;
+  let loader;
+  let tickApi;
+  let ctx;
+  let statesSeen;
+  let rendererCalls;
+
+  beforeEach(() => {
+    mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    cursor = { x: 40, y: 40 };
+    loader = loadTickWithScreen(() => ({ ...cursor }));
+    statesSeen = [];
+    rendererCalls = [];
+  });
+
+  afterEach(() => {
+    if (tickApi) tickApi.cleanup();
+    if (loader) loader.restore();
+    mock.timers.reset();
+    tickApi = null;
+    ctx = null;
+  });
+
+  function makeIdleVisualCtx(theme, choice) {
+    const c = makeCtx(theme, statesSeen);
+    c.sendToRenderer = (channel, ...args) => {
+      rendererCalls.push([channel, ...args]);
+    };
+    if (choice !== undefined) c.getIdleVisualChoice = () => choice;
+    return c;
+  }
+
+  function idleStateChanges() {
+    return rendererCalls.filter(([ch, state]) => ch === "state-change" && state === "idle");
+  }
+
+  function makeIdleTheme(idleAnimations) {
+    const theme = cloneTheme(_defaultTheme);
+    theme.timings.mouseIdleTimeout = 60;
+    theme.timings.mouseSleepTimeout = 100000;
+    theme.idleAnimations = idleAnimations;
+    return theme;
+  }
+
+  it("pool play returns to the user-selected idle visual", () => {
+    const theme = makeIdleTheme([{ file: "clawd-idle-look.svg", duration: 500 }]);
+    ctx = makeIdleVisualCtx(theme, "clawd-idle-reading.svg");
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+
+    for (let i = 0; i < 6; i++) mock.timers.tick(50);   // reach MOUSE_IDLE_TIMEOUT + play delay
+    mock.timers.tick(600);                              // play out pick.duration → revert
+
+    const changes = idleStateChanges();
+    assert.deepStrictEqual(
+      changes.map(([, , svg]) => svg),
+      ["clawd-idle-look.svg", "clawd-idle-reading.svg"]
+    );
+  });
+
+  it("unset choice keeps returning to the theme follow sprite", () => {
+    const theme = makeIdleTheme([{ file: "clawd-idle-look.svg", duration: 500 }]);
+    ctx = makeIdleVisualCtx(theme);
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+
+    for (let i = 0; i < 6; i++) mock.timers.tick(50);
+    mock.timers.tick(600);
+
+    const changes = idleStateChanges();
+    assert.deepStrictEqual(
+      changes.map(([, , svg]) => svg),
+      ["clawd-idle-look.svg", "clawd-idle-follow.svg"]
+    );
+  });
+
+  it("unset choice leaves the pool untouched (follow sprite stays a valid pool entry)", () => {
+    const theme = makeIdleTheme([{ file: "clawd-idle-follow.svg", duration: 500 }]);
+    ctx = makeIdleVisualCtx(theme);
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+
+    for (let i = 0; i < 6; i++) mock.timers.tick(50);
+    mock.timers.tick(600);
+
+    const changes = idleStateChanges();
+    assert.deepStrictEqual(
+      changes.map(([, , svg]) => svg),
+      ["clawd-idle-follow.svg", "clawd-idle-follow.svg"],
+      "with no choice set a theme may play its follow sprite from the pool"
+    );
+  });
+
+  it("consumes forceEyeResend while resting on a non-follow visual", () => {
+    const theme = makeIdleTheme([{ file: "clawd-idle-look.svg", duration: 500 }]);
+    theme.timings.mouseIdleTimeout = 100000; // keep the pool out of this test
+    ctx = makeIdleVisualCtx(theme, "clawd-idle-reading.svg");
+    ctx.currentSvg = "clawd-idle-reading.svg";
+    // Production always exposes this; without it the pointer-bridge key is
+    // never recorded and bounds get polled every tick for that reason instead.
+    ctx.getAssetPointerPayload = () => ({ x: 0.5, y: 0.5, inside: true });
+    let boundsReads = 0;
+    ctx.getPetWindowBounds = () => { boundsReads++; return { x: 0, y: 0, width: 120, height: 120 }; };
+    ctx.forceEyeResend = true;
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+
+    mock.timers.tick(50);
+    assert.strictEqual(ctx.forceEyeResend, false, "flag must be consumed on the first idle tick");
+    const readsAfterFirstTick = boundsReads;
+    for (let i = 0; i < 5; i++) mock.timers.tick(50);
+    assert.strictEqual(boundsReads, readsAfterFirstTick, "no per-tick bounds polling while resting still");
+  });
+
+  it("never picks the chosen file from the pool; skips when it is the only entry", () => {
+    const theme = makeIdleTheme([{ file: "clawd-idle-reading.svg", duration: 500 }]);
+    ctx = makeIdleVisualCtx(theme, "clawd-idle-reading.svg");
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+
+    for (let i = 0; i < 10; i++) mock.timers.tick(100);
+    assert.deepStrictEqual(idleStateChanges(), [], "resting sprite must not be re-played as a pool pick");
+  });
+
+  it("mouse movement during a pool play reverts to the chosen visual", () => {
+    const theme = makeIdleTheme([{ file: "clawd-idle-look.svg", duration: 5000 }]);
+    ctx = makeIdleVisualCtx(theme, "clawd-idle-reading.svg");
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+
+    for (let i = 0; i < 8; i++) mock.timers.tick(50);   // trigger + play (long duration, no revert yet)
+    cursor = { x: 300, y: 260 };                        // wake mid-play
+    for (let i = 0; i < 4; i++) mock.timers.tick(50);
+
+    const changes = idleStateChanges();
+    assert.ok(changes.length >= 2, "expected play + mouse-move revert");
+    assert.strictEqual(changes[changes.length - 1][2], "clawd-idle-reading.svg");
+  });
+
+  it("does not eye-track while resting on a non-follow visual", () => {
+    const theme = makeIdleTheme([{ file: "clawd-idle-look.svg", duration: 500 }]);
+    ctx = makeIdleVisualCtx(theme, "clawd-idle-reading.svg");
+    ctx.currentSvg = "clawd-idle-reading.svg";
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+
+    for (let i = 0; i < 5; i++) {
+      cursor = { x: cursor.x + 15, y: cursor.y + 10 };
+      mock.timers.tick(50);
+    }
+    const eyeMoves = rendererCalls.filter(([ch]) => ch === "eye-move");
+    assert.deepStrictEqual(eyeMoves, [], "eye tracking must stay off on a non-follow resting sprite");
+  });
+
+  it("still eye-tracks when the choice is unset (follow sprite)", () => {
+    const theme = makeIdleTheme([{ file: "clawd-idle-look.svg", duration: 500 }]);
+    ctx = makeIdleVisualCtx(theme);
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+
+    for (let i = 0; i < 5; i++) {
+      cursor = { x: cursor.x + 15, y: cursor.y + 10 };
+      mock.timers.tick(50);
+    }
+    const eyeMoves = rendererCalls.filter(([ch]) => ch === "eye-move");
+    assert.ok(eyeMoves.length > 0, "follow sprite must keep eye tracking");
+  });
+});

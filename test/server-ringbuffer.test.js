@@ -104,7 +104,7 @@ function makeCtx(overrides = {}) {
       res.end(JSON.stringify({ behavior, message }));
     },
     showPermissionBubble: (entry) => shown.push(entry),
-    replyOpencodePermission: () => {},
+    replyOpencodeFamilyPermission: () => {},
     permLog: () => {},
     updateLog: () => {},
     _test: { pendingPermissions, sessions, updateSessionCalls, setStateCalls, shown },

@@ -29,11 +29,13 @@ const AUTO_REPAIRABLE_AGENT_IDS = new Set([
   "gemini-cli",
   "antigravity-cli",
   "codebuddy",
+  "workbuddy",
   "kiro-cli",
   "kimi-cli",
   "qwen-code",
   "codewhale",
   "opencode",
+  "mimocode",
   "hermes",
   "qoder",
   "reasonix",
@@ -48,11 +50,13 @@ const INSTALLABLE_AGENT_IDS = new Set([
   "gemini-cli",
   "antigravity-cli",
   "codebuddy",
+  "workbuddy",
   "kiro-cli",
   "kimi-cli",
   "qwen-code",
   "codewhale",
   "opencode",
+  "mimocode",
   "pi",
   "openclaw",
   "hermes",
@@ -104,6 +108,38 @@ function setAgentFlag(payload, deps) {
     return { status: "ok", noop: true };
   }
 
+  const nextEntry = { ...(currentEntry || {}), [flag]: value };
+  const nextAgents = { ...currentAgents, [agentId]: nextEntry };
+  const commitResult = { status: "ok", commit: { agents: nextAgents } };
+
+  // Claude Code enable is the one branch with an awaited external mutation:
+  // hooks must actually land (via the server-owned operation queue, #657)
+  // before the UI reports "enabled", so prefs are never committed ahead of
+  // reality. Every other agent/flag combination stays synchronous below —
+  // deliberately not making setAgentFlag() unconditionally async, to avoid
+  // forcing every caller/test to await a Promise it doesn't otherwise need.
+  if (
+    flag === "enabled"
+    && value === true
+    && agentId === "claude-code"
+    && isAgentIntegrationInstalled(snapshot, agentId)
+    && typeof deps.syncIntegrationForAgent === "function"
+  ) {
+    return Promise.resolve()
+      .then(() => deps.syncIntegrationForAgent(agentId, { source: "settings-agent-enable", automatic: false }))
+      .then((result) => {
+        if (result === false) {
+          return { status: "error", message: `No automatic integration install is available for ${agentId}` };
+        }
+        if (result && typeof result === "object" && result.status === "error") {
+          return { status: "error", message: result.message || `Failed to enable ${agentId}` };
+        }
+        if (typeof deps.startMonitorForAgent === "function") deps.startMonitorForAgent(agentId);
+        return commitResult;
+      })
+      .catch((err) => ({ status: "error", message: `setAgentFlag: ${err && err.message}` }));
+  }
+
   try {
     if (flag === "enabled") {
       if (!value) {
@@ -140,9 +176,7 @@ function setAgentFlag(payload, deps) {
     };
   }
 
-  const nextEntry = { ...(currentEntry || {}), [flag]: value };
-  const nextAgents = { ...currentAgents, [agentId]: nextEntry };
-  return { status: "ok", commit: { agents: nextAgents } };
+  return commitResult;
 }
 
 const _validateAgentPermissionModeId = requireString("setAgentPermissionMode.agentId");
@@ -445,7 +479,11 @@ async function installAgentIntegration(payload, deps = {}) {
   }
 
   try {
-    const result = await deps.syncIntegrationForAgent(agentId, buildAgentIntegrationOptions(snapshot, agentId));
+    const result = await deps.syncIntegrationForAgent(agentId, {
+      ...buildAgentIntegrationOptions(snapshot, agentId),
+      source: "settings-agent-install",
+      automatic: false,
+    });
     if (result === false) {
       return { status: "error", message: `No automatic integration install is available for ${agentId}` };
     }
@@ -767,6 +805,7 @@ deployToWsl.lockKey = "agentIntegration";
 removeFromWsl.lockKey = "agentIntegration";
 
 module.exports = {
+  AUTO_REPAIRABLE_AGENT_IDS,
   INSTALLABLE_AGENT_IDS,
   addCustomApplication,
   clearAgentCleanupHints,

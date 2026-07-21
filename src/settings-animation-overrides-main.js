@@ -5,6 +5,7 @@ const defaultPath = require("path");
 const { pathToFileURL } = require("url");
 const defaultAnimationCycle = require("./animation-cycle");
 const { ANIMATION_OVERRIDES_EXPORT_VERSION } = require("./settings-actions");
+const { listIdleVisualOptions, resolveIdleVisualChoice, humanizeIdleVisualLabel } = require("./idle-visual");
 
 const ANIMATION_OVERRIDE_ASSET_EXTS = new Set([".svg", ".gif", ".apng", ".png", ".webp", ".jpg", ".jpeg"]);
 const ANIMATION_OVERRIDE_PREVIEW_POSTER_SIZE = { width: 176, height: 144 };
@@ -1095,6 +1096,25 @@ function createSettingsAnimationOverridesMain(options = {}) {
     return slots;
   }
 
+  // #509: options + current selection for the default idle visual picker.
+  // Null when the theme offers no idle variants (nothing to pick from).
+  function buildIdleDefaultVisualData() {
+    const activeTheme = getActiveTheme();
+    if (!activeTheme) return null;
+    const options = listIdleVisualOptions(activeTheme);
+    if (options.length <= 1) return null;
+    const snapshot = settingsController.getSnapshot();
+    return {
+      themeId: activeTheme._id,
+      selectedFile: resolveIdleVisualChoice(activeTheme, snapshot.idleVisual),
+      options: options.map((option) => ({
+        file: option.file,
+        isThemeDefault: option.isThemeDefault,
+        label: humanizeIdleVisualLabel(option.file, activeTheme._id),
+      })),
+    };
+  }
+
   function buildAnimationOverrideData() {
     const activeTheme = getActiveTheme();
     if (!activeTheme) return null;
@@ -1112,6 +1132,7 @@ function createSettingsAnimationOverridesMain(options = {}) {
       sections,
       cards: sections.flatMap((section) => section.cards || []),
       sounds: buildSoundOverrideSlots(),
+      idleDefaultVisual: buildIdleDefaultVisualData(),
     };
     scheduleAnimationPreviewPosters(data);
     return data;

@@ -49,6 +49,8 @@ function initWithConfig(cfg) {
   _dragSvg = tc.dragSvg || null;
   _dragSvgs = tc.dragSvgs || {};
   _idleFollowSvg = tc.idleFollowSvg || "clawd-idle-follow.svg";
+  // Pre-IPC first frame rests on the user-selected idle visual when one is set.
+  _initialIdleSvg = tc.idleDefaultVisual || _idleFollowSvg;
   _glyphFlipDefs = tc.glyphFlips || { "pixel-z": 4, "pixel-z-small": 3 };
 
   // Layered tracking: detect if theme uses multi-layer config
@@ -372,6 +374,7 @@ let _dragSvg;
 let _dragSvgs;
 let currentDragSvg = null;
 let _idleFollowSvg;
+let _initialIdleSvg;
 let _glyphFlipDefs;
 let _objectScaleCSS;
 let _fileScales = {};
@@ -575,6 +578,18 @@ function getObjectSvgName(objectEl) {
  */
 function needsEyeTracking(state) {
   return _eyeTrackingStates.includes(state);
+}
+
+/**
+ * Determine if this state+file combination should attach eye tracking.
+ * Idle can rest on a non-follow visual (#509); only the follow sprite carries
+ * eye targets, and tick.js only streams eye movement for that exact file —
+ * attaching to anything else retries until timeout, or freezes stale offsets
+ * into a third-party SVG that happens to expose targets.
+ */
+function tracksEyesForFile(state, file) {
+  if (!needsEyeTracking(state)) return false;
+  return state !== "idle" || file === _idleFollowSvg;
 }
 
 /**
@@ -893,7 +908,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       currentDisplayedSvg = file;
       currentDisplayedAssetUrl = url;
 
-      if (state && needsEyeTracking(state)) {
+      if (state && tracksEyesForFile(state, file)) {
         attachEyeTracking(next);
       }
       if (miniLeftFlip) applyGlyphFlipCompensation(next);
@@ -1043,9 +1058,9 @@ function renderStateFile(state, svg) {
     if (alreadyDisplayed) applyMiniFlip(clawdEl, state);
     if (alreadyPending && pendingNext) applyMiniFlip(pendingNext, state);
     if (alreadyDisplayed) {
-      if (needsEyeTracking(state) && !eyeTarget && !_trackingLayers) {
+      if (tracksEyesForFile(state, effectiveSvg) && !eyeTarget && !_trackingLayers) {
         if (clawdEl.tagName === "OBJECT") attachEyeTracking(clawdEl);
-      } else if (!needsEyeTracking(state)) {
+      } else if (!tracksEyesForFile(state, effectiveSvg)) {
         detachEyeTracking();
       }
       if (shouldUseCloudlingPointerBridge(state, effectiveSvg) && lastCloudlingPointerPayload) {
@@ -1438,7 +1453,7 @@ function recoverFromSystemWake(payload) {
   resumeCurrentSvgForLowPower();
   if (lowPowerIdleMode) scheduleLowPowerIdlePause();
 
-  const needsEyes = needsEyeTracking(currentState);
+  const needsEyes = tracksEyesForFile(currentState, currentDisplayedSvg);
   const shouldReloadEyeObject = lowPowerIdleMode
     && needsEyes
     && clawdEl
@@ -1551,7 +1566,8 @@ window.electronAPI.onEyeMove((dx, dy) => {
 
   if ((eyeTarget || _trackingLayers) && !isEyeTrackingReady()) {
     detachEyeTracking();
-    if (clawdEl && clawdEl.isConnected && clawdEl.tagName === "OBJECT") attachEyeTracking(clawdEl);
+    if (clawdEl && clawdEl.isConnected && clawdEl.tagName === "OBJECT"
+      && tracksEyesForFile(currentState, currentDisplayedSvg)) attachEyeTracking(clawdEl);
     return;
   }
 
@@ -1695,7 +1711,7 @@ window.electronAPI.onWakeFromDoze(() => {
 });
 
 // --- Initial frame: always go through swapToFile so the right channel and theme scaling apply ---
-if (!currentDisplayedSvg && _idleFollowSvg) {
-  currentIdleSvg = _idleFollowSvg;
-  swapToFile(_idleFollowSvg, "idle");
+if (!currentDisplayedSvg && _initialIdleSvg) {
+  currentIdleSvg = _initialIdleSvg;
+  swapToFile(_initialIdleSvg, "idle");
 }

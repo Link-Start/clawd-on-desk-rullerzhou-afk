@@ -50,13 +50,19 @@ const AGENT_INSTALL_SCRIPT = {
   "gemini-cli": "gemini-install.js",
   "antigravity-cli": "antigravity-install.js",
   codebuddy: "codebuddy-install.js",
+  // workbuddy is intentionally absent: WorkBuddy ships only as a macOS/Windows
+  // Electron desktop app with no standalone Linux/WSL CLI runtime, so there is
+  // no in-WSL settings.json for hooks to deploy into. (Its installer is a plain
+  // .js and would transfer fine — the blocker is the missing WSL runtime, not
+  // the asset limitation noted below.) Re-add once a Linux/WSL build exists.
   "kiro-cli": "kiro-install.js",
   "kimi-cli": "kimi-install.js",
   "qwen-code": "qwen-code-install.js",
   codewhale: "codewhale-install.js",
-  // opencode / pi / openclaw / hermes are intentionally absent: their install
-  // scripts need non-.js assets (pi-extension.ts, hermes-plugin/, opencode-plugin/,
-  // openclaw-plugin/) that the flat stdin file pipe cannot transfer. Re-add them
+  // opencode / mimocode / pi / openclaw / hermes are intentionally absent: their
+  // install scripts need non-.js assets (pi-extension.ts, hermes-plugin/,
+  // opencode-plugin/, mimocode-plugin/, openclaw-plugin/) that the flat stdin
+  // file pipe cannot transfer. Re-add them
   // once deploy supports directory transfer (e.g. tar over stdin).
   qoder: "qoder-install.js",
   reasonix: "reasonix-install.js",

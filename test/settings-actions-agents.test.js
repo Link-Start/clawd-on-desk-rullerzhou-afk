@@ -9,6 +9,7 @@ const { commandRegistry } = require("../src/settings-actions");
 
 test("settings agent actions expose the command surface", () => {
   assert.deepStrictEqual(Object.keys(agentCommands).sort(), [
+    "AUTO_REPAIRABLE_AGENT_IDS",
     "INSTALLABLE_AGENT_IDS",
     "addCustomApplication",
     "clearAgentCleanupHints",
@@ -268,6 +269,105 @@ test("settings agent actions do not install files when enabling an uninstalled a
   assert.deepStrictEqual(calls.startMonitorForAgent, ["gemini-cli"]);
   assert.strictEqual(result.commit.agents["gemini-cli"].enabled, true);
   assert.strictEqual(result.commit.agents["gemini-cli"].integrationInstalled, false);
+});
+
+test("settings agent actions await the Claude enable queue before starting the monitor or committing", async () => {
+  const snapshot = prefs.getDefaults();
+  snapshot.agents["claude-code"] = {
+    integrationInstalled: true,
+    enabled: false,
+    permissionsEnabled: true,
+    notificationHookEnabled: true,
+  };
+  let resolveSync;
+  const calls = { syncIntegrationForAgent: [], startMonitorForAgent: [] };
+  const deps = {
+    snapshot,
+    syncIntegrationForAgent: (agentId, options) => {
+      calls.syncIntegrationForAgent.push({ agentId, options });
+      return new Promise((resolve) => { resolveSync = resolve; });
+    },
+    startMonitorForAgent: (agentId) => calls.startMonitorForAgent.push(agentId),
+  };
+
+  const pending = agentCommands.setAgentFlag({ agentId: "claude-code", flag: "enabled", value: true }, deps);
+  assert.ok(typeof pending.then === "function", "claude-code enable must return a Promise");
+
+  // setAgentFlag's async branch reaches deps.syncIntegrationForAgent one
+  // microtask tick later (Promise.resolve().then(...)); flush that tick
+  // before asserting the monitor hasn't started and grabbing resolveSync.
+  await Promise.resolve();
+  assert.deepStrictEqual(calls.startMonitorForAgent, [], "monitor must not start before the queue settles");
+
+  resolveSync({ status: "ok" });
+  const result = await pending;
+
+  assert.strictEqual(result.status, "ok");
+  assert.strictEqual(result.commit.agents["claude-code"].enabled, true);
+  assert.deepStrictEqual(calls.startMonitorForAgent, ["claude-code"]);
+  assert.deepStrictEqual(calls.syncIntegrationForAgent, [
+    { agentId: "claude-code", options: { source: "settings-agent-enable", automatic: false } },
+  ]);
+});
+
+test("settings agent actions do not commit or start the monitor when the Claude enable queue fails", async () => {
+  const snapshot = prefs.getDefaults();
+  snapshot.agents["claude-code"] = {
+    integrationInstalled: true,
+    enabled: false,
+    permissionsEnabled: true,
+  };
+  const calls = { startMonitorForAgent: [] };
+  const deps = {
+    snapshot,
+    syncIntegrationForAgent: async () => ({ status: "error", message: "write failed" }),
+    startMonitorForAgent: (agentId) => calls.startMonitorForAgent.push(agentId),
+  };
+
+  const result = await agentCommands.setAgentFlag({ agentId: "claude-code", flag: "enabled", value: true }, deps);
+
+  assert.strictEqual(result.status, "error");
+  assert.match(result.message, /write failed/);
+  assert.strictEqual(result.commit, undefined);
+  assert.deepStrictEqual(calls.startMonitorForAgent, []);
+});
+
+test("settings agent actions keep Claude enable synchronous when the integration is not installed", () => {
+  const snapshot = prefs.getDefaults();
+  snapshot.agents["claude-code"] = {
+    integrationInstalled: false,
+    enabled: false,
+    permissionsEnabled: true,
+  };
+  const calls = { syncIntegrationForAgent: [], startMonitorForAgent: [] };
+  const deps = {
+    snapshot,
+    syncIntegrationForAgent: (agentId) => calls.syncIntegrationForAgent.push(agentId),
+    startMonitorForAgent: (agentId) => calls.startMonitorForAgent.push(agentId),
+  };
+
+  const result = agentCommands.setAgentFlag({ agentId: "claude-code", flag: "enabled", value: true }, deps);
+
+  assert.strictEqual(typeof result.then, "undefined", "must stay synchronous when Claude is not installed");
+  assert.strictEqual(result.status, "ok");
+  assert.deepStrictEqual(calls.syncIntegrationForAgent, []);
+  assert.deepStrictEqual(calls.startMonitorForAgent, ["claude-code"]);
+});
+
+test("settings agent actions install Claude Code with the settings-agent-install source, non-automatic", async () => {
+  const calls = [];
+  const result = await agentCommands.installAgentIntegration({ agentId: "claude-code" }, {
+    snapshot: prefs.getDefaults(),
+    syncIntegrationForAgent: async (agentId, options) => {
+      calls.push({ agentId, options });
+      return { status: "ok" };
+    },
+  });
+
+  assert.strictEqual(result.status, "ok");
+  assert.deepStrictEqual(calls, [
+    { agentId: "claude-code", options: { source: "settings-agent-install", automatic: false } },
+  ]);
 });
 
 test("settings agent actions switch Codex permission mode and dismiss pending bubbles", () => {
@@ -563,4 +663,22 @@ test("settings agent actions report repair payload errors with the repair comman
 
   assert.strictEqual(result.status, "error");
   assert.match(result.message, /repairAgentIntegration\.agentId/);
+});
+
+test("every opencode-family member is installable AND auto-repairable (R10 P3)", () => {
+  // AUTO_REPAIRABLE_AGENT_IDS gates repairAgentIntegration; INSTALLABLE
+  // gates install/uninstall. Dropping a family member from either set turns
+  // the Settings/Doctor Repair buttons into "no automatic repair available"
+  // with every other test green (GPT-5.5 review mutation).
+  const { OPENCODE_FAMILY } = require("../agents/opencode-family");
+  for (const agentId of Object.keys(OPENCODE_FAMILY)) {
+    assert.ok(
+      agentCommands.INSTALLABLE_AGENT_IDS.has(agentId),
+      `${agentId} missing from INSTALLABLE_AGENT_IDS`
+    );
+    assert.ok(
+      agentCommands.AUTO_REPAIRABLE_AGENT_IDS.has(agentId),
+      `${agentId} missing from AUTO_REPAIRABLE_AGENT_IDS`
+    );
+  }
 });

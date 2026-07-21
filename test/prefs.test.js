@@ -74,6 +74,9 @@ describe("prefs.getDefaults", () => {
     });
     assert.deepStrictEqual(d.feishuApproval, {
       enabled: false,
+      // Feishu (China) is the default so existing users keep the platform they
+      // were implicitly on before this field existed.
+      platform: "feishu",
       idType: "open_id",
       approverId: "",
       connectionTimeoutSeconds: 15,
@@ -102,7 +105,7 @@ describe("prefs.getDefaults", () => {
         `${id} should default permissionsEnabled`
       );
     }
-    for (const id of ["antigravity-cli", "codewhale", "pi", "openclaw", "qoder"]) {
+    for (const id of ["antigravity-cli", "codewhale", "pi", "openclaw", "qoder", "workbuddy"]) {
       assert.strictEqual(
         d.agents[id].permissionsEnabled,
         false,
@@ -140,6 +143,16 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.agents.qoder.enabled, false);
     assert.strictEqual(d.agents.qoder.permissionsEnabled, false);
     assert.strictEqual(d.agents.qoder.notificationHookEnabled, true);
+  });
+
+  it("defaults WorkBuddy permission bubbles off (state-only, #618)", () => {
+    // The desktop app owns the permission loop in its native sandbox + GUI;
+    // Clawd only mirrors state and pops a waiting Notification.
+    const d = prefs.getDefaults();
+    assert.strictEqual(d.agents.workbuddy.integrationInstalled, false);
+    assert.strictEqual(d.agents.workbuddy.enabled, false);
+    assert.strictEqual(d.agents.workbuddy.permissionsEnabled, false);
+    assert.strictEqual(d.agents.workbuddy.notificationHookEnabled, true);
   });
 
   it("defaults CodeWhale permission bubbles off (state-only)", () => {
@@ -670,6 +683,37 @@ describe("prefs.validate", () => {
     assert.deepStrictEqual(v.themeVariant, {});
     const w = prefs.validate({ themeVariant: [1, 2] });
     assert.deepStrictEqual(w.themeVariant, {});
+  });
+
+  // #509: idleVisual field
+  it("idleVisual defaults to empty object (no migration needed)", () => {
+    const d = prefs.getDefaults();
+    assert.deepStrictEqual(d.idleVisual, {});
+  });
+
+  it("idleVisual keeps string/string pairs, drops malformed and path-y entries", () => {
+    const v = prefs.validate({
+      idleVisual: {
+        clawd: "clawd-idle-reading.svg",
+        calico: "calico-idle-stretch.svg",
+        bogus: 42,                          // wrong value type
+        "": "x.svg",                        // empty themeId
+        emptyVal: "",                       // empty file
+        sneaky: "../outside.svg",           // path traversal
+        sneakier: "sub\\dir.svg",           // backslash path
+      },
+    });
+    assert.deepStrictEqual(v.idleVisual, {
+      clawd: "clawd-idle-reading.svg",
+      calico: "calico-idle-stretch.svg",
+    });
+  });
+
+  it("idleVisual falls back to defaults when not an object", () => {
+    const v = prefs.validate({ idleVisual: "nope" });
+    assert.deepStrictEqual(v.idleVisual, {});
+    const w = prefs.validate({ idleVisual: ["a.svg"] });
+    assert.deepStrictEqual(w.idleVisual, {});
   });
 
   it("sessionAliases normalizes valid entries and drops malformed values", () => {

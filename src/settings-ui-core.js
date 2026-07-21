@@ -69,6 +69,7 @@
       animMapSwitches: new Map(),
       animMapReset: null,
       animOverrideTimingSliders: new Map(),
+      idleVisualPicker: null,
       bubblePolicySummary: null,
       sessionHudSummary: null,
       languagePicker: null,
@@ -831,6 +832,9 @@
     if (state.mountedControls.languagePicker && typeof state.mountedControls.languagePicker.dispose === "function") {
       state.mountedControls.languagePicker.dispose();
     }
+    if (state.mountedControls.idleVisualPicker && typeof state.mountedControls.idleVisualPicker.dispose === "function") {
+      state.mountedControls.idleVisualPicker.dispose();
+    }
     if (state.mountedControls.size && typeof state.mountedControls.size.dispose === "function") {
       Promise.resolve(state.mountedControls.size.dispose()).catch(() => {});
     }
@@ -855,6 +859,7 @@
     state.mountedControls.bubblePolicySummary = null;
     state.mountedControls.sessionHudSummary = null;
     state.mountedControls.languagePicker = null;
+    state.mountedControls.idleVisualPicker = null;
     state.mountedControls.size = null;
     state.mountedControls.soundSummary = null;
     state.mountedControls.soundVolume = null;

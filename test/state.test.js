@@ -98,6 +98,7 @@ function update(api, o = {}) {
       backgroundTasksCount: o.backgroundTasksCount ?? 0,
       sessionCronsCount: o.sessionCronsCount ?? 0,
       stopHookActive: o.stopHookActive ?? false,
+      transientPermissionEvent: o.transientPermissionEvent === true,
     },
   );
 }
@@ -570,6 +571,25 @@ describe("wake poll behavior", () => {
     assert.strictEqual(api.getCurrentState(), "idle");
   });
 
+  it("wake-from-doze returns to the user-selected idle visual", () => {
+    api.cleanup();
+    ctx = makeCtx({
+      getCursorScreenPoint: () => ({ ...fakeCursor }),
+      getIdleVisualChoice: () => "clawd-idle-reading.svg",
+    });
+    const changes = [];
+    ctx.sendToRenderer = (ev, ...args) => { if (ev === "state-change") changes.push(args); };
+    api = require("../src/state")(ctx);
+
+    api.applyState("dozing");
+    mock.timers.tick(500);
+    fakeCursor.x = 200;
+    mock.timers.tick(200);
+    mock.timers.tick(350);
+    assert.strictEqual(api.getCurrentState(), "idle");
+    assert.deepStrictEqual(changes[changes.length - 1], ["idle", "clawd-idle-reading.svg"]);
+  });
+
   it("collapsing + mouse move → waking", () => {
     api.applyState("collapsing");
     mock.timers.tick(500); // wake poll delay
@@ -668,6 +688,19 @@ describe("cleanStaleSessions()", () => {
     api.sessions.set("s1", rawSession("working", { agentPid: 9999, pidReachable: true }));
     api.cleanStaleSessions();
     assert.strictEqual(api.sessions.size, 0);
+  });
+
+  it("empty-session return rests on the user-selected idle visual", () => {
+    const changes = [];
+    api = require("../src/state")(makeCtx({
+      processKill: makePidKill(new Set()),
+      getIdleVisualChoice: () => "clawd-idle-reading.svg",
+      sendToRenderer: (ev, ...args) => { if (ev === "state-change") changes.push(args); },
+    }));
+    api.sessions.set("s1", rawSession("working", { agentPid: 9999, pidReachable: true }));
+    api.cleanStaleSessions();
+    assert.strictEqual(api.sessions.size, 0);
+    assert.deepStrictEqual(changes[changes.length - 1], ["idle", "clawd-idle-reading.svg"]);
   });
 
   it("agentPid alive + sourcePid dead + stale → delete", () => {
@@ -1000,6 +1033,31 @@ describe("updateSession()", () => {
     update(api, { id: "perm1", state: "notification", event: "PermissionRequest" });
     assert.ok(!api.sessions.has("perm1"));
     assert.strictEqual(api.getCurrentState(), "notification");
+  });
+
+  it("Codex user-input request flashes notification while preserving session state", () => {
+    update(api, {
+      id: "codex:question",
+      state: "working",
+      event: "PreToolUse",
+      agentId: "codex",
+      sourcePid: 456,
+      cwd: "/repo",
+    });
+    update(api, {
+      id: "codex:question",
+      state: "notification",
+      event: "CodexUserInputRequest",
+      agentId: "codex",
+      sourcePid: 456,
+      cwd: "/repo",
+      transientPermissionEvent: true,
+    });
+
+    assert.strictEqual(api.sessions.get("codex:question").state, "working");
+    mock.timers.tick(1000);
+    assert.strictEqual(api.getCurrentState(), "notification");
+    assert.strictEqual(api.sessions.get("codex:question").recentEvents.at(-1).event, "PreToolUse");
   });
 
   it("Codex PermissionRequest persists focus metadata for snapshots", () => {
@@ -1734,6 +1792,48 @@ describe("updateSession()", () => {
       used: 1000,
       source: "claude",
     });
+  });
+
+  it("preserveState does not stop a one-shot visual from playing (cross-file contract)", () => {
+    // Characterization, not endorsement. preserveState pins the STORED state;
+    // the one-shot branch plays whatever `state` it is handed and bypasses
+    // resolveDisplayState() entirely. So a metadata-only update that carries a
+    // one-shot still animates the pet, even though the session stays idle.
+    //
+    // agents/codex-log-monitor.js depends on this: it filters `token_count`'s
+    // carried state down to sustained ones precisely because preserveState
+    // would not save it. If this test ever fails because preserveState grew to
+    // cover one-shots, that filter becomes redundant (harmless) — update it
+    // there rather than deleting it blind.
+    const stateChanges = [];
+    api.cleanup();
+    ctx = makeCtx({
+      processKill: () => true,
+      sendToRenderer: (channel, state) => {
+        if (channel === "state-change") stateChanges.push(state);
+      },
+    });
+    api = require("../src/state")(ctx);
+
+    // Turn is long over; pet is back to idle. This is what Codex Desktop's
+    // focus-triggered token_count refresh actually lands on.
+    api.updateSession("codex:s1", "idle", "event_msg:task_complete", {
+      agentId: "codex",
+      cwd: "/tmp",
+    });
+    stateChanges.length = 0;
+
+    api.updateSession("codex:s1", "attention", "event_msg:token_count", {
+      agentId: "codex",
+      cwd: "/tmp",
+      preserveState: true,
+      contextUsage: { used: 2000, limit: 200000, percent: 1, source: "codex" },
+    });
+
+    assert.strictEqual(api.sessions.get("codex:s1").state, "idle",
+      "preserveState must pin the stored state");
+    assert.deepStrictEqual(stateChanges, ["attention"],
+      "and yet the one-shot visual still plays — this is why the monitor filters the carry");
   });
 
   it("updates contextUsage without changing state when preserveState is true", () => {

@@ -277,11 +277,20 @@ const SCHEMA = {
       // stale "true" implying bubbles are enabled.
       "antigravity-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: false },
       "codebuddy": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true, customPermissionUrl: "" },
+      // WorkBuddy shares CodeBuddy's Claude-Code-compatible hook protocol but
+      // uses a distinct data dir (~/.workbuddy-ai; legacy: ~/.workbuddy). Opt-in like every other
+      // non-default agent — agent-gate.js fail-opens missing entries, so this
+      // default MUST exist or startup sync would auto-install for any user who
+      // merely has a WorkBuddy data directory. State + Notification only: the
+      // desktop app owns its permission loop natively, so permission bubbles
+      // default off (like qoderwork).
+      "workbuddy": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       "kiro-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "kimi-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "qwen-code": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "codewhale": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       "opencode": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
+      "mimocode": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "pi": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       "openclaw": { integrationInstalled: false, enabled: false, permissionsEnabled: false, notificationHookEnabled: true },
       "hermes": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
@@ -325,6 +334,16 @@ const SCHEMA = {
     type: "object",
     defaultFactory: () => ({}),
     normalize: normalizeThemeVariant,
+  },
+  // #509: per-theme default idle visual (e.g. {clawd: "clawd-idle-reading.svg"}).
+  // Missing key for a theme = that theme's stock idle behavior. Values are bare
+  // filenames validated against the LOADED theme at resolve time
+  // (idle-visual.js), never here, so a theme update that drops the file
+  // degrades gracefully to the theme default.
+  idleVisual: {
+    type: "object",
+    defaultFactory: () => ({}),
+    normalize: normalizeIdleVisual,
   },
   sessionAliases: {
     type: "object",
@@ -997,6 +1016,20 @@ function normalizeThemeVariant(value, defaultsValue) {
     if (typeof themeId !== "string" || !themeId) continue;
     if (typeof variantId !== "string" || !variantId) continue;
     out[themeId] = variantId;
+  }
+  return out;
+}
+
+function normalizeIdleVisual(value, defaultsValue) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return defaultsValue;
+  const out = {};
+  for (const themeId of Object.keys(value)) {
+    const file = value[themeId];
+    if (typeof themeId !== "string" || !themeId) continue;
+    if (typeof file !== "string" || !file) continue;
+    // Bare filenames only — asset paths are resolved by the theme loader.
+    if (file.includes("/") || file.includes("\\")) continue;
+    out[themeId] = file;
   }
   return out;
 }
