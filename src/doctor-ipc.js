@@ -61,6 +61,7 @@ function registerDoctorIpc({
   getPrefsSnapshot,
   getDoNotDisturb,
   getLocale,
+  resolveAgentDisplayName,
 }) {
   let lastDoctorResult = null;
   let lastDoctorConnectionTest = null;
@@ -70,6 +71,7 @@ function registerDoctorIpc({
       server,
       durationMs: payload && payload.durationMs,
       homeDir: os.homedir(),
+      resolveAgentDisplayName,
     }),
     {
       onResult: (result) => {

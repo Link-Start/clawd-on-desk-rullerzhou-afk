@@ -158,6 +158,12 @@
     };
     for (const agent of agents) {
       if (!agent || !agent.id) continue;
+      if (agent.custom) {
+        const customHint = getInstallationHint(agent.id, true);
+        if (customHint && customHint.detectedInstalled === true) sections.recommended.push(agent);
+        else sections.unavailable.push(agent);
+        continue;
+      }
       if (readers.readAgentIntegrationInstalled(agent.id)) {
         sections.connected.push(agent);
       } else if (hasRecommendedLocalInstall(agent.id)) {
@@ -178,9 +184,11 @@
     );
   }
 
-  function getInstallationHint(agentId) {
+  function getInstallationHint(agentId, custom = false) {
     const hints = runtime.agentInstallationHints;
-    const entries = hints && Array.isArray(hints.agents) ? hints.agents : [];
+    const entries = custom
+      ? (hints && Array.isArray(hints.customAgents) ? hints.customAgents : [])
+      : (hints && Array.isArray(hints.agents) ? hints.agents : []);
     return entries.find((entry) => entry && entry.agentId === agentId) || null;
   }
 
@@ -353,7 +361,7 @@
       if (!paths.includes(result.path)) paths.push(result.path);
       const response = await window.settingsAPI.command("setAgentCustomDiscoveryPaths", {
         agentId: "custom",
-        value: paths.join("; "),
+        value: paths,
       });
       if (!response || response.status !== "ok") {
         throw new Error((response && response.message) || "failed to save discovery path");
@@ -377,11 +385,11 @@
       : [];
     if (configuredPaths.length === 0 && results.length === 0) return [];
     if (results.length === 0) {
-      return [buildCustomToolResultRow({
-        path: configuredPaths.join("; "),
+      return configuredPaths.map((path) => buildCustomToolResultRow({
+        path,
         detectedInstalled: null,
         detail: t("customToolDetectionPending"),
-      })];
+      }));
     }
     return results.map(buildCustomToolResultRow);
   }
@@ -422,7 +430,38 @@
       status.addEventListener("click", () => addCustomApplication(result, status));
     }
     row.appendChild(status);
+    if (result.path) {
+      const removePathButton = document.createElement("button");
+      removePathButton.type = "button";
+      removePathButton.className = "soft-btn danger custom-tool-remove-path";
+      removePathButton.textContent = t("customToolRemovePath");
+      removePathButton.addEventListener("click", () => removeCustomDiscoveryPath(result.path, removePathButton));
+      row.appendChild(removePathButton);
+    }
     return row;
+  }
+
+  async function removeCustomDiscoveryPath(pathToRemove, button) {
+    if (!window.settingsAPI || typeof window.settingsAPI.command !== "function") return;
+    button.disabled = true;
+    try {
+      const paths = readers.readAgentCustomDiscoveryPaths("custom")
+        .filter((entry) => entry !== pathToRemove);
+      const response = await window.settingsAPI.command("setAgentCustomDiscoveryPaths", {
+        agentId: "custom",
+        value: paths,
+      });
+      if (!response || response.status !== "ok") {
+        throw new Error((response && response.message) || "failed to remove discovery path");
+      }
+      if (ops && typeof ops.fetchAgentInstallationHints === "function") {
+        await ops.fetchAgentInstallationHints({ force: true });
+      }
+      ops.requestRender({ content: true });
+    } catch (err) {
+      button.disabled = false;
+      ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+    }
   }
 
   async function refreshCustomAgentUi() {
@@ -847,17 +886,23 @@
         esBadge.className = "agent-badge";
         esBadge.textContent = t(esKey);
         badges.appendChild(esBadge);
-        integrationBadge = document.createElement("span");
-        integrationBadge.className = "agent-badge integration";
-        badges.appendChild(integrationBadge);
+        if (agent.custom) {
+          const registrationBadge = document.createElement("span");
+          registrationBadge.className = "agent-badge integration custom-registration";
+          registrationBadge.textContent = t("customToolRegistered");
+          badges.appendChild(registrationBadge);
+        } else {
+          integrationBadge = document.createElement("span");
+          integrationBadge.className = "agent-badge integration";
+          badges.appendChild(integrationBadge);
+        }
         if (agent.capabilities && agent.capabilities.permissionApproval) {
           const permBadge = document.createElement("span");
           permBadge.className = "agent-badge accent";
           permBadge.textContent = t("badgePermissionBubble");
           badges.appendChild(permBadge);
         }
-        if (agent.custom) integrationBadge.textContent = t("customToolAdded");
-        else syncAgentIntegrationBadge(integrationBadge, agent.id);
+        if (!agent.custom) syncAgentIntegrationBadge(integrationBadge, agent.id);
         text.appendChild(badges);
       },
       buildExtraControls: (ctrl) => {
@@ -895,8 +940,26 @@
     const rows = [];
     const caps = agent.capabilities || {};
     if (agent.custom) {
+      const payloadExample = JSON.stringify({
+        agent_id: agent.id,
+        session_id: "your-session-id",
+        state: "working",
+        event: "PreToolUse",
+      });
+      const lastStateEvent = agent.lastStateEvent && Number.isFinite(agent.lastStateEvent.timestamp)
+        ? agent.lastStateEvent
+        : null;
+      const activityText = lastStateEvent
+        ? t("customAgentLastState")
+          .replace("{event}", lastStateEvent.eventType || "state")
+          .replace("{time}", new Date(lastStateEvent.timestamp).toLocaleTimeString())
+        : t("customAgentWaiting");
       for (const [labelKey, value] of [
+        ["customAgentRegisteredDesc", t("customAgentRegisteredExternal")],
         ["customToolAgentId", agent.id],
+        ["customAgentStateEndpoint", agent.stateEndpoint || "http://127.0.0.1:<runtime-port>/state"],
+        ["customAgentPayloadExample", payloadExample],
+        ["customAgentActivity", activityText],
         ["customToolExecutable", agent.executablePath],
         ["customToolSourcePath", agent.sourcePath],
       ]) {
@@ -909,10 +972,29 @@
         label.textContent = t(labelKey);
         const desc = document.createElement("span");
         desc.className = "row-desc";
+        if (labelKey === "customAgentPayloadExample") desc.classList.add("custom-agent-payload");
         desc.textContent = value || "";
         text.appendChild(label);
         text.appendChild(desc);
         row.appendChild(text);
+        if (["customToolAgentId", "customAgentStateEndpoint", "customAgentPayloadExample"].includes(labelKey)) {
+          const copyButton = document.createElement("button");
+          copyButton.type = "button";
+          copyButton.className = "soft-btn custom-agent-copy";
+          copyButton.textContent = t("customAgentCopy");
+          copyButton.addEventListener("click", async () => {
+            try {
+              if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+                throw new Error("clipboard unavailable");
+              }
+              await navigator.clipboard.writeText(value || "");
+              ops.showToast(t("customAgentCopied"));
+            } catch (err) {
+              ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+            }
+          });
+          row.appendChild(copyButton);
+        }
         rows.push(row);
       }
     }

@@ -965,6 +965,7 @@ function buildSessionSnapshot() {
   return buildSessionSnapshotFromSessions(sessions, {
     sessionAliases: getSessionAliases(),
     getAgentIconUrl,
+    resolveAgentDisplayName: ctx.resolveAgentDisplayName,
     statePriority: STATE_PRIORITY,
     sessionHudCleanupDetached: ctx.sessionHudCleanupDetached === true,
     focusHostPlatform: ctx.focusHostPlatform || process.platform,

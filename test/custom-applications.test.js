@@ -40,6 +40,19 @@ test("does not identify a folder containing only maintenance executables", () =>
   assert.strictEqual(identifyCustomApplication(dir, { platform: "win32" }), null);
 });
 
+test("requires a real executable inside a macOS app bundle", () => {
+  const appDir = path.join(tempDir(), "Nova AI.app");
+  fs.mkdirSync(appDir);
+  assert.strictEqual(identifyCustomApplication(appDir, { platform: "darwin" }), null);
+
+  const executable = path.join(appDir, "Contents", "MacOS", "Nova AI");
+  fs.mkdirSync(path.dirname(executable), { recursive: true });
+  fs.writeFileSync(executable, "");
+  fs.chmodSync(executable, 0o755);
+  const application = identifyCustomApplication(appDir, { platform: "darwin" });
+  assert.strictEqual(application.executablePath, executable);
+});
+
 test("normalizes, deduplicates, and rejects malformed custom application records", () => {
   const valid = {
     id: "custom-nova-ai-0123456789ab",

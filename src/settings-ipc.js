@@ -108,7 +108,7 @@ function mapAgentMetadata(agent) {
   return metadata;
 }
 
-function mapCustomApplicationMetadata(application) {
+function mapCustomApplicationMetadata(application, options = {}) {
   return {
     id: application.id,
     name: application.name,
@@ -118,10 +118,12 @@ function mapCustomApplicationMetadata(application) {
     sourcePath: application.sourcePath,
     executablePath: application.executablePath,
     processName: application.processName,
+    stateEndpoint: options.stateEndpoint || "",
+    lastStateEvent: options.lastStateEvent || null,
     capabilities: {
       httpHook: true,
-      permissionApproval: true,
-      interactiveBubble: true,
+      permissionApproval: false,
+      interactiveBubble: false,
       notificationHook: true,
       sessionEnd: true,
       subagent: false,
@@ -164,6 +166,8 @@ function registerSettingsIpc(options = {}) {
     || (() => ({ percent: 100 }));
   const getAllAgents = requiredDependency(options.getAllAgents, "getAllAgents");
   const detectAgentInstallations = options.detectAgentInstallations || defaultDetectAgentInstallations;
+  const getHookServerPort = options.getHookServerPort || (() => null);
+  const getRecentHookEvents = options.getRecentHookEvents || (() => []);
   const checkForUpdates = options.checkForUpdates || (() => {});
   const showTutorial = options.showTutorial || (() => ({
     status: "error",
@@ -426,7 +430,18 @@ function registerSettingsIpc(options = {}) {
     try {
       const snapshot = settingsController.getSnapshot();
       const custom = Array.isArray(snapshot.customApplications)
-        ? snapshot.customApplications.map(mapCustomApplicationMetadata)
+        ? snapshot.customApplications.map((application) => {
+          const port = getHookServerPort();
+          const stateEvents = getRecentHookEvents({ agentId: application.id })
+            .filter((event) => event && event.route === "state" && event.outcome === "accepted");
+          const lastStateEvent = stateEvents.length > 0 ? stateEvents[stateEvents.length - 1] : null;
+          return mapCustomApplicationMetadata(application, {
+            stateEndpoint: Number.isInteger(port) ? `http://127.0.0.1:${port}/state` : "",
+            lastStateEvent: lastStateEvent
+              ? { timestamp: lastStateEvent.timestamp, eventType: lastStateEvent.eventType }
+              : null,
+          });
+        })
         : [];
       return [...getAllAgents().map(mapAgentMetadata), ...custom];
     } catch (err) {
@@ -471,6 +486,7 @@ function registerSettingsIpc(options = {}) {
       return {
         checkedAt: now(),
         agents: [],
+        customAgents: [],
         customTools: [],
         skippedAgentIds: [],
         wslAgents: [],

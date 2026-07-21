@@ -524,7 +524,7 @@ describe("prefs.validate", () => {
     assert.strictEqual(Object.prototype.hasOwnProperty.call(legacy.agents, "custom"), false);
   });
 
-  it("normalizes custom applications and preserves their agent gates", () => {
+  it("normalizes custom applications and enforces state-only agent gates", () => {
     const application = {
       id: "custom-nova-ai-0123456789ab",
       name: "Nova AI",
@@ -535,11 +535,50 @@ describe("prefs.validate", () => {
     };
     const value = prefs.validate({
       customApplications: [application, application, { id: "bad" }],
-      agents: { [application.id]: { integrationInstalled: true, enabled: false } },
+      agents: { [application.id]: { integrationInstalled: true, enabled: false, permissionsEnabled: true } },
     });
     assert.deepStrictEqual(value.customApplications, [application]);
-    assert.strictEqual(value.agents[application.id].integrationInstalled, true);
+    assert.strictEqual(value.agents[application.id].integrationInstalled, false);
     assert.strictEqual(value.agents[application.id].enabled, false);
+    assert.strictEqual(value.agents[application.id].permissionsEnabled, false);
+    assert.strictEqual(value.agents[application.id].notificationHookEnabled, true);
+  });
+
+  it("keeps custom application records and explicit gates in lockstep", () => {
+    const application = {
+      id: "custom-nova-ai-0123456789ab",
+      name: "Nova AI",
+      sourcePath: "C:\\NovaAI",
+      executablePath: "C:\\NovaAI\\NovaAI.exe",
+      processName: "NovaAI.exe",
+      category: "code",
+    };
+    const value = prefs.validate({
+      customApplications: [application],
+      agents: {
+        "custom-stale-abcdef012345": { integrationInstalled: true, enabled: true },
+        "future-agent": { enabled: false },
+      },
+    });
+
+    assert.deepStrictEqual(value.agents[application.id], {
+      integrationInstalled: false,
+      enabled: true,
+      permissionsEnabled: false,
+      notificationHookEnabled: true,
+    });
+    assert.strictEqual(value.agents["custom-stale-abcdef012345"], undefined);
+    assert.strictEqual(value.agents["future-agent"].enabled, false);
+  });
+
+  it("caps existing discovery paths and preserves semicolons in array values", () => {
+    const paths = Array.from({ length: 70 }, (_, index) => `C:\\Tools\\AI-${index}`);
+    paths[0] = "C:\\Tools;Lab\\AI";
+    paths[1] = "c:\\tools;lab\\ai";
+    const value = prefs.validate({ customToolDiscoveryPaths: paths });
+
+    assert.strictEqual(value.customToolDiscoveryPaths.length, 64);
+    assert.strictEqual(value.customToolDiscoveryPaths[0], "C:\\Tools;Lab\\AI");
   });
 
   it("normalizes agents: preserves valid Codex permissionMode", () => {

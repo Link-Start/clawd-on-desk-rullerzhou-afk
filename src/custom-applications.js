@@ -42,7 +42,14 @@ function findExecutable(directory, options) {
   const fsApi = options.fs || fs;
   const pathApi = options.path || path;
   const platform = options.platform || process.platform;
-  if (platform === "darwin" && directory.toLowerCase().endsWith(".app")) return directory;
+  if (platform === "darwin" && directory.toLowerCase().endsWith(".app")) {
+    return findExecutable(pathApi.join(directory, "Contents", "MacOS"), {
+      ...options,
+      fs: fsApi,
+      path: pathApi,
+      platform,
+    });
+  }
   let entries;
   try { entries = fsApi.readdirSync(directory, { withFileTypes: true }).slice(0, 200); } catch { return null; }
   const dirName = pathApi.basename(directory).toLowerCase().replace(/\.app$/i, "");

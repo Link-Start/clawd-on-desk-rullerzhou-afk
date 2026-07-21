@@ -95,6 +95,7 @@ const { createTelegramApprovalSidecar } = require("./telegram-approval-sidecar")
 const telegramApprovalSettings = require("./telegram-approval-settings");
 const discordPresenceSettings = require("./discord-presence-settings");
 const { createDiscordPresenceBridge } = require("./discord-presence-rpc");
+const { resolveAgentDisplayName } = require("./agent-display-name");
 const { FeishuApprovalClient } = require("./feishu-approval-client");
 const feishuApprovalSettings = require("./feishu-approval-settings");
 const {
@@ -315,6 +316,10 @@ function _getAgentIntegrationOptions(agentId) {
   return options;
 }
 
+function _resolveAgentDisplayName(agentId) {
+  return resolveAgentDisplayName(agentId, _settingsController.get("customApplications"));
+}
+
 function _deferredResizePet(sizeKey) {
   // Bound to _menu.resizeWindow after menu module is created below. Settings
   // panel's size slider commands route through here so they get the same
@@ -406,6 +411,7 @@ const _settingsController = createSettingsController({
     restartClawd: _restartClawdNow,
     clearSessionsByAgent: (id) => agentRuntime ? agentRuntime.clearSessionsByAgent(id) : 0,
     dismissPermissionsByAgent: (id, options) => agentRuntime ? agentRuntime.dismissPermissionsByAgent(id, options) : 0,
+    clearRecentHookEvents: (id) => _server.clearRecentHookEvents(id),
     identifyCustomApplication: (sourcePath) => require("./custom-applications").identifyCustomApplication(sourcePath),
     resizePet: _deferredResizePet,
     getActiveSessionAliasKeys: () =>
@@ -1573,6 +1579,7 @@ const _stateCtx = {
   // boundary) keeps the gate consistent for hook / log-poll / plugin paths.
   isAgentNotificationHookEnabled: (agentId) =>
     _isAgentNotificationHookEnabled({ agents: _settingsController.get("agents") }, agentId),
+  resolveAgentDisplayName: _resolveAgentDisplayName,
   miniPeekIn: () => miniPeekIn(),
   miniPeekOut: () => miniPeekOut(),
   buildContextMenu: () => buildContextMenu(),
@@ -3409,6 +3416,7 @@ registerDoctorIpc({
   getPrefsSnapshot: () => _settingsController.getSnapshot(),
   getDoNotDisturb: () => doNotDisturb,
   getLocale: () => _settingsController.get("lang") || "en",
+  resolveAgentDisplayName: _resolveAgentDisplayName,
 });
 
 // ── Remote SSH (Phase 2) ──
@@ -3503,6 +3511,8 @@ registerSettingsIpc({
   getSoundMuted: () => soundMuted,
   getSoundVolume: () => soundVolume,
   getAllAgents,
+  getHookServerPort: () => getHookServerPort(),
+  getRecentHookEvents: (options) => _server.getRecentHookEvents(options),
   checkForUpdates,
   showTutorial: () => {
     _tutorial.open();

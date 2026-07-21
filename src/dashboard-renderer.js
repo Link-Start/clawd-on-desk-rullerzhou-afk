@@ -245,12 +245,12 @@ function badgeLabel(badge) {
   return t(key);
 }
 
-function agentLabel(agentId) {
-  return AGENT_LABELS[agentId] || agentId || t("dashboardUnknownAgent");
+function agentLabel(agentId, agentName) {
+  return agentName || AGENT_LABELS[agentId] || agentId || t("dashboardUnknownAgent");
 }
 
-function agentFallback(agentId) {
-  const label = agentLabel(agentId).trim();
+function agentFallback(agentId, agentName) {
+  const label = agentLabel(agentId, agentName).trim();
   return label ? label.slice(0, 2).toUpperCase() : "?";
 }
 
@@ -377,7 +377,7 @@ function appendMeta(main, session, now) {
   badge.appendChild(dot);
   badge.appendChild(document.createTextNode(badgeLabel(session.badge)));
 
-  meta.appendChild(document.createTextNode(agentLabel(session.agentId)));
+  meta.appendChild(document.createTextNode(agentLabel(session.agentId, session.agentName)));
   meta.appendChild(document.createTextNode(" · "));
   meta.appendChild(badge);
   meta.appendChild(document.createTextNode(` · ${formatElapsed(now - session.updatedAt)}`));
@@ -430,12 +430,12 @@ function createIcon(session) {
     img.alt = "";
     img.src = session.iconUrl;
     img.addEventListener("error", () => {
-      const fallback = createText("span", "agent-fallback", agentFallback(session.agentId));
+      const fallback = createText("span", "agent-fallback", agentFallback(session.agentId, session.agentName));
       img.replaceWith(fallback);
     }, { once: true });
     return img;
   }
-  return createText("span", "agent-fallback", agentFallback(session.agentId));
+  return createText("span", "agent-fallback", agentFallback(session.agentId, session.agentName));
 }
 
 function createHideButton(session) {

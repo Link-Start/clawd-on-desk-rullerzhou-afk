@@ -24,6 +24,21 @@ describe("doctor hook activity connection test", () => {
     assert.match(result.detail, /codex/);
   });
 
+  it("uses the resolved custom application name in summaries", () => {
+    const result = evaluateConnectionTest({
+      events: [{
+        agentId: "custom-nova-0123456789ab",
+        route: "state",
+        outcome: "accepted",
+      }],
+      resolveAgentDisplayName: () => "Nova AI",
+    });
+
+    assert.strictEqual(result.status, "http-verified");
+    assert.match(result.detail, /Nova AI/);
+    assert.doesNotMatch(result.detail, /custom-nova/);
+  });
+
   it("warns when HTTP works but events are dropped by gates", () => {
     const result = evaluateConnectionTest({
       events: [

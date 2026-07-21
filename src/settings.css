@@ -1093,6 +1093,20 @@ html, body {
   overflow-wrap: anywhere;
   user-select: text;
 }
+.custom-agent-detail {
+  gap: 12px;
+}
+.custom-agent-detail .row-text {
+  min-width: 0;
+}
+.custom-agent-payload {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+.custom-tool-remove-path,
+.custom-agent-copy {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 .custom-tool-result-found .custom-tool-result-status {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: color-mix(in srgb, var(--accent) 12%, var(--panel-bg));
@@ -1131,6 +1145,10 @@ html, body {
   }
   .agent-custom-tools-section .row-text {
     flex: 1 1 auto;
+  }
+  .custom-tool-result-row,
+  .custom-agent-detail {
+    flex-wrap: wrap;
   }
 }
 .agent-badges {

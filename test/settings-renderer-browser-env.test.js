@@ -4567,12 +4567,12 @@ describe("settings renderer browser environment", () => {
     assert.ok(css.includes(".agent-category-count"));
   });
 
-  it("keeps install status primary and renders custom AI inside the Coding AI subgroup", () => {
+  it("keeps registered custom AI out of Connected and groups it by executable detection", () => {
     const id = "custom-nova-ai-0123456789ab";
     const harness = loadAgentsTabForTest({
       snapshot: {
         agents: {
-          [id]: { integrationInstalled: true, enabled: true },
+          [id]: { integrationInstalled: false, enabled: true },
           qoderwork: { integrationInstalled: true, enabled: true },
         },
         customApplications: [],
@@ -4599,6 +4599,7 @@ describe("settings renderer browser environment", () => {
     harness.core.runtime.agentInstallationHints = {
       checkedAt: 1,
       agents: [],
+      customAgents: [{ agentId: id, detectedInstalled: true, confidence: "high" }],
       customTools: [],
       skippedAgentIds: [],
     };
@@ -4608,18 +4609,23 @@ describe("settings renderer browser environment", () => {
     const connected = harness.content.querySelector(".agent-section-connected");
     assert.ok(connected);
     const groups = connected.querySelectorAll(".agent-category-group");
-    assert.strictEqual(groups.length, 2);
-    assert.strictEqual(groups[0].querySelector(".collapsible-group-text .row-label").textContent, "Coding AI");
-    assert.strictEqual(groups[1].querySelector(".collapsible-group-text .row-label").textContent, "Office AI");
+    assert.strictEqual(groups.length, 1);
+    assert.strictEqual(groups[0].querySelector(".collapsible-group-text .row-label").textContent, "Office AI");
     assert.deepStrictEqual(
       groups[0].querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
-      ["Nova AI"]
-    );
-    assert.deepStrictEqual(
-      groups[1].querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
       ["QoderWork"]
     );
 
+    const detected = harness.content.querySelector(".agent-section-recommended");
+    assert.ok(detected);
+    const detectedGroups = detected.querySelectorAll(".agent-category-group");
+    assert.strictEqual(detectedGroups.length, 1);
+    assert.strictEqual(detectedGroups[0].querySelector(".collapsible-group-text .row-label").textContent, "Coding AI");
+    assert.deepStrictEqual(
+      detectedGroups[0].querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
+      ["Nova AI"]
+    );
+    assert.strictEqual(connected.textContent.includes("Nova AI"), false);
   });
 
   it("renders Custom AI detection under one manual folder picker", () => {
@@ -4629,6 +4635,7 @@ describe("settings renderer browser environment", () => {
     const css = fs.readFileSync(path.join(SRC_DIR, "settings.css"), "utf8");
 
     assert.ok(coreSource.includes("function readCustomToolDetectionResults("));
+    assert.ok(coreSource.includes("function readCustomAgentDetectionResults("));
     assert.ok(coreSource.includes("hints.customTools"));
     assert.ok(agentsSource.includes("function buildCustomToolResultRows("));
     assert.ok(agentsSource.includes("readCustomToolDetectionResults"));
@@ -4744,15 +4751,22 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(calls[1][0], "command");
     assert.strictEqual(calls[1][1], "setAgentCustomDiscoveryPaths");
     assert.strictEqual(calls[1][2].agentId, "custom");
-    assert.strictEqual(calls[1][2].value, pickedPath);
+    assert.deepStrictEqual(calls[1][2].value, [pickedPath]);
     assert.deepStrictEqual(calls[2], ["scan"]);
     assert.strictEqual(harness.core.runtime.agentInstallationHints.customTools[0].path, pickedPath);
     harness.core.ops.requestRender({ content: true });
     harness.raf.flush();
     assert.ok(harness.content.querySelector(".custom-tool-result-found"));
+    const removePath = harness.content.querySelector(".custom-tool-remove-path");
+    assert.ok(removePath);
+    removePath.dispatchEvent({ type: "click", bubbles: false });
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.strictEqual(calls[3][0], "command");
+    assert.strictEqual(calls[3][1], "setAgentCustomDiscoveryPaths");
+    assert.deepStrictEqual(calls[3][2].value, []);
   });
 
-  it("adds a recognized custom AI and renders it as a managed Agent", async () => {
+  it("registers a recognized custom AI with state-only connection details", async () => {
     const id = "custom-nova-ai-0123456789ab";
     const pickedPath = "C:\\Tools\\NovaAI.exe";
     const calls = [];
@@ -4766,7 +4780,9 @@ describe("settings renderer browser environment", () => {
       sourcePath: pickedPath,
       executablePath: pickedPath,
       processName: "NovaAI.exe",
-      capabilities: { httpHook: true, permissionApproval: true, notificationHook: true },
+      stateEndpoint: "http://127.0.0.1:23333/state",
+      lastStateEvent: null,
+      capabilities: { httpHook: true, permissionApproval: false, interactiveBubble: false, notificationHook: true },
     };
     const detection = () => ({
       checkedAt: 1,
@@ -4810,6 +4826,9 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(calls[0][1].path, pickedPath);
     assert.ok(harness.core.runtime.agentMetadata.some((agent) => agent.id === id));
     assert.ok(harness.content.querySelector(".custom-agent-remove"));
+    assert.ok(harness.content.querySelector(".custom-registration"));
+    assert.ok(harness.content.querySelector(".custom-agent-copy"));
+    assert.strictEqual(harness.content.querySelector(".agent-badge.accent"), null);
   });
 
   it("keeps Agent management capability-driven for Gemini wait-for-input alerts", () => {

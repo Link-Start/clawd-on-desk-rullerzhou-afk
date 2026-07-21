@@ -246,6 +246,34 @@ describe("agent installation detector", () => {
     assert.strictEqual(report.customTools[1].detectedInstalled, false);
   });
 
+  it("reports registered custom executables independently from discovery paths", () => {
+    const homeDir = makeHome();
+    const executablePath = path.join(homeDir, "NovaAI.exe");
+    writeText(executablePath, "");
+    const application = {
+      id: "custom-nova-ai-0123456789ab",
+      executablePath,
+    };
+
+    const present = detectAgentInstallations({
+      homeDir,
+      now: 1,
+      snapshot: { customApplications: [application], customToolDiscoveryPaths: [] },
+    });
+    assert.deepStrictEqual(present.customTools, []);
+    assert.strictEqual(present.customAgents.length, 1);
+    assert.strictEqual(present.customAgents[0].agentId, application.id);
+    assert.strictEqual(present.customAgents[0].detectedInstalled, true);
+
+    fs.rmSync(executablePath);
+    const missing = detectAgentInstallations({
+      homeDir,
+      now: 2,
+      snapshot: { customApplications: [application], customToolDiscoveryPaths: [] },
+    });
+    assert.strictEqual(missing.customAgents[0].detectedInstalled, false);
+  });
+
   it("discovers supported agents in common Windows application roots", () => {
     const root = makeHome();
     const localAppData = path.join(root, "LocalAppData");

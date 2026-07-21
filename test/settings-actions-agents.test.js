@@ -82,11 +82,13 @@ test("settings agent actions add and deduplicate a recognized custom AI", () => 
   });
   assert.deepStrictEqual(result.commit.customApplications, [application]);
   assert.deepStrictEqual(result.commit.agents[application.id], {
-    integrationInstalled: true,
+    integrationInstalled: false,
     enabled: true,
-    permissionsEnabled: true,
+    permissionsEnabled: false,
     notificationHookEnabled: true,
   });
+  assert.strictEqual(result.application.managedIntegration, false);
+  assert.strictEqual(result.application.permissionApproval, false);
   const duplicate = agentCommands.addCustomApplication({ path: application.sourcePath }, {
     snapshot: { ...snapshot, customApplications: [application] },
     identifyCustomApplication: () => application,
@@ -100,6 +102,16 @@ test("settings agent actions reject unidentified paths and clean up removed cust
     snapshot: prefs.getDefaults(),
     identifyCustomApplication: () => null,
   }).status, "error");
+  assert.strictEqual(agentCommands.addCustomApplication({ path: "C:\\bad-id.exe" }, {
+    snapshot: prefs.getDefaults(),
+    identifyCustomApplication: () => ({
+      id: "custom-invalid",
+      name: "Invalid",
+      sourcePath: "C:\\bad-id.exe",
+      executablePath: "C:\\bad-id.exe",
+      processName: "bad-id.exe",
+    }),
+  }).status, "error");
   const calls = [];
   const result = agentCommands.removeCustomApplication({ id }, {
     snapshot: {
@@ -108,10 +120,11 @@ test("settings agent actions reject unidentified paths and clean up removed cust
     },
     clearSessionsByAgent: (agentId) => calls.push(["sessions", agentId]),
     dismissPermissionsByAgent: (agentId) => calls.push(["permissions", agentId]),
+    clearRecentHookEvents: (agentId) => calls.push(["ring", agentId]),
   });
   assert.deepStrictEqual(result.commit.customApplications, []);
   assert.strictEqual(result.commit.agents[id], undefined);
-  assert.deepStrictEqual(calls, [["sessions", id], ["permissions", id]]);
+  assert.deepStrictEqual(calls, [["sessions", id], ["permissions", id], ["ring", id]]);
 });
 
 test("settings agent actions enforce the persisted custom AI limit", () => {
@@ -195,6 +208,29 @@ test("settings agent actions save custom discovery paths for the shared custom s
     "C:\\Tools\\AI.exe",
     "C:\\Tools\\AI\\config",
   ]);
+});
+
+test("settings agent actions preserve semicolons in array paths and reject overflow", () => {
+  const snapshot = prefs.getDefaults();
+  const valid = agentCommands.setAgentCustomDiscoveryPaths({
+    agentId: "custom",
+    value: ["C:\\Tools;Lab\\AI.exe"],
+  }, { snapshot });
+  assert.deepStrictEqual(valid.commit.customToolDiscoveryPaths, ["C:\\Tools;Lab\\AI.exe"]);
+
+  const tooMany = agentCommands.setAgentCustomDiscoveryPaths({
+    agentId: "custom",
+    value: Array.from({ length: 65 }, (_, index) => `C:\\Tools\\AI-${index}`),
+  }, { snapshot });
+  assert.strictEqual(tooMany.status, "error");
+  assert.match(tooMany.message, /limit reached/);
+
+  const tooLong = agentCommands.setAgentCustomDiscoveryPaths({
+    agentId: "custom",
+    value: [`C:\\${"x".repeat(2050)}`],
+  }, { snapshot });
+  assert.strictEqual(tooLong.status, "error");
+  assert.match(tooLong.message, /at most/);
 });
 
 test("settings agent actions save discovery overrides on a registered agent", () => {
@@ -459,7 +495,11 @@ test("settings agent actions pass CodeBuddy custom hook URL during install", asy
   assert.strictEqual(result.status, "ok");
   assert.deepStrictEqual(calls, [{
     agentId: "codebuddy",
-    options: { customPermissionUrl: "https://approval.example.test/permission" },
+    options: {
+      customPermissionUrl: "https://approval.example.test/permission",
+      source: "settings-agent-install",
+      automatic: false,
+    },
   }]);
 });
 

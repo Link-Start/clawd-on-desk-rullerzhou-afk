@@ -193,6 +193,12 @@
     return Array.isArray(value) ? value.filter((item) => item && typeof item.path === "string") : [];
   }
 
+  function readCustomAgentDetectionResults() {
+    const hints = runtime.agentInstallationHints;
+    const value = hints && hints.customAgents;
+    return Array.isArray(value) ? value.filter((item) => item && typeof item.agentId === "string") : [];
+  }
+
   function readCustomApplications() {
     const value = state.snapshot && state.snapshot.customApplications;
     return Array.isArray(value) ? value.filter((item) => item && typeof item.id === "string") : [];
@@ -918,6 +924,7 @@
     const normalized = {
       checkedAt: Number.isFinite(source.checkedAt) ? source.checkedAt : null,
       agents: Array.isArray(source.agents) ? source.agents : [],
+      customAgents: Array.isArray(source.customAgents) ? source.customAgents : [],
       customTools: Array.isArray(source.customTools) ? source.customTools : [],
       skippedAgentIds: Array.isArray(source.skippedAgentIds) ? source.skippedAgentIds : [],
       wslAgents: Array.isArray(source.wslAgents) ? source.wslAgents : [],
@@ -933,6 +940,7 @@
     const result = {
       checkedAt: null,
       agents: [],
+      customAgents: [],
       customTools: [],
       skippedAgentIds: [],
       wslAgents: [],
@@ -1327,6 +1335,7 @@
     readAgentCustomPermissionUrl,
     readAgentCustomDiscoveryPaths,
     readCustomToolDetectionResults,
+    readCustomAgentDetectionResults,
     readCustomApplications,
     getShortcutValue,
     getLang,

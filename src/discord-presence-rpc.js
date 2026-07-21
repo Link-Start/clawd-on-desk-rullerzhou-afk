@@ -43,7 +43,7 @@ function agentLabel(agentId) {
 function buildPresencePayload(session, privacy = {}) {
   const coarse = toCoarseState(session && session.state);
   const activity = {
-    details: agentLabel(session && session.agentId),
+    details: (session && session.agentName) || agentLabel(session && session.agentId),
     state: COARSE_LABEL[coarse],
     assets: { large_image: CLAWD_ICON_URL, large_text: "Clawd on Desk" },
   };

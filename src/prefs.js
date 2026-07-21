@@ -18,7 +18,10 @@
 
 const fs = require("fs");
 const path = require("path");
-const { normalizeCustomApplications } = require("./custom-applications");
+const {
+  isCustomApplicationNamespace,
+  normalizeCustomApplications,
+} = require("./custom-applications");
 const { isPlainObject } = require("./theme-loader");
 const { normalizeShortcuts, getDefaultShortcuts } = require("./shortcut-actions");
 const { isValidDisplaySnapshot } = require("./work-area");
@@ -483,6 +486,7 @@ function validate(raw) {
     const legacy = raw.agents && raw.agents.custom && raw.agents.custom.customDiscoveryPaths;
     out.customToolDiscoveryPaths = normalizePathList(legacy);
   }
+  normalizeCustomAgentGates(out);
   normalizeStaleTriple(out);
   return out;
 }
@@ -696,17 +700,27 @@ const AGENT_FLAGS = [
   "nativeNotificationSoundEnabled",
 ];
 const CODEX_PERMISSION_MODES = ["native", "intercept"];
+const MAX_CUSTOM_DISCOVERY_PATHS = 64;
+const MAX_CUSTOM_DISCOVERY_PATH_LENGTH = 2048;
 
-function normalizePathList(value) {
+function normalizePathList(value, options = {}) {
   const raw = Array.isArray(value)
     ? value
     : (typeof value === "string" ? value.split(/[;\n]/g) : []);
+  const platform = typeof options.platform === "string" ? options.platform : process.platform;
+  const maxEntries = Number.isInteger(options.maxEntries) && options.maxEntries >= 0
+    ? options.maxEntries
+    : MAX_CUSTOM_DISCOVERY_PATHS;
   const out = [];
+  const seen = new Set();
   for (const entry of raw) {
     if (typeof entry !== "string") continue;
-    const trimmed = entry.replace(/\0/g, "").trim();
-    if (!trimmed || out.includes(trimmed)) continue;
+    const trimmed = entry.replace(/\0/g, "").trim().slice(0, MAX_CUSTOM_DISCOVERY_PATH_LENGTH);
+    const compareKey = platform === "win32" ? trimmed.toLowerCase() : trimmed;
+    if (!trimmed || seen.has(compareKey)) continue;
+    seen.add(compareKey);
     out.push(trimmed);
+    if (out.length >= maxEntries) break;
   }
   return out;
 }
@@ -817,6 +831,29 @@ function normalizeAgents(value, defaultsValue) {
     }
     if (touched) out[id] = merged;
   }
+  return out;
+}
+
+function normalizeCustomAgentGates(out) {
+  const applications = Array.isArray(out.customApplications) ? out.customApplications : [];
+  const registeredIds = new Set(applications.map((application) => application.id));
+  const agents = out.agents && typeof out.agents === "object" ? { ...out.agents } : {};
+
+  for (const id of Object.keys(agents)) {
+    if (isCustomApplicationNamespace(id) && !registeredIds.has(id)) delete agents[id];
+  }
+  for (const application of applications) {
+    const current = agents[application.id];
+    agents[application.id] = {
+      integrationInstalled: false,
+      enabled: current && typeof current.enabled === "boolean" ? current.enabled : true,
+      permissionsEnabled: false,
+      notificationHookEnabled: current && typeof current.notificationHookEnabled === "boolean"
+        ? current.notificationHookEnabled
+        : true,
+    };
+  }
+  out.agents = agents;
   return out;
 }
 
@@ -1133,4 +1170,6 @@ module.exports = {
   normalizeShortcuts,
   normalizeOptionalHttpUrl,
   normalizePathList,
+  MAX_CUSTOM_DISCOVERY_PATHS,
+  MAX_CUSTOM_DISCOVERY_PATH_LENGTH,
 };

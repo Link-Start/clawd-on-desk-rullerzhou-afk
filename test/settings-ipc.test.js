@@ -188,6 +188,8 @@ function createHarness(overrides = {}) {
     getSoundMuted: overrides.getSoundMuted || (() => false),
     getSoundVolume: overrides.getSoundVolume || (() => 0.4),
     getAllAgents: overrides.getAllAgents || (() => []),
+    getHookServerPort: overrides.getHookServerPort,
+    getRecentHookEvents: overrides.getRecentHookEvents,
     detectAgentInstallations: overrides.detectAgentInstallations,
     checkForUpdates: (manual) => calls.push(["checkForUpdates", manual]),
     showTutorial: overrides.showTutorial || (() => {
@@ -608,6 +610,14 @@ test("settings IPC serves agent/about/update/external and remove-theme dialog he
       getAllAgents: () => [
         { id: "codex", name: "Codex", eventSource: "hook", capabilities: { permission: true } },
       ],
+      getHookServerPort: () => 23335,
+      getRecentHookEvents: ({ agentId }) => [{
+        timestamp: 12345,
+        agentId,
+        eventType: "PreToolUse",
+        route: "state",
+        outcome: "accepted",
+      }],
       settingsController: {
         getSnapshot: () => ({
           lang: "en",
@@ -637,10 +647,12 @@ test("settings IPC serves agent/about/update/external and remove-theme dialog he
         sourcePath: "C:\\NovaAI",
         executablePath: "C:\\NovaAI\\NovaAI.exe",
         processName: "NovaAI.exe",
+        stateEndpoint: "http://127.0.0.1:23335/state",
+        lastStateEvent: { timestamp: 12345, eventType: "PreToolUse" },
         capabilities: {
           httpHook: true,
-          permissionApproval: true,
-          interactiveBubble: true,
+          permissionApproval: false,
+          interactiveBubble: false,
           notificationHook: true,
           sessionEnd: true,
           subagent: false,

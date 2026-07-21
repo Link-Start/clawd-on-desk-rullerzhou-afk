@@ -428,6 +428,30 @@ function detectCustomTools(options = {}) {
   });
 }
 
+function detectCustomAgents(options = {}) {
+  const fsImpl = options.fs || fs;
+  const applications = Array.isArray(options.snapshot && options.snapshot.customApplications)
+    ? options.snapshot.customApplications
+    : [];
+  return applications.map((application) => {
+    const agentId = application && typeof application.id === "string" ? application.id : "";
+    const executablePath = application && typeof application.executablePath === "string"
+      ? application.executablePath
+      : "";
+    const kind = executablePath ? statPath(fsImpl, executablePath) : null;
+    return {
+      agentId,
+      executablePath,
+      detectedInstalled: !!kind,
+      confidence: kind ? "high" : LOW_CONFIDENCE,
+      reason: kind ? "registered-executable" : "not-found",
+      detail: kind
+        ? `Registered executable exists: ${executablePath} (${kind})`
+        : `Registered executable was not found: ${executablePath}`,
+    };
+  }).filter((entry) => entry.agentId && entry.executablePath);
+}
+
 function markerInDirectoryFiles(fsImpl, dirPath, marker, options = {}) {
   if (!dirExists(fsImpl, dirPath)) return false;
   const maxFiles = Number.isFinite(options.maxFiles) ? options.maxFiles : 100;
@@ -548,6 +572,7 @@ function detectAgentInstallations(options = {}) {
   return {
     checkedAt: checkedAtValue(options.now),
     agents,
+    customAgents: detectCustomAgents(options),
     customTools: detectCustomTools(options),
     skippedAgentIds,
     wslAgents: _cachedWslAgents,
