@@ -137,7 +137,16 @@ function handleStatePost(req, res, options) {
     }
     try {
       const data = JSON.parse(body);
-      const recordRequestHookEvent = createRequestHookRecorder(data, "state");
+      const agentIdentity = resolveHookAgentId(data, {
+        customAgentIds: typeof ctx.getCustomAgentIds === "function" ? ctx.getCustomAgentIds() : [],
+      });
+      const recordRequestHookEvent = createRequestHookRecorder(agentIdentity, data, "state");
+      if (agentIdentity.rejected) {
+        recordRequestHookEvent.droppedInvalidAgent();
+        res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
+        res.end();
+        return;
+      }
       let { state, svg, session_id, event } = data;
       let display_svg;
       if (data.display_svg === null) display_svg = null;
@@ -152,9 +161,6 @@ function handleStatePost(req, res, options) {
       const tmuxClient = normalizeTmuxClient(data.tmux_client);
       const rawAgentPid = data.agent_pid ?? data.claude_pid ?? data.cursor_pid;
       const agentPid = Number.isFinite(rawAgentPid) && rawAgentPid > 0 ? Math.floor(rawAgentPid) : null;
-      const agentIdentity = resolveHookAgentId(data, {
-        customAgentIds: typeof ctx.getCustomAgentIds === "function" ? ctx.getCustomAgentIds() : [],
-      });
       const agentId = agentIdentity.agentId;
       const host = typeof data.host === "string" ? data.host : null;
       const wslDistro = typeof data.wsl_distro === "string" && data.wsl_distro.trim()

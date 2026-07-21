@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 
 const MAX_CUSTOM_APPLICATIONS = 32;
+const CUSTOM_APPLICATION_ID_RE = /^custom-[a-z0-9-]+-[a-f0-9]{12}$/;
 const WINDOWS_EXECUTABLE_EXTENSIONS = new Set([".exe", ".cmd", ".bat", ".com"]);
 const AUXILIARY_EXECUTABLE_RE = /(?:unins|uninstall|update|updater|helper|crash|report|service|setup|install)/i;
 
@@ -21,6 +22,14 @@ function applicationId(executablePath, name, platform = process.platform) {
   const key = platform === "win32" ? executablePath.toLowerCase() : executablePath;
   const slug = String(name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32) || "app";
   return `custom-${slug}-${crypto.createHash("sha256").update(key).digest("hex").slice(0, 12)}`;
+}
+
+function isCustomApplicationId(value) {
+  return typeof value === "string" && CUSTOM_APPLICATION_ID_RE.test(value);
+}
+
+function isCustomApplicationNamespace(value) {
+  return typeof value === "string" && value.startsWith("custom-");
 }
 
 function isLaunchable(filePath, stat, platform, pathApi) {
@@ -85,7 +94,7 @@ function normalizeCustomApplication(value) {
   const sourcePath = cleanText(value.sourcePath, 2048);
   const executablePath = cleanText(value.executablePath, 2048);
   const processName = cleanText(value.processName, 260);
-  if (!/^custom-[a-z0-9-]+-[a-f0-9]{12}$/.test(id) || !name || !sourcePath || !executablePath || !processName) return null;
+  if (!isCustomApplicationId(id) || !name || !sourcePath || !executablePath || !processName) return null;
   return { id, name, sourcePath, executablePath, processName, category: value.category === "work" ? "work" : "code" };
 }
 
@@ -103,4 +112,10 @@ function normalizeCustomApplications(value) {
   return out;
 }
 
-module.exports = { MAX_CUSTOM_APPLICATIONS, identifyCustomApplication, normalizeCustomApplications };
+module.exports = {
+  MAX_CUSTOM_APPLICATIONS,
+  identifyCustomApplication,
+  isCustomApplicationId,
+  isCustomApplicationNamespace,
+  normalizeCustomApplications,
+};

@@ -97,12 +97,12 @@ function shouldDropForDnd() {
   return !!ctx.doNotDisturb;
 }
 
-function recordHookEvent(data, route, outcome) {
-  return recordHookEventInBuffer(recentHookEvents, data, route, outcome, { now: nowFn });
+function recordHookEvent(identity, data, route, outcome) {
+  return recordHookEventInBuffer(recentHookEvents, identity, data, route, outcome, { now: nowFn });
 }
 
-function createRequestHookRecorder(data, defaultRoute) {
-  return createSingleRequestHookEventRecorder(recordHookEvent, data, defaultRoute);
+function createRequestHookRecorder(identity, data, defaultRoute) {
+  return createSingleRequestHookEventRecorder(recordHookEvent, identity, data, defaultRoute);
 }
 
 function getRecentHookEvents(options = {}) {

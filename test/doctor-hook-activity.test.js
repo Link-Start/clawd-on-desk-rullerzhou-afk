@@ -38,6 +38,18 @@ describe("doctor hook activity connection test", () => {
     assert.match(result.detail, /dropped-by-dnd/);
   });
 
+  it("treats invalid and unsupported custom activity as dropped, never verified", () => {
+    const result = evaluateConnectionTest({
+      events: [
+        { agentId: "rejected-custom", route: "state", outcome: "dropped-invalid-agent" },
+        { agentId: "custom-nova-0123456789ab", route: "permission", outcome: "dropped-unsupported" },
+      ],
+    });
+
+    assert.strictEqual(result.status, "http-dropped");
+    assert.strictEqual(result.level, "warning");
+  });
+
   it("warns when Codex fallback files changed but no HTTP event arrived", () => {
     const result = evaluateConnectionTest({
       fileActivity: [{ agentId: "codex", source: "file-mtime", count: 1 }],

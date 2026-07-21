@@ -277,6 +277,11 @@ function sendHermesPermissionNoDecision(res) {
   res.end();
 }
 
+function sendGenericPermissionNoDecision(res) {
+  res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
+  res.end();
+}
+
 // Turning off the desktop permission bubble (arePermissionBubblesEnabled ===
 // false) means "don't show a window on this computer" — it must not also
 // silence Telegram remote approval, since that's a separate channel the user
@@ -398,10 +403,20 @@ function handlePermissionPost(req, res, options) {
       res.end("bad json");
       return;
     }
-    const recordRequestHookEvent = createRequestHookRecorder(data, "permission");
     const hookIdentity = resolveHookAgentId(data, {
       customAgentIds: typeof ctx.getCustomAgentIds === "function" ? ctx.getCustomAgentIds() : [],
     });
+    const recordRequestHookEvent = createRequestHookRecorder(hookIdentity, data, "permission");
+    if (hookIdentity.rejected) {
+      recordRequestHookEvent.droppedInvalidAgent();
+      sendGenericPermissionNoDecision(res);
+      return;
+    }
+    if (hookIdentity.source === "custom") {
+      recordRequestHookEvent.droppedUnsupported();
+      sendGenericPermissionNoDecision(res);
+      return;
+    }
     const { agentId } = hookIdentity;
 
     try {

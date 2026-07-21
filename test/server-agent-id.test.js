@@ -57,10 +57,35 @@ describe("resolveHookAgentId", () => {
       source: "custom",
       defaulted: false,
     });
-    assert.strictEqual(resolveHookAgentId({ agent_id: id }).source, "subagent");
+    assert.deepStrictEqual(resolveHookAgentId({ agent_id: id }), {
+      agentId: null,
+      source: "rejected-custom",
+      rejected: true,
+      rawAgentId: id,
+    });
     assert.strictEqual(resolveHookAgentId({ agent_id: "custom-forged-0123456789ab" }, {
       customAgentIds: [id],
-    }).source, "subagent");
+    }).source, "rejected-custom");
+  });
+
+  it("rejects malformed custom namespace ids before hook_source fallback", () => {
+    const resolved = resolveHookAgentId({
+      agent_id: "custom-BROKEN",
+      hook_source: "copilot-hook",
+    });
+    assert.deepStrictEqual(resolved, {
+      agentId: null,
+      source: "rejected-custom",
+      rejected: true,
+      rawAgentId: "custom-BROKEN",
+    });
+  });
+
+  it("truncates overlong rejected custom ids for diagnostics", () => {
+    const resolved = resolveHookAgentId({ agent_id: `custom-${"x".repeat(200)}` });
+    assert.strictEqual(resolved.rejected, true);
+    assert.strictEqual(resolved.rawAgentId.length, 80);
+    assert.ok(resolved.rawAgentId.startsWith("custom-"));
   });
 
   it("classifies a subagent marker without agent_type", () => {

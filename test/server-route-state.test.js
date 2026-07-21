@@ -71,12 +71,13 @@ function callStatePost(body, overrides = {}) {
     };
     handleStatePost(makeReq(body), res, {
       ctx,
-      createRequestHookRecorder: (data, route) => {
-        calls.recorder.push({ data, route });
+      createRequestHookRecorder: (identity, data, route) => {
+        calls.recorder.push({ identity, data, route });
         return {
           acceptedUnlessDnd: (dropForDnd) => calls.recorder.push({ outcome: dropForDnd ? "dnd" : "accepted" }),
           droppedByDisabled: () => calls.recorder.push({ outcome: "disabled" }),
           droppedByDnd: () => calls.recorder.push({ outcome: "dnd" }),
+          droppedInvalidAgent: () => calls.recorder.push({ outcome: "invalid-agent" }),
         };
       },
       shouldDropForDnd: () => false,
@@ -583,6 +584,20 @@ describe("server-route-state POST", () => {
     }), { ctx: { getCustomAgentIds: () => [id] } });
     assert.strictEqual(res.statusCode, 200);
     assert.strictEqual(res.calls.updateSession[0][3].agentId, id);
+  });
+
+  it("rejects stale custom ids before hook_source fallback", async () => {
+    const res = await callStatePost(JSON.stringify({
+      state: "working",
+      session_id: "stale:sid",
+      event: "PreToolUse",
+      agent_id: "custom-stale-0123456789ab",
+      hook_source: "copilot-hook",
+    }));
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.calls.updateSession.length, 0);
+    assert.deepStrictEqual(res.calls.recorder.map((item) => item.outcome).filter(Boolean), ["invalid-agent"]);
   });
 
   it("infers opencode from hook_source when agent_id is missing", async () => {
