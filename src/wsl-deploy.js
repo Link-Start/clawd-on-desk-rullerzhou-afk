@@ -73,6 +73,10 @@ function getInstallScript(agentId) {
   return getAgentInstallScriptName(agentId);
 }
 
+function getAgentInstallArgs(agentId) {
+  return agentId === "codebuddy" ? "--permission-url preserve" : "";
+}
+
 // install.js does NOT understand --uninstall: it ignores unknown argv and
 // RE-REGISTERS hooks, so "node install.js --uninstall" re-installs 12 hook
 // entries and the subsequent rm -rf leaves them pointing at deleted files
@@ -249,9 +253,10 @@ async function deployToWsl(distro, options = {}) {
   // and `node` resolves to the user's managed version, not a stale system one.
   emit("run-install", "start");
   const distroEscaped = distro.replace(/'/g, "'\\''");
+  const installArgs = getAgentInstallArgs(agentId);
   const runResult = await execInWsl(
     distro,
-    `cd '${hooksTargetDirEscaped}' && CLAWD_WSL_DISTRO='${distroEscaped}' node ${installScript}`,
+    `cd '${hooksTargetDirEscaped}' && CLAWD_WSL_DISTRO='${distroEscaped}' node ${installScript}${installArgs ? ` ${installArgs}` : ""}`,
     { ...options, shell: "bash", shellFlags: ["-l", "-i", "-c"], timeout: 60000 }
   );
   if (runResult.code !== 0) {
@@ -376,6 +381,7 @@ module.exports = {
   deployToWsl,
   removeFromWsl,
   getAgentInstallScriptName,
+  getAgentInstallArgs,
   getAgentUninstallCommand,
   parseConnectivityProbe,
   resolveHooksDir,

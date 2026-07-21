@@ -277,7 +277,9 @@ function buildAgentIntegrationOptions(snapshot, agentId) {
   const options = {};
   if (agentSupportsCustomPermissionUrl(agentId)) {
     const customPermissionUrl = normalizeOptionalHttpUrl(entry.customPermissionUrl);
-    if (customPermissionUrl) options.customPermissionUrl = customPermissionUrl;
+    options.permissionTarget = customPermissionUrl
+      ? { mode: "custom", url: customPermissionUrl }
+      : { mode: "local" };
   }
   return options;
 }

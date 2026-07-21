@@ -160,7 +160,7 @@ test("settings agent actions sync an installed custom permission URL change imme
   assert.strictEqual(result.status, "ok");
   assert.deepStrictEqual(calls, [{
     agentId: "codebuddy",
-    options: { customPermissionUrl: "https://approval.example.test/permission" },
+    options: { permissionTarget: { mode: "custom", url: "https://approval.example.test/permission" } },
   }]);
   assert.strictEqual(
     result.commit.agents.codebuddy.customPermissionUrl,
@@ -182,7 +182,10 @@ test("settings agent actions sync clearing an installed custom permission URL im
   });
 
   assert.strictEqual(result.status, "ok");
-  assert.deepStrictEqual(calls, [{ agentId: "codebuddy", options: {} }]);
+  assert.deepStrictEqual(calls, [{
+    agentId: "codebuddy",
+    options: { permissionTarget: { mode: "local" } },
+  }]);
   assert.strictEqual(result.commit.agents.codebuddy.customPermissionUrl, "");
 });
 
@@ -449,6 +452,44 @@ test("settings agent actions repair Codex with the forced hooks feature option",
   ]);
 });
 
+test("settings agent actions repair CodeBuddy with an explicit permission target", async () => {
+  const customSnapshot = prefs.getDefaults();
+  customSnapshot.agents.codebuddy.integrationInstalled = true;
+  customSnapshot.agents.codebuddy.enabled = true;
+  customSnapshot.agents.codebuddy.customPermissionUrl = "https://approval.example.test/permission";
+  const calls = [];
+  const repairIntegrationForAgent = async (agentId, options) => {
+    calls.push({ agentId, options });
+    return { status: "ok", message: "repaired" };
+  };
+
+  await agentCommands.repairAgentIntegration({ agentId: "codebuddy" }, {
+    snapshot: customSnapshot,
+    repairIntegrationForAgent,
+  });
+  const localSnapshot = prefs.getDefaults();
+  localSnapshot.agents.codebuddy.integrationInstalled = true;
+  localSnapshot.agents.codebuddy.enabled = true;
+  await agentCommands.repairAgentIntegration({ agentId: "codebuddy" }, {
+    snapshot: localSnapshot,
+    repairIntegrationForAgent,
+  });
+
+  assert.deepStrictEqual(calls, [
+    {
+      agentId: "codebuddy",
+      options: {
+        permissionTarget: { mode: "custom", url: "https://approval.example.test/permission" },
+        forceCodexHooksFeature: false,
+      },
+    },
+    {
+      agentId: "codebuddy",
+      options: { permissionTarget: { mode: "local" }, forceCodexHooksFeature: false },
+    },
+  ]);
+});
+
 test("settings agent actions install an integration and enable ingress", async () => {
   const snapshot = prefs.getDefaults();
   snapshot.agents["copilot-cli"] = {
@@ -496,7 +537,7 @@ test("settings agent actions pass CodeBuddy custom hook URL during install", asy
   assert.deepStrictEqual(calls, [{
     agentId: "codebuddy",
     options: {
-      customPermissionUrl: "https://approval.example.test/permission",
+      permissionTarget: { mode: "custom", url: "https://approval.example.test/permission" },
       source: "settings-agent-install",
       automatic: false,
     },

@@ -311,7 +311,9 @@ function _getAgentIntegrationOptions(agentId) {
   const capabilities = (agent && agent.capabilities) || {};
   if (capabilities.httpHook && capabilities.customPermissionUrl) {
     const customPermissionUrl = prefsModule.normalizeOptionalHttpUrl(entry.customPermissionUrl);
-    if (customPermissionUrl) options.customPermissionUrl = customPermissionUrl;
+    options.permissionTarget = customPermissionUrl
+      ? { mode: "custom", url: customPermissionUrl }
+      : { mode: "local" };
   }
   return options;
 }

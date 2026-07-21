@@ -175,9 +175,13 @@ function createIntegrationSyncRuntime(options = {}) {
 
   function syncCodeBuddyHooks(options = {}) {
     try {
-      if (typeof ctx.syncCodeBuddyHooksImpl === "function") return ctx.syncCodeBuddyHooksImpl(options);
+      const permissionTarget = options.permissionTarget && typeof options.permissionTarget === "object"
+        ? options.permissionTarget
+        : { mode: "local" };
+      const syncOptions = { ...options, permissionTarget };
+      if (typeof ctx.syncCodeBuddyHooksImpl === "function") return ctx.syncCodeBuddyHooksImpl(syncOptions);
       const { registerCodeBuddyHooks } = require("../hooks/codebuddy-install.js");
-      const result = registerCodeBuddyHooks({ silent: true, customPermissionUrl: options.customPermissionUrl });
+      const result = registerCodeBuddyHooks({ silent: true, permissionTarget });
       if (hasPositiveCount(result.added) || hasPositiveCount(result.updated)) {
         console.log(`Clawd: synced CodeBuddy hooks (added ${result.added}, updated ${result.updated})`);
       }

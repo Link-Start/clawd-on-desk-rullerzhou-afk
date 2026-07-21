@@ -348,12 +348,12 @@ describe("integration sync runtime", () => {
     const { runtime, calls } = makeRuntime();
 
     runtime.syncIntegrationForAgent("codebuddy", {
-      customPermissionUrl: "https://approval.example.test/permission",
+      permissionTarget: { mode: "custom", url: "https://approval.example.test/permission" },
     });
 
     assert.deepStrictEqual(calls, [{
       name: "codebuddy",
-      options: { customPermissionUrl: "https://approval.example.test/permission" },
+      options: { permissionTarget: { mode: "custom", url: "https://approval.example.test/permission" } },
     }]);
   });
 
@@ -362,7 +362,7 @@ describe("integration sync runtime", () => {
       shouldSyncAgentIntegration: (agentId) => agentId === "codebuddy",
       getAgentIntegrationOptions: (agentId) => (
         agentId === "codebuddy"
-          ? { customPermissionUrl: "https://approval.example.test/permission" }
+          ? { permissionTarget: { mode: "custom", url: "https://approval.example.test/permission" } }
           : {}
       ),
     });
@@ -371,8 +371,23 @@ describe("integration sync runtime", () => {
 
     assert.deepStrictEqual(calls, [{
       name: "codebuddy",
-      options: { customPermissionUrl: "https://approval.example.test/permission" },
+      options: { permissionTarget: { mode: "custom", url: "https://approval.example.test/permission" } },
     }]);
+  });
+
+  it("uses an explicit local target when CodeBuddy sync is called without saved options", () => {
+    let received = null;
+    const { runtime } = makeRuntime({
+      ctx: { syncCodeBuddyHooksImpl: null },
+    });
+    const modulePath = require.resolve("../hooks/codebuddy-install.js");
+
+    withPatchedExport(modulePath, "registerCodeBuddyHooks", (options) => {
+      received = options;
+      return { added: 0, updated: 0, skipped: 9 };
+    }, () => runtime.syncCodeBuddyHooks());
+
+    assert.deepStrictEqual(received.permissionTarget, { mode: "local" });
   });
 
   it("syncIntegrationForAgent treats count-style zero writes as a missing local integration", () => {
