@@ -798,8 +798,7 @@ function loadAgentsTabForTest({
           agentSectionConnected: "Connected",
           agentSectionRecommended: "Detected locally",
           agentSectionUnavailable: "Not detected locally",
-          agentCategoryCoding: "Coding AI",
-          agentCategoryWork: "Office AI",
+          agentSearchPlaceholder: "Search",
           agentsSubtabConnected: "Connected",
           agentsSubtabDiscover: "Discover and add",
           rowCustomToolsDiscoveryPathsDesc: "Choose an AI installation folder.",
@@ -4561,19 +4560,23 @@ describe("settings renderer browser environment", () => {
     assert.ok(agentsSource.includes("function renderDiscoverSubtab("));
   });
 
-  it("renders Agent category groups as collapsible sections inside each status section", () => {
+  it("lists agents flat, with no Coding AI / Office AI grouping layer", () => {
     const agentsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-agents.js"), "utf8");
+    const orderSource = fs.readFileSync(path.join(SRC_DIR, "settings-agent-order.js"), "utf8");
+    const i18nSource = fs.readFileSync(path.join(SRC_DIR, "settings-i18n.js"), "utf8");
     const css = fs.readFileSync(path.join(SRC_DIR, "settings.css"), "utf8");
-    assert.ok(agentsSource.includes("function buildAgentCategoryGroup("));
-    assert.ok(agentsSource.includes('id: `agents:${sectionKey}:${category}`'));
-    assert.ok(agentsSource.includes('className: "agent-category-group"'));
-    assert.ok(agentsSource.includes('count.className = "agent-category-count"'));
-    assert.ok(!agentsSource.includes("buildAgentCategoryHeader("));
-    assert.ok(css.includes(".agent-category-group > .collapsible-group-body"));
-    assert.ok(css.includes(".agent-category-count"));
+    assert.ok(agentsSource.includes("function buildAgentRows("));
+    assert.ok(!agentsSource.includes("buildAgentCategoryGroup("));
+    assert.ok(!agentsSource.includes("categorizeAgentsByType("));
+    assert.ok(!agentsSource.includes("getAgentCategory"));
+    assert.ok(!orderSource.includes("getAgentCategory"));
+    assert.ok(!i18nSource.includes("agentCategoryCoding"));
+    assert.ok(!i18nSource.includes("agentCategoryWork"));
+    assert.ok(!css.includes(".agent-category-group"));
+    assert.ok(!css.includes(".agent-category-count"));
   });
 
-  it("counts a registered custom AI as connected and groups it beside built-ins", () => {
+  it("counts a registered custom AI as connected, listed beside built-ins", () => {
     const id = "custom-nova-ai-0123456789ab";
     const harness = loadAgentsTabForTest({
       snapshot: {
@@ -4613,22 +4616,14 @@ describe("settings renderer browser environment", () => {
     harness.core.ops.requestRender({ content: true });
 
     // Registering is what connects a custom AI, so it belongs in Connected
-    // rather than being demoted into the discover subtab.
+    // rather than being demoted into the discover subtab. Both agents list
+    // flat: a custom "code" agent and a built-in "work" one, no category boxes.
     const connected = harness.content.querySelector(".agent-section-connected");
     assert.ok(connected);
-    const groups = connected.querySelectorAll(".agent-category-group");
-    assert.strictEqual(groups.length, 2, "two categories present, so the grouping layer stays");
+    assert.strictEqual(connected.querySelector(".agent-category-group"), null);
     assert.deepStrictEqual(
-      groups.map((group) => group.querySelector(".collapsible-group-text .row-label").textContent),
-      ["Coding AI", "Office AI"]
-    );
-    assert.deepStrictEqual(
-      groups[0].querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
-      ["Nova AI"]
-    );
-    assert.deepStrictEqual(
-      groups[1].querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
-      ["QoderWork"]
+      connected.querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
+      ["Nova AI", "QoderWork"]
     );
     assert.strictEqual(harness.content.querySelector(".agent-section-recommended"), null);
   });
@@ -4661,6 +4656,93 @@ describe("settings renderer browser environment", () => {
     assert.match(css, /\.agent-custom-tools-section \.soft-btn\.custom-tool-path-picker\s*\{[^}]*background:\s*var\(--accent\);/s);
     assert.ok(!/\.custom-tool-path-picker\s*\{[^}]*width:\s*100%;/s.test(css));
     assert.ok(!/\.custom-tool-scan\s*\{[^}]*width:\s*100%;/s.test(css));
+  });
+
+  it("filters the undetected catalog from its header search box", () => {
+    const harness = loadAgentsTabForTest({
+      snapshot: {
+        lang: "en",
+        agents: {
+          "gemini-cli": { integrationInstalled: false, enabled: false },
+          "kimi-code": { integrationInstalled: false, enabled: false },
+          "qwen-code": { integrationInstalled: false, enabled: false },
+        },
+        customToolDiscoveryPaths: [],
+      },
+      agentMetadata: [
+        { id: "gemini-cli", name: "Gemini CLI", eventSource: "hook", capabilities: {} },
+        { id: "kimi-code", name: "Kimi Code", eventSource: "hook", capabilities: {} },
+        { id: "qwen-code", name: "Qwen Code", eventSource: "hook", capabilities: {} },
+      ],
+    });
+    harness.core.runtime.agentInstallationHints = {
+      checkedAt: 1,
+      agents: [],
+      customTools: [],
+      skippedAgentIds: [],
+    };
+    harness.core.runtime.agentInstallationHintsFetched = true;
+    harness.core.ops.requestRender({ content: true });
+    harness.raf.flush();
+
+    const group = harness.content.querySelector(".agent-unavailable-group");
+    assert.ok(group, "undetected agents render as a collapsible catalog");
+    assert.ok(group.classList.contains("collapsed"), "catalog starts collapsed");
+    const search = group.querySelector(".agent-section-search");
+    assert.ok(search, "the catalog header carries a search box");
+    assert.strictEqual(search.placeholder, "Search");
+    assert.strictEqual(group.querySelector(".agent-section-count").textContent, "3");
+
+    const visibleNames = () => group
+      .querySelectorAll(".agent-summary-row .row-label")
+      .filter((label) => {
+        let node = label;
+        while (node) {
+          if (node.classList && node.classList.contains("agent-row-filtered-out")) return false;
+          node = node.parentNode;
+        }
+        return true;
+      })
+      .map((label) => label.textContent);
+    assert.deepStrictEqual(visibleNames(), ["Gemini CLI", "Kimi Code", "Qwen Code"]);
+
+    search.value = "kim";
+    search.dispatchEvent({ type: "input", target: search, bubbles: false });
+    harness.raf.flush();
+
+    assert.deepStrictEqual(visibleNames(), ["Kimi Code"]);
+    assert.strictEqual(group.querySelector(".agent-section-count").textContent, "1");
+    // Typing has to open the catalog, or it would filter rows nobody can see.
+    assert.strictEqual(group.classList.contains("collapsed"), false);
+
+    // Clicks and keystrokes inside the box must not toggle the group.
+    const wasCollapsed = group.classList.contains("collapsed");
+    search.dispatchEvent({ type: "click", target: search, bubbles: true });
+    search.dispatchEvent({ type: "keydown", key: "Enter", target: search, bubbles: true });
+    assert.strictEqual(group.classList.contains("collapsed"), wasCollapsed);
+
+    // An IME composition is pinyin keystrokes, not a query: filtering on it
+    // would empty the list under the candidate window mid-word.
+    search.value = "kimi";
+    search.dispatchEvent({ type: "input", target: search, bubbles: false });
+    search.dispatchEvent({ type: "compositionstart", target: search, bubbles: false });
+    search.value = "ki mi";
+    search.dispatchEvent({ type: "input", target: search, bubbles: false });
+    assert.deepStrictEqual(visibleNames(), ["Kimi Code"], "composition keystrokes must not filter");
+    assert.strictEqual(group.querySelector(".agent-section-count").textContent, "1");
+    search.value = "秘密";
+    search.dispatchEvent({ type: "compositionend", target: search, bubbles: false });
+    assert.deepStrictEqual(visibleNames(), [], "the committed characters do filter");
+    assert.strictEqual(group.querySelector(".agent-section-count").textContent, "0");
+
+    // The query survives a re-render, and matching is case-insensitive.
+    search.value = "QWEN";
+    search.dispatchEvent({ type: "input", target: search, bubbles: false });
+    harness.core.ops.requestRender({ content: true });
+    harness.raf.flush();
+    const rebuilt = harness.content.querySelector(".agent-unavailable-group");
+    assert.strictEqual(rebuilt.querySelector(".agent-section-search").value, "QWEN");
+    assert.strictEqual(rebuilt.querySelector(".agent-section-count").textContent, "1");
   });
 
   it("splits the Agents tab into connected and discover subtabs", () => {

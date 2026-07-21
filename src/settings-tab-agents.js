@@ -3,7 +3,6 @@
 (function initSettingsTabAgents(root) {
   const {
     getAgentEventSourceBadgeKey,
-    getAgentCategory,
     sortAgentMetadataForSettings,
   } = root.ClawdSettingsAgentOrder || {};
   let state = null;
@@ -83,7 +82,7 @@
   function renderConnectedSubtab(parent, categorized, noAgentsAtAll) {
     if (categorized.connected.length > 0) {
       // No section title: the subtab pill already says "Connected".
-      const section = helpers.buildSection("", buildCategoryGroupedAgentRows("connected", categorized.connected));
+      const section = helpers.buildSection("", buildAgentRows(categorized.connected));
       section.classList.add("agent-section", "agent-section-connected");
       parent.appendChild(section);
       return;
@@ -99,7 +98,7 @@
     if (categorized.recommended.length > 0) {
       const section = helpers.buildSection(
         t("agentSectionRecommended"),
-        buildCategoryGroupedAgentRows("recommended", categorized.recommended)
+        buildAgentRows(categorized.recommended)
       );
       section.classList.add("agent-section", "agent-section-recommended");
       parent.appendChild(section);
@@ -111,19 +110,85 @@
   }
 
   // A catalog of what Clawd supports, not a to-do list — collapsed by default
-  // so the two actionable blocks above it stay in view.
+  // so the two actionable blocks above it stay in view, and searchable because
+  // it is long enough that scanning it by eye is the slow path.
   function buildUnavailableSection(agents) {
+    const rows = agents.map((agent) => {
+      const row = buildAgentGroup(agent);
+      row.dataset.agentSearch = `${agent.name || ""} ${agent.id || ""}`.toLowerCase();
+      return row;
+    });
+
     const count = document.createElement("span");
     count.className = "agent-section-count";
-    count.textContent = String(agents.length);
+
+    function applyFilter() {
+      const query = (runtime.agentsUnavailableQuery || "").trim().toLowerCase();
+      let shown = 0;
+      for (const row of rows) {
+        const matches = !query || String(row.dataset.agentSearch || "").includes(query);
+        row.classList.toggle("agent-row-filtered-out", !matches);
+        if (matches) shown += 1;
+      }
+      // Counts what is on screen, so the number always matches what you see.
+      count.textContent = String(shown);
+    }
+
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "agent-section-search";
+    search.placeholder = t("agentSearchPlaceholder");
+    search.value = runtime.agentsUnavailableQuery || "";
+    // The input sits inside the collapsible header, whose click and Enter/Space
+    // handlers would otherwise toggle the group out from under the typist.
+    const stopHeaderToggle = (event) => {
+      if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+    };
+    search.addEventListener("click", stopHeaderToggle);
+    search.addEventListener("keydown", stopHeaderToggle);
+
+    function commitQuery(event) {
+      runtime.agentsUnavailableQuery = (event && event.target && event.target.value) || "";
+      applyFilter();
+      // Typing into a collapsed catalog would filter rows nobody can see.
+      if (runtime.agentsUnavailableQuery && group.classList.contains("collapsed")) {
+        const header = group.querySelector(".collapsible-group-header");
+        // HTMLElement.click() in the browser; the test DOM has no click(), but
+        // its dispatchEvent takes a plain descriptor.
+        if (header && typeof header.click === "function") header.click();
+        else if (header) header.dispatchEvent({ type: "click", bubbles: false });
+      }
+    }
+
+    // Mid-composition the field holds pinyin/kana keystrokes rather than a
+    // query, and filtering on those empties the list under the candidate
+    // window while the user is still picking a character.
+    let composing = false;
+    search.addEventListener("compositionstart", () => { composing = true; });
+    search.addEventListener("compositionend", (event) => {
+      composing = false;
+      commitQuery(event);
+    });
+    search.addEventListener("input", (event) => {
+      if (composing) return;
+      commitQuery(event);
+    });
+
+    const summary = document.createElement("div");
+    summary.className = "agent-section-summary";
+    summary.appendChild(search);
+    summary.appendChild(count);
+
     const group = helpers.buildCollapsibleGroup({
       id: "agents:unavailable",
       title: t("agentSectionUnavailable"),
-      summary: count,
-      children: buildCategoryGroupedAgentRows("unavailable", agents),
+      summary,
+      children: rows,
       defaultCollapsed: true,
       className: "agent-unavailable-group",
     });
+    applyFilter();
+
     const section = helpers.buildSection("", [group]);
     section.classList.add("agent-section", "agent-section-unavailable");
     return section;
@@ -182,19 +247,6 @@
     });
   }
 
-  function getCategory(agent) {
-    return typeof getAgentCategory === "function" ? getAgentCategory(agent) : "coding";
-  }
-
-  function categorizeAgentsByType(agents) {
-    const buckets = { coding: [], work: [] };
-    for (const agent of agents) {
-      const category = getCategory(agent) === "work" ? "work" : "coding";
-      buckets[category].push(agent);
-    }
-    return buckets;
-  }
-
   function categorizeAgentsForSections(agents) {
     const sections = {
       connected: [],
@@ -240,34 +292,8 @@
     return entries.find((entry) => entry && entry.agentId === agentId) || null;
   }
 
-  function buildCategoryGroupedAgentRows(sectionKey, agents) {
-    const grouped = categorizeAgentsByType(agents);
-    const present = [
-      ["coding", "agentCategoryCoding"],
-      ["work", "agentCategoryWork"],
-    ].filter(([category]) => grouped[category] && grouped[category].length > 0);
-    // One category means the header would only restate the section — drop the
-    // grouping layer and list the agents directly. Office AI is a single agent
-    // today, so most sections land here.
-    if (present.length < 2) {
-      return agents.map((agent) => buildAgentGroup(agent));
-    }
-    return present.map(([category, labelKey]) =>
-      buildAgentCategoryGroup(sectionKey, category, labelKey, grouped[category])
-    );
-  }
-
-  function buildAgentCategoryGroup(sectionKey, category, labelKey, agents) {
-    const count = document.createElement("span");
-    count.className = "agent-category-count";
-    count.textContent = String(agents.length);
-    return helpers.buildCollapsibleGroup({
-      id: `agents:${sectionKey}:${category}`,
-      title: t(labelKey),
-      summary: count,
-      children: agents.map((agent) => buildAgentGroup(agent)),
-      className: "agent-category-group",
-    });
+  function buildAgentRows(agents) {
+    return agents.map((agent) => buildAgentGroup(agent));
   }
 
   // Splits the tab into "agent list" and "discover and add". The list is the
