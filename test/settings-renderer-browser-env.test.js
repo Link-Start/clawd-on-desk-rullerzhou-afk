@@ -800,10 +800,13 @@ function loadAgentsTabForTest({
           agentSectionUnavailable: "Not detected locally",
           agentCategoryCoding: "Coding AI",
           agentCategoryWork: "Office AI",
-          agentCustomToolsSection: "Discover and add custom AI",
-          rowCustomToolsDiscoveryPaths: "Add another AI",
+          agentsSubtabList: "Agent list",
+          agentsSubtabDiscover: "Discover and add",
           rowCustomToolsDiscoveryPathsDesc: "Choose an AI installation folder.",
           customToolManualAdd: "Choose AI installation folder",
+          customToolNotRecognized: "No launchable application found",
+          agentInstanceScanWsl: "Scan WSL",
+          agentInstanceScanWslDesc: "Rescan WSL distros",
           customToolRescan: "Rescan",
           customToolScanStatusIdle: "Not scanned",
           customToolScanStatusScanning: "Scanning...",
@@ -4641,7 +4644,7 @@ describe("settings renderer browser environment", () => {
     assert.ok(coreSource.includes("hints.customTools"));
     assert.ok(agentsSource.includes("function buildCustomToolResultRows("));
     assert.ok(agentsSource.includes("readCustomToolDetectionResults"));
-    assert.ok(agentsSource.includes('className = "row-sub custom-tool-result-row"'));
+    assert.ok(agentsSource.includes('className = "row row-sub custom-tool-result-row"'));
     assert.ok(agentsSource.includes("pickAgentDiscoveryPath"));
     assert.ok(preloadSource.includes('ipcRenderer.invoke("settings:pick-agent-discovery-path"'));
     assert.ok(agentsSource.includes('pickAgentDiscoveryPath("directory")'));
@@ -4652,7 +4655,85 @@ describe("settings renderer browser environment", () => {
     assert.ok(!agentsSource.includes('toolbar.className = "agent-scan-toolbar"'));
     assert.ok(css.includes(".custom-tool-result-status"));
     assert.match(css, /\.agent-custom-tools-section \.custom-tool-discovery-row\s*\{[^}]*flex-direction:\s*column;/s);
-    assert.match(css, /\.custom-tool-path-picker\s*\{[^}]*width:\s*100%;/s);
+    // The primary picker must keep a higher-specificity selector than the
+    // generic `.soft-btn.accent` tinted rule that follows it, or the cascade
+    // falls back to source order and drops the solid accent fill.
+    assert.match(css, /\.agent-custom-tools-section \.soft-btn\.custom-tool-path-picker\s*\{[^}]*background:\s*var\(--accent\);/s);
+    assert.ok(!/\.custom-tool-path-picker\s*\{[^}]*width:\s*100%;/s.test(css));
+    assert.ok(!/\.custom-tool-scan\s*\{[^}]*width:\s*100%;/s.test(css));
+  });
+
+  it("splits the Agents tab into list and discover subtabs", () => {
+    const customPath = "C:\\Tools\\Unknown";
+    const harness = loadAgentsTabForTest({
+      snapshot: {
+        lang: "en",
+        agents: { "qwen-code": { integrationInstalled: true, enabled: true } },
+        customToolDiscoveryPaths: [customPath],
+        dismissedAgentCleanupHints: {},
+      },
+      agentMetadata: [{ id: "qwen-code", name: "Qwen Code", eventSource: "hook", capabilities: {} }],
+    });
+    harness.core.runtime.agentInstallationHints = {
+      checkedAt: 1700000000000,
+      agents: [{ agentId: "qwen-code", detectedInstalled: false, confidence: "high" }],
+      customTools: [{
+        path: customPath,
+        detectedInstalled: true,
+        confidence: "medium",
+        reason: "custom-path",
+        detail: "No launchable application was recognized",
+        kind: "directory",
+      }],
+      skippedAgentIds: [],
+      wslSupported: true,
+      wslDistros: [],
+    };
+    harness.core.runtime.agentInstallationHintsFetched = true;
+    harness.core.ops.requestRender({ content: true });
+    harness.raf.flush();
+
+    const subtabs = harness.content.querySelector(".agents-subtabs");
+    assert.ok(subtabs, "the Agents tab should render a subtab switcher");
+    const pills = subtabs.querySelectorAll(".segmented button");
+    assert.deepStrictEqual(pills.map((pill) => pill.textContent), ["Agent list", "Discover and add"]);
+    assert.strictEqual(pills[0].classList.contains("active"), true);
+    assert.strictEqual(pills[0].getAttribute("aria-selected"), "true");
+
+    // The list is the default half, and the WSL rescan rides with it: its
+    // results land as instance rows inside agent cards, not as discovery hits.
+    assert.ok(harness.content.querySelector(".agent-section"));
+    assert.ok(subtabs.querySelector(".custom-tool-wsl-scan"));
+    assert.strictEqual(harness.content.querySelector(".custom-tool-path-picker"), null);
+    assert.strictEqual(harness.content.querySelector(".agent-custom-tools-section"), null);
+
+    // Hint banners are page level: above the switcher, visible from either half.
+    const bannerIndex = harness.content.children
+      .findIndex((node) => node.classList.contains("agent-cleanup-hint-banner"));
+    assert.ok(bannerIndex >= 0, "a cleanup hint should render for the missing local agent");
+    assert.ok(bannerIndex < harness.content.children.indexOf(subtabs));
+
+    pills[1].dispatchEvent({ type: "click", bubbles: false });
+    harness.raf.flush();
+
+    const discoverSubtabs = harness.content.querySelector(".agents-subtabs");
+    const discoverPills = discoverSubtabs.querySelectorAll(".segmented button");
+    assert.strictEqual(discoverPills[1].classList.contains("active"), true);
+    assert.ok(harness.content.querySelector(".custom-tool-path-picker"));
+    assert.strictEqual(harness.content.querySelector(".agent-section"), null);
+    assert.strictEqual(discoverSubtabs.querySelector(".custom-tool-wsl-scan"), null);
+    const stillBannerIndex = harness.content.children
+      .findIndex((node) => node.classList.contains("agent-cleanup-hint-banner"));
+    assert.ok(stillBannerIndex >= 0 && stillBannerIndex < harness.content.children.indexOf(discoverSubtabs));
+
+    // The pill is the only heading for this half, and an unrecognized path
+    // states its status once, localized, with no badge repeating it.
+    assert.strictEqual(harness.content.querySelector(".agent-custom-tools-section .section-title"), null);
+    const resultRow = harness.content.querySelector(".custom-tool-result-row");
+    assert.strictEqual(resultRow.querySelector(".custom-tool-result-path").textContent, customPath);
+    assert.strictEqual(resultRow.querySelector(".custom-tool-result-path").title, customPath);
+    assert.strictEqual(resultRow.querySelector(".row-desc").textContent, "No launchable application found");
+    assert.strictEqual(resultRow.querySelector(".custom-tool-result-status"), null);
   });
 
   it("shows custom AI scan state and forces a rescan", async () => {
@@ -4668,6 +4749,7 @@ describe("settings renderer browser environment", () => {
         },
       },
     });
+    harness.core.runtime.agentsSubtab = "discover";
     harness.core.runtime.agentInstallationHints = {
       checkedAt: 1700000000000,
       agents: [],
@@ -4732,6 +4814,7 @@ describe("settings renderer browser environment", () => {
         },
       },
     });
+    harness.core.runtime.agentsSubtab = "discover";
     harness.core.runtime.agentInstallationHints = {
       checkedAt: 1,
       agents: [],
@@ -4813,6 +4896,7 @@ describe("settings renderer browser environment", () => {
         detectAgentInstallations: async () => detection(),
       },
     });
+    harness.core.runtime.agentsSubtab = "discover";
     harness.core.runtime.agentInstallationHints = detection();
     harness.core.runtime.agentInstallationHintsFetched = true;
     harness.core.ops.requestRender({ content: true });

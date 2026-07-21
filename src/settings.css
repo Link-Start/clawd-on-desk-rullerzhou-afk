@@ -1003,28 +1003,29 @@ html, body {
 }
 .agent-custom-tools-section .custom-tool-discovery-control {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   flex: 0 0 auto;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: 10px;
-  width: 100%;
   min-width: 0;
 }
-.agent-custom-tools-section .custom-tool-path-picker {
-  width: 100%;
-  min-height: 40px;
+/* Needs the extra .soft-btn to outrank the later `.soft-btn.accent` tinted
+   rule — at equal specificity source order wins and the primary action
+   renders as a washed-out outline button. */
+.agent-custom-tools-section .soft-btn.custom-tool-path-picker {
+  min-height: 34px;
+  padding: 7px 16px;
   border-color: var(--accent);
   background: var(--accent);
   color: #ffffff;
   font-weight: 700;
 }
-.agent-custom-tools-section .custom-tool-path-picker:hover:not(:disabled) {
+.agent-custom-tools-section .soft-btn.custom-tool-path-picker:hover:not(:disabled) {
   border-color: var(--accent-hover);
   background: var(--accent-hover);
 }
 .custom-tool-scan {
-  width: 100%;
-  min-height: 38px;
+  min-height: 32px;
   border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
   color: var(--accent);
   font-weight: 600;
@@ -1032,18 +1033,23 @@ html, body {
 .custom-tool-scan:hover:not(:disabled) {
   background: color-mix(in srgb, var(--bg) 90%, var(--accent) 10%);
 }
+/* Subtab pills on the left, the Windows-only WSL rescan on the right. */
+.agents-subtabs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
 .custom-tool-wsl-scan {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 8px;
-  width: 100%;
-  padding-top: 10px;
-  border-top: 1px solid var(--row-border);
 }
 .custom-tool-wsl-scan .agent-instance-scan-btn {
-  width: 100%;
-  min-height: 38px;
-  padding: 7px 10px;
+  min-height: 30px;
+  padding: 5px 12px;
   border-color: var(--border);
   font-size: 12px;
   font-weight: 600;
@@ -1069,7 +1075,18 @@ html, body {
   flex: 1 1 auto;
   min-width: 0;
 }
-.custom-tool-result-path,
+/* Paths are identifiers, not headings: monospace, one line, tail-truncated,
+   full value on the title tooltip. Scoped to the row so it outranks the
+   `.row-sub .row-label` defaults. */
+.custom-tool-result-row .custom-tool-result-path {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .custom-tool-result-detail {
   overflow-wrap: anywhere;
 }

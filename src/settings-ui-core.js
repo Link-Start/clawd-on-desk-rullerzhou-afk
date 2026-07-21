@@ -103,6 +103,7 @@
     pendingAnimationOverrideEdits: new Map(),
     nextAnimationOverrideEditSeq: 1,
     animOverridesSubtab: "map",
+    agentsSubtab: "list",
     remoteApprovalSubtab: "channels",
     expandedOverrideRowIds: new Set(),
     assetPicker: {

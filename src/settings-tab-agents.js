@@ -51,7 +51,15 @@
       parent.appendChild(buildAgentCleanupHintBanner(cleanupHints));
     }
 
-    parent.appendChild(buildCustomToolsSection());
+    // The hint banners sit above the subtab switcher on purpose: they report
+    // "your setup drifted" and stay visible from either subtab, including
+    // while the user is off adding a custom AI.
+    parent.appendChild(buildAgentSubtabRow());
+
+    if (runtime.agentsSubtab === "discover") {
+      parent.appendChild(buildCustomToolsSection());
+      return;
+    }
 
     if (!runtime.agentMetadata || runtime.agentMetadata.length === 0) {
       const empty = document.createElement("div");
@@ -219,15 +227,52 @@
     });
   }
 
+  // Splits the tab into "agent list" and "discover and add". The list is the
+  // default because it is what the tab is for; manual discovery is the fallback
+  // for when the built-in scan came up empty.
+  function buildAgentSubtabRow() {
+    const row = document.createElement("div");
+    row.className = "agents-subtabs";
+
+    const group = document.createElement("div");
+    group.className = "segmented";
+    group.setAttribute("role", "tablist");
+    const current = runtime.agentsSubtab === "discover" ? "discover" : "list";
+    const entries = [
+      { key: "list", label: t("agentsSubtabList") },
+      { key: "discover", label: t("agentsSubtabDiscover") },
+    ];
+    for (const entry of entries) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = entry.label;
+      btn.setAttribute("role", "tab");
+      btn.setAttribute("aria-selected", entry.key === current ? "true" : "false");
+      if (entry.key === current) btn.classList.add("active");
+      btn.addEventListener("click", () => {
+        if (runtime.agentsSubtab === entry.key) return;
+        runtime.agentsSubtab = entry.key;
+        ops.requestRender({ content: true });
+      });
+      group.appendChild(btn);
+    }
+    row.appendChild(group);
+
+    // WSL rescan belongs to the list: it re-detects built-in agents installed
+    // inside distros, and its results render as instance rows inside the agent
+    // cards — not as custom-tool discovery hits.
+    if (current === "list") {
+      const wslScanControl = buildWslScanControl();
+      if (wslScanControl) row.appendChild(wslScanControl);
+    }
+    return row;
+  }
+
   function buildCustomToolsSection() {
     const row = document.createElement("div");
     row.className = "row-sub custom-tool-discovery-row";
     const text = document.createElement("div");
     text.className = "row-text";
-    const label = document.createElement("span");
-    label.className = "row-label";
-    label.textContent = t("rowCustomToolsDiscoveryPaths");
-    text.appendChild(label);
     const desc = document.createElement("span");
     desc.className = "row-desc";
     desc.textContent = t("rowCustomToolsDiscoveryPathsDesc");
@@ -274,11 +319,10 @@
     });
     control.appendChild(scanButton);
     control.appendChild(scanStatus);
-    const wslScanControl = buildWslScanControl();
-    if (wslScanControl) control.appendChild(wslScanControl);
     row.appendChild(control);
     const rows = [row, ...buildCustomToolResultRows()];
-    const section = helpers.buildSection(t("agentCustomToolsSection"), rows);
+    // No section title: the subtab pill already names this half of the tab.
+    const section = helpers.buildSection("", rows);
     section.classList.add("agent-custom-tools-section");
     return section;
   }
@@ -332,7 +376,6 @@
       time = new Intl.DateTimeFormat((state.snapshot && state.snapshot.lang) || "en", {
         hour: "2-digit",
         minute: "2-digit",
-        second: "2-digit",
       }).format(new Date(checkedAt));
     } catch {}
     return t("customToolScanStatusComplete").replace("{time}", time);
@@ -388,48 +431,60 @@
       return configuredPaths.map((path) => buildCustomToolResultRow({
         path,
         detectedInstalled: null,
-        detail: t("customToolDetectionPending"),
       }));
     }
     return results.map(buildCustomToolResultRow);
   }
 
+  function getCustomToolResultStatusText(result) {
+    if (result.detectedInstalled === true) return t("customToolNotRecognized");
+    if (result.detectedInstalled === false) return t("customToolDetectionMissing");
+    return t("customToolDetectionPending");
+  }
+
   function buildCustomToolResultRow(result) {
     const row = document.createElement("div");
-    row.className = "row-sub custom-tool-result-row";
+    // `.row` so the path and its action share one line, like every other row.
+    row.className = "row row-sub custom-tool-result-row";
     row.classList.toggle("custom-tool-result-found", result.detectedInstalled === true);
     row.classList.toggle("custom-tool-result-missing", result.detectedInstalled === false);
 
     const text = document.createElement("div");
     text.className = "row-text";
     const label = document.createElement("span");
-    label.className = "row-label custom-tool-result-path";
-    label.textContent = result.application ? result.application.name : (result.path || "");
+    label.className = "row-label";
+    if (result.application) {
+      label.textContent = result.application.name;
+    } else {
+      // Raw path, not a name — mono + truncated, with the full value on hover.
+      label.classList.add("custom-tool-result-path");
+      label.textContent = result.path || "";
+      if (result.path) label.title = result.path;
+    }
     text.appendChild(label);
     const desc = document.createElement("span");
     desc.className = "row-desc custom-tool-result-detail";
+    // result.detail is an untranslated detector string that restates the
+    // status, so unrecognized paths explain themselves here instead — one
+    // sentence, one language, no trailing badge repeating it.
     desc.textContent = result.application
       ? `${result.application.executablePath} · ${result.application.id}`
-      : (result.detail || "");
+      : getCustomToolResultStatusText(result);
     text.appendChild(desc);
     row.appendChild(text);
 
-    const status = document.createElement(result.application && !result.application.added ? "button" : "span");
-    status.className = result.application && !result.application.added
-      ? "soft-btn accent custom-tool-add"
-      : "custom-tool-result-status";
-    status.textContent = result.application
-      ? (result.application.added ? t("customToolAdded") : t("customToolAdd"))
-      : result.detectedInstalled === true
-        ? t("customToolNotRecognized")
-      : result.detectedInstalled === false
-        ? t("customToolDetectionMissing")
-        : t("customToolDetectionPendingShort");
-    if (result.application && !result.application.added) {
-      status.type = "button";
-      status.addEventListener("click", () => addCustomApplication(result, status));
+    if (result.application) {
+      const status = document.createElement(result.application.added ? "span" : "button");
+      status.className = result.application.added
+        ? "custom-tool-result-status"
+        : "soft-btn accent custom-tool-add";
+      status.textContent = result.application.added ? t("customToolAdded") : t("customToolAdd");
+      if (!result.application.added) {
+        status.type = "button";
+        status.addEventListener("click", () => addCustomApplication(result, status));
+      }
+      row.appendChild(status);
     }
-    row.appendChild(status);
     if (result.path) {
       const removePathButton = document.createElement("button");
       removePathButton.type = "button";
@@ -482,6 +537,9 @@
       const response = await window.settingsAPI.command("addCustomApplication", { path: result.path });
       if (!response || response.status !== "ok") throw new Error((response && response.message) || "add failed");
       ops.showToast(t("customToolAdded"));
+      // The AI is now a managed agent, so land the user on the list where it
+      // appears and where its toggles live.
+      runtime.agentsSubtab = "list";
       await refreshCustomAgentUi();
     } catch (err) {
       ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
