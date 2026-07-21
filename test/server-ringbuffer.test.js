@@ -191,7 +191,11 @@ describe("server hook event ringbuffer", () => {
 
   it("records registered custom state activity under the custom id", async () => {
     const id = "custom-nova-ai-0123456789ab";
-    const { api, handler } = startServer({ getCustomAgentIds: () => [id] });
+    const pushed = [];
+    const { api, handler } = startServer({
+      getCustomAgentIds: () => [id],
+      onHookEventRecorded: (event) => pushed.push(event),
+    });
 
     const res = await callHandler(handler, "POST", "/state", {
       agent_id: id,
@@ -206,6 +210,9 @@ describe("server hook event ringbuffer", () => {
       route,
       outcome,
     })), [{ agentId: id, route: "state", outcome: "accepted" }]);
+    assert.strictEqual(pushed.length, 1);
+    assert.strictEqual(pushed[0].agentId, id);
+    assert.strictEqual(pushed[0].eventType, "PreToolUse");
   });
 
   it("records stale custom state activity under the bounded sentinel", async () => {

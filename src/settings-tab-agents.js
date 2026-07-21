@@ -949,11 +949,7 @@
       const lastStateEvent = agent.lastStateEvent && Number.isFinite(agent.lastStateEvent.timestamp)
         ? agent.lastStateEvent
         : null;
-      const activityText = lastStateEvent
-        ? t("customAgentLastState")
-          .replace("{event}", lastStateEvent.eventType || "state")
-          .replace("{time}", new Date(lastStateEvent.timestamp).toLocaleTimeString())
-        : t("customAgentWaiting");
+      const activityText = formatCustomAgentActivity(lastStateEvent);
       for (const [labelKey, value] of [
         ["customAgentRegisteredDesc", t("customAgentRegisteredExternal")],
         ["customToolAgentId", agent.id],
@@ -973,6 +969,10 @@
         const desc = document.createElement("span");
         desc.className = "row-desc";
         if (labelKey === "customAgentPayloadExample") desc.classList.add("custom-agent-payload");
+        if (labelKey === "customAgentActivity") {
+          desc.classList.add("custom-agent-activity");
+          desc.dataset.agentId = agent.id;
+        }
         desc.textContent = value || "";
         text.appendChild(label);
         text.appendChild(desc);
@@ -1098,6 +1098,43 @@
     // WSL instances: show detected agent installations across distros
     rows.push(...buildAgentInstanceRows(agent));
     return rows;
+  }
+
+  function formatCustomAgentActivity(lastStateEvent) {
+    return lastStateEvent && Number.isFinite(lastStateEvent.timestamp)
+      ? t("customAgentLastState")
+        .replace("{event}", lastStateEvent.eventType || "state")
+        .replace("{time}", new Date(lastStateEvent.timestamp).toLocaleTimeString())
+      : t("customAgentWaiting");
+  }
+
+  function applyAgentActivity(payload) {
+    if (
+      !payload
+      || typeof payload.agentId !== "string"
+      || !Number.isFinite(payload.timestamp)
+    ) return false;
+    const index = (runtime.agentMetadata || []).findIndex((agent) => (
+      agent && agent.custom === true && agent.id === payload.agentId
+    ));
+    if (index < 0) return false;
+    const lastStateEvent = {
+      timestamp: payload.timestamp,
+      eventType: typeof payload.eventType === "string" ? payload.eventType : null,
+    };
+    runtime.agentMetadata[index] = {
+      ...runtime.agentMetadata[index],
+      lastStateEvent,
+    };
+    if (state.activeTab !== "agents") return true;
+    const content = document.getElementById("content");
+    if (!content || typeof content.querySelectorAll !== "function") return true;
+    for (const element of content.querySelectorAll(".custom-agent-activity")) {
+      if (element.dataset && element.dataset.agentId === payload.agentId) {
+        element.textContent = formatCustomAgentActivity(lastStateEvent);
+      }
+    }
+    return true;
   }
 
   // ── WSL instance rows ─────────────────────────────────────────────
@@ -1640,6 +1677,7 @@
     core.tabs.agents = {
       render,
       patchInPlace,
+      applyAgentActivity,
     };
   }
 

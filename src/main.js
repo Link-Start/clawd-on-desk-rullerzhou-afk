@@ -1994,6 +1994,17 @@ const _serverCtx = {
   getCustomAgentIds: () => (_settingsController.get("customApplications") || [])
     .map((application) => application && application.id)
     .filter(Boolean),
+  onHookEventRecorded: (event) => {
+    if (!event || event.route !== "state" || event.outcome !== "accepted") return;
+    const registered = (_settingsController.get("customApplications") || [])
+      .some((application) => application && application.id === event.agentId);
+    if (!registered) return;
+    broadcastSettingsWindow("settings:agent-activity", {
+      agentId: event.agentId,
+      timestamp: event.timestamp,
+      eventType: event.eventType,
+    });
+  },
   // #627 residual: synchronous server-side wt_hwnd sample for UserPromptSubmit
   // (src/server-route-state.js). Initialized once above; never re-created per
   // request.

@@ -12,6 +12,8 @@
 //   listAgents()                        Promise<Array<{id, name, ...}>>
 //   onChanged(cb)                       cb({ changes, snapshot? }) — fires for
 //                                       every settings-changed broadcast
+//   onAgentActivity(cb)                 cb({ agentId, timestamp, eventType }) —
+//                                       accepted custom /state activity only
 //   onAnimationPreviewPosterReady(cb)   cb({ themeId, filename, previewImageUrl,
 //                                       previewPosterCacheKey }) — incremental
 //                                       animation override preview poster
@@ -40,6 +42,7 @@ const remoteSshStatusListeners = new Set();
 const remoteSshProgressListeners = new Set();
 const remoteApprovalStatusListeners = new Set();
 const textScaleContextListeners = new Set();
+const agentActivityListeners = new Set();
 ipcRenderer.on("settings-changed", (_event, payload) => {
   for (const cb of listeners) {
     try { cb(payload); } catch (err) { console.warn("settings onChanged listener threw:", err); }
@@ -76,6 +79,11 @@ ipcRenderer.on("remoteApproval:status-changed", (_event, payload) => {
 ipcRenderer.on("settings:text-scale-context-changed", () => {
   for (const cb of textScaleContextListeners) {
     try { cb(); } catch (err) { console.warn("text scale context listener threw:", err); }
+  }
+});
+ipcRenderer.on("settings:agent-activity", (_event, payload) => {
+  for (const cb of agentActivityListeners) {
+    try { cb(payload); } catch (err) { console.warn("agent activity listener threw:", err); }
   }
 });
 
@@ -132,6 +140,11 @@ contextBridge.exposeInMainWorld("settingsAPI", {
   resetMobileAccess: () => ipcRenderer.invoke("settings:reset-mobile-access"),
   onChanged: (cb) => {
     if (typeof cb === "function") listeners.add(cb);
+  },
+  onAgentActivity: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    agentActivityListeners.add(cb);
+    return () => agentActivityListeners.delete(cb);
   },
   onAnimationPreviewPosterReady: (cb) => {
     if (typeof cb !== "function") return () => {};

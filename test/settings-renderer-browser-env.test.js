@@ -809,6 +809,8 @@ function loadAgentsTabForTest({
           customToolScanStatusScanning: "Scanning...",
           customToolScanStatusComplete: "Last scanned at {time}",
           customToolScanStatusFailed: "Scan failed",
+          customAgentWaiting: "Waiting for first state event this run",
+          customAgentLastState: "Last state: {event} at {time}",
           rowAgentIdleAlerts: "Idle alerts",
           rowAgentIdleAlertsDesc: "Idle alert desc",
           rowAgentPermissions: "Permissions",
@@ -4829,6 +4831,18 @@ describe("settings renderer browser environment", () => {
     assert.ok(harness.content.querySelector(".custom-registration"));
     assert.ok(harness.content.querySelector(".custom-agent-copy"));
     assert.strictEqual(harness.content.querySelector(".agent-badge.accent"), null);
+
+    const activity = harness.content.querySelector(".custom-agent-activity");
+    assert.ok(!activity.textContent.includes("PreToolUse"));
+    const renderCountBeforeActivity = harness.getContentRenderCount();
+    assert.strictEqual(harness.core.tabs.agents.applyAgentActivity({
+      agentId: id,
+      timestamp: Date.UTC(2026, 6, 21, 8, 30, 0),
+      eventType: "PreToolUse",
+    }), true);
+    assert.ok(activity.textContent.includes("PreToolUse"));
+    assert.strictEqual(harness.core.runtime.agentMetadata[0].lastStateEvent.eventType, "PreToolUse");
+    assert.strictEqual(harness.getContentRenderCount(), renderCountBeforeActivity);
   });
 
   it("keeps Agent management capability-driven for Gemini wait-for-input alerts", () => {

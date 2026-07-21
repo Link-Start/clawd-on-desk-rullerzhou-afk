@@ -98,7 +98,11 @@ function shouldDropForDnd() {
 }
 
 function recordHookEvent(identity, data, route, outcome) {
-  return recordHookEventInBuffer(recentHookEvents, identity, data, route, outcome, { now: nowFn });
+  const recorded = recordHookEventInBuffer(recentHookEvents, identity, data, route, outcome, { now: nowFn });
+  if (recorded && typeof ctx.onHookEventRecorded === "function") {
+    try { ctx.onHookEventRecorded(recorded); } catch {}
+  }
+  return recorded;
 }
 
 function createRequestHookRecorder(identity, data, defaultRoute) {
