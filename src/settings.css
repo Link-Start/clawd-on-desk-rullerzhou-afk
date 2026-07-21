@@ -1042,6 +1042,47 @@ html, body {
   gap: 10px;
   margin-bottom: 14px;
 }
+.agents-subtabs .segmented button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* Accent = "there is something to act on here". The neutral
+   .agent-section-count below is only a size, so the two never read alike. */
+.agents-subtab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel-bg));
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.agent-section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--row-border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.agent-unavailable-group > .collapsible-group-header .row-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
 .custom-tool-wsl-scan {
   display: flex;
   align-items: center;

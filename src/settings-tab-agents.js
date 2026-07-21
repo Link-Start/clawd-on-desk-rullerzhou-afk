@@ -42,37 +42,91 @@
     subtitle.textContent = t("agentsSubtitle");
     parent.appendChild(subtitle);
 
-    const recommendedHints = getRecommendedInstallHints();
-    if (recommendedHints.length > 0) {
-      parent.appendChild(buildAgentInstallHintBanner(recommendedHints));
+    const metadata = runtime.agentMetadata || [];
+    const agents = typeof sortAgentMetadataForSettings === "function"
+      ? sortAgentMetadataForSettings(metadata)
+      : metadata;
+    const categorized = categorizeAgentsForSections(agents);
+    const subtab = resolveAgentsSubtab(categorized);
+
+    parent.appendChild(buildAgentSubtabRow(subtab, categorized));
+
+    // Each banner lives in the subtab it acts on: "install what we detected"
+    // is what the discover subtab is for, and "your integration outlived its
+    // agent" is about the connected list.
+    if (subtab === "discover") {
+      const recommendedHints = getRecommendedInstallHints();
+      if (recommendedHints.length > 0) {
+        parent.appendChild(buildAgentInstallHintBanner(recommendedHints));
+      }
+      renderDiscoverSubtab(parent, categorized);
+      return;
     }
+
     const cleanupHints = getRecommendedCleanupHints();
     if (cleanupHints.length > 0) {
       parent.appendChild(buildAgentCleanupHintBanner(cleanupHints));
     }
+    renderConnectedSubtab(parent, categorized, metadata.length === 0);
+  }
 
-    // The hint banners sit above the subtab switcher on purpose: they report
-    // "your setup drifted" and stay visible from either subtab, including
-    // while the user is off adding a custom AI.
-    parent.appendChild(buildAgentSubtabRow());
+  // "connected" unless nothing is connected yet — a first run would otherwise
+  // open on an empty list instead of the agents it could add. Once the user
+  // picks a subtab their choice is pinned for the rest of the session.
+  function resolveAgentsSubtab(categorized) {
+    if (runtime.agentsSubtab === "connected" || runtime.agentsSubtab === "discover") {
+      return runtime.agentsSubtab;
+    }
+    return categorized.connected.length > 0 ? "connected" : "discover";
+  }
 
-    if (runtime.agentsSubtab === "discover") {
-      parent.appendChild(buildCustomToolsSection());
+  function renderConnectedSubtab(parent, categorized, noAgentsAtAll) {
+    if (categorized.connected.length > 0) {
+      // No section title: the subtab pill already says "Connected".
+      const section = helpers.buildSection("", buildCategoryGroupedAgentRows("connected", categorized.connected));
+      section.classList.add("agent-section", "agent-section-connected");
+      parent.appendChild(section);
       return;
     }
+    const empty = document.createElement("div");
+    empty.className = "placeholder";
+    const message = noAgentsAtAll ? t("agentsEmpty") : t("agentsConnectedEmpty");
+    empty.innerHTML = `<div class="placeholder-desc">${helpers.escapeHtml(message)}</div>`;
+    parent.appendChild(empty);
+  }
 
-    if (!runtime.agentMetadata || runtime.agentMetadata.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "placeholder";
-      empty.innerHTML = `<div class="placeholder-desc">${helpers.escapeHtml(t("agentsEmpty"))}</div>`;
-      parent.appendChild(empty);
-      return;
+  function renderDiscoverSubtab(parent, categorized) {
+    if (categorized.recommended.length > 0) {
+      const section = helpers.buildSection(
+        t("agentSectionRecommended"),
+        buildCategoryGroupedAgentRows("recommended", categorized.recommended)
+      );
+      section.classList.add("agent-section", "agent-section-recommended");
+      parent.appendChild(section);
     }
+    parent.appendChild(buildCustomToolsSection());
+    if (categorized.unavailable.length > 0) {
+      parent.appendChild(buildUnavailableSection(categorized.unavailable));
+    }
+  }
 
-    const agents = typeof sortAgentMetadataForSettings === "function"
-      ? sortAgentMetadataForSettings(runtime.agentMetadata)
-      : runtime.agentMetadata;
-    renderAgentSections(parent, agents);
+  // A catalog of what Clawd supports, not a to-do list — collapsed by default
+  // so the two actionable blocks above it stay in view.
+  function buildUnavailableSection(agents) {
+    const count = document.createElement("span");
+    count.className = "agent-section-count";
+    count.textContent = String(agents.length);
+    const group = helpers.buildCollapsibleGroup({
+      id: "agents:unavailable",
+      title: t("agentSectionUnavailable"),
+      summary: count,
+      children: buildCategoryGroupedAgentRows("unavailable", agents),
+      defaultCollapsed: true,
+      className: "agent-unavailable-group",
+    });
+    const section = helpers.buildSection("", [group]);
+    section.classList.add("agent-section", "agent-section-unavailable");
+    return section;
   }
 
   function getAgentMetadata(agentId) {
@@ -128,23 +182,6 @@
     });
   }
 
-  function renderAgentSections(parent, agents) {
-    const categorized = categorizeAgentsForSections(agents);
-    const specs = [
-      ["connected", "agentSectionConnected", "agent-section-connected"],
-      ["recommended", "agentSectionRecommended", "agent-section-recommended"],
-      ["unavailable", "agentSectionUnavailable", "agent-section-unavailable"],
-    ];
-    for (const [key, titleKey, className] of specs) {
-      const sectionAgents = categorized[key];
-      if (!Array.isArray(sectionAgents) || sectionAgents.length === 0) continue;
-      const rows = buildCategoryGroupedAgentRows(key, sectionAgents);
-      const section = helpers.buildSection(t(titleKey), rows);
-      section.classList.add("agent-section", className);
-      parent.appendChild(section);
-    }
-  }
-
   function getCategory(agent) {
     return typeof getAgentCategory === "function" ? getAgentCategory(agent) : "coding";
   }
@@ -166,10 +203,13 @@
     };
     for (const agent of agents) {
       if (!agent || !agent.id) continue;
+      // A custom agent only exists in metadata once it has been registered,
+      // and registering is what connects it — there is nothing left to install,
+      // so it belongs with the connected agents whether or not its path still
+      // resolves. A vanished path surfaces through its own row, not by
+      // demoting the agent into the discover subtab.
       if (agent.custom) {
-        const customHint = getInstallationHint(agent.id, true);
-        if (customHint && customHint.detectedInstalled === true) sections.recommended.push(agent);
-        else sections.unavailable.push(agent);
+        sections.connected.push(agent);
         continue;
       }
       if (readers.readAgentIntegrationInstalled(agent.id)) {
@@ -202,16 +242,19 @@
 
   function buildCategoryGroupedAgentRows(sectionKey, agents) {
     const grouped = categorizeAgentsByType(agents);
-    const rows = [];
-    for (const [category, labelKey] of [
+    const present = [
       ["coding", "agentCategoryCoding"],
       ["work", "agentCategoryWork"],
-    ]) {
-      const sectionAgents = grouped[category];
-      if (!sectionAgents || sectionAgents.length === 0) continue;
-      rows.push(buildAgentCategoryGroup(sectionKey, category, labelKey, sectionAgents));
+    ].filter(([category]) => grouped[category] && grouped[category].length > 0);
+    // One category means the header would only restate the section — drop the
+    // grouping layer and list the agents directly. Office AI is a single agent
+    // today, so most sections land here.
+    if (present.length < 2) {
+      return agents.map((agent) => buildAgentGroup(agent));
     }
-    return rows;
+    return present.map(([category, labelKey]) =>
+      buildAgentCategoryGroup(sectionKey, category, labelKey, grouped[category])
+    );
   }
 
   function buildAgentCategoryGroup(sectionKey, category, labelKey, agents) {
@@ -230,17 +273,18 @@
   // Splits the tab into "agent list" and "discover and add". The list is the
   // default because it is what the tab is for; manual discovery is the fallback
   // for when the built-in scan came up empty.
-  function buildAgentSubtabRow() {
+  function buildAgentSubtabRow(current, categorized) {
     const row = document.createElement("div");
     row.className = "agents-subtabs";
 
     const group = document.createElement("div");
     group.className = "segmented";
     group.setAttribute("role", "tablist");
-    const current = runtime.agentsSubtab === "discover" ? "discover" : "list";
     const entries = [
-      { key: "list", label: t("agentsSubtabList") },
-      { key: "discover", label: t("agentsSubtabDiscover") },
+      { key: "connected", label: t("agentsSubtabConnected"), count: 0 },
+      // Counts what the user can act on right now, so the badge stays a
+      // to-do marker: agents detected locally but not connected yet.
+      { key: "discover", label: t("agentsSubtabDiscover"), count: categorized.recommended.length },
     ];
     for (const entry of entries) {
       const btn = document.createElement("button");
@@ -249,6 +293,12 @@
       btn.setAttribute("role", "tab");
       btn.setAttribute("aria-selected", entry.key === current ? "true" : "false");
       if (entry.key === current) btn.classList.add("active");
+      if (entry.count > 0) {
+        const badge = document.createElement("span");
+        badge.className = "agents-subtab-count";
+        badge.textContent = String(entry.count);
+        btn.appendChild(badge);
+      }
       btn.addEventListener("click", () => {
         if (runtime.agentsSubtab === entry.key) return;
         runtime.agentsSubtab = entry.key;
@@ -258,10 +308,10 @@
     }
     row.appendChild(group);
 
-    // WSL rescan belongs to the list: it re-detects built-in agents installed
-    // inside distros, and its results render as instance rows inside the agent
-    // cards — not as custom-tool discovery hits.
-    if (current === "list") {
+    // WSL rescan belongs to the connected subtab: it re-detects built-in
+    // agents installed inside distros, and its results render as instance rows
+    // inside the agent cards — not as custom-tool discovery hits.
+    if (current === "connected") {
       const wslScanControl = buildWslScanControl();
       if (wslScanControl) row.appendChild(wslScanControl);
     }
@@ -537,9 +587,9 @@
       const response = await window.settingsAPI.command("addCustomApplication", { path: result.path });
       if (!response || response.status !== "ok") throw new Error((response && response.message) || "add failed");
       ops.showToast(t("customToolAdded"));
-      // The AI is now a managed agent, so land the user on the list where it
-      // appears and where its toggles live.
-      runtime.agentsSubtab = "list";
+      // The AI is now a connected agent, so land the user where it appears
+      // and where its toggles live.
+      runtime.agentsSubtab = "connected";
       await refreshCustomAgentUi();
     } catch (err) {
       ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });

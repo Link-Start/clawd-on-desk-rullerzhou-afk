@@ -800,7 +800,7 @@ function loadAgentsTabForTest({
           agentSectionUnavailable: "Not detected locally",
           agentCategoryCoding: "Coding AI",
           agentCategoryWork: "Office AI",
-          agentsSubtabList: "Agent list",
+          agentsSubtabConnected: "Connected",
           agentsSubtabDiscover: "Discover and add",
           rowCustomToolsDiscoveryPathsDesc: "Choose an AI installation folder.",
           customToolManualAdd: "Choose AI installation folder",
@@ -4555,9 +4555,10 @@ describe("settings renderer browser environment", () => {
     assert.ok(agentOrderSource.includes("COLLAPSIBLE_AGENT_PRIORITY"));
     assert.ok(agentOrderSource.includes("NON_COLLAPSIBLE_AGENT_PRIORITY"));
     assert.ok(agentsSource.includes("ClawdSettingsAgentOrder"));
-    assert.ok(agentsSource.includes("sortAgentMetadataForSettings(runtime.agentMetadata"));
+    assert.ok(agentsSource.includes("sortAgentMetadataForSettings(metadata)"));
     assert.ok(agentsSource.includes("function categorizeAgentsForSections("));
-    assert.ok(agentsSource.includes("function renderAgentSections("));
+    assert.ok(agentsSource.includes("function renderConnectedSubtab("));
+    assert.ok(agentsSource.includes("function renderDiscoverSubtab("));
   });
 
   it("renders Agent category groups as collapsible sections inside each status section", () => {
@@ -4572,7 +4573,7 @@ describe("settings renderer browser environment", () => {
     assert.ok(css.includes(".agent-category-count"));
   });
 
-  it("keeps registered custom AI out of Connected and groups it by executable detection", () => {
+  it("counts a registered custom AI as connected and groups it beside built-ins", () => {
     const id = "custom-nova-ai-0123456789ab";
     const harness = loadAgentsTabForTest({
       snapshot: {
@@ -4611,26 +4612,25 @@ describe("settings renderer browser environment", () => {
     harness.core.runtime.agentInstallationHintsFetched = true;
     harness.core.ops.requestRender({ content: true });
 
+    // Registering is what connects a custom AI, so it belongs in Connected
+    // rather than being demoted into the discover subtab.
     const connected = harness.content.querySelector(".agent-section-connected");
     assert.ok(connected);
     const groups = connected.querySelectorAll(".agent-category-group");
-    assert.strictEqual(groups.length, 1);
-    assert.strictEqual(groups[0].querySelector(".collapsible-group-text .row-label").textContent, "Office AI");
+    assert.strictEqual(groups.length, 2, "two categories present, so the grouping layer stays");
+    assert.deepStrictEqual(
+      groups.map((group) => group.querySelector(".collapsible-group-text .row-label").textContent),
+      ["Coding AI", "Office AI"]
+    );
     assert.deepStrictEqual(
       groups[0].querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
-      ["QoderWork"]
-    );
-
-    const detected = harness.content.querySelector(".agent-section-recommended");
-    assert.ok(detected);
-    const detectedGroups = detected.querySelectorAll(".agent-category-group");
-    assert.strictEqual(detectedGroups.length, 1);
-    assert.strictEqual(detectedGroups[0].querySelector(".collapsible-group-text .row-label").textContent, "Coding AI");
-    assert.deepStrictEqual(
-      detectedGroups[0].querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
       ["Nova AI"]
     );
-    assert.strictEqual(connected.textContent.includes("Nova AI"), false);
+    assert.deepStrictEqual(
+      groups[1].querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
+      ["QoderWork"]
+    );
+    assert.strictEqual(harness.content.querySelector(".agent-section-recommended"), null);
   });
 
   it("renders Custom AI detection under one manual folder picker", () => {
@@ -4663,20 +4663,32 @@ describe("settings renderer browser environment", () => {
     assert.ok(!/\.custom-tool-scan\s*\{[^}]*width:\s*100%;/s.test(css));
   });
 
-  it("splits the Agents tab into list and discover subtabs", () => {
+  it("splits the Agents tab into connected and discover subtabs", () => {
     const customPath = "C:\\Tools\\Unknown";
     const harness = loadAgentsTabForTest({
       snapshot: {
         lang: "en",
-        agents: { "qwen-code": { integrationInstalled: true, enabled: true } },
+        agents: {
+          "qwen-code": { integrationInstalled: true, enabled: true },
+          "gemini-cli": { integrationInstalled: false, enabled: false },
+        },
         customToolDiscoveryPaths: [customPath],
         dismissedAgentCleanupHints: {},
+        dismissedAgentInstallHints: {},
       },
-      agentMetadata: [{ id: "qwen-code", name: "Qwen Code", eventSource: "hook", capabilities: {} }],
+      agentMetadata: [
+        { id: "qwen-code", name: "Qwen Code", eventSource: "hook", capabilities: {} },
+        { id: "gemini-cli", name: "Gemini CLI", eventSource: "hook", capabilities: {} },
+      ],
     });
     harness.core.runtime.agentInstallationHints = {
       checkedAt: 1700000000000,
-      agents: [{ agentId: "qwen-code", detectedInstalled: false, confidence: "high" }],
+      agents: [
+        // Connected but gone from disk -> cleanup hint on the connected subtab.
+        { agentId: "qwen-code", detectedInstalled: false, confidence: "high" },
+        // On disk but not connected -> install hint + badge on the discover pill.
+        { agentId: "gemini-cli", detectedInstalled: true, confidence: "high" },
+      ],
       customTools: [{
         path: customPath,
         detectedInstalled: true,
@@ -4696,22 +4708,34 @@ describe("settings renderer browser environment", () => {
     const subtabs = harness.content.querySelector(".agents-subtabs");
     assert.ok(subtabs, "the Agents tab should render a subtab switcher");
     const pills = subtabs.querySelectorAll(".segmented button");
-    assert.deepStrictEqual(pills.map((pill) => pill.textContent), ["Agent list", "Discover and add"]);
+    assert.deepStrictEqual(pills.map((pill) => pill.textContent), ["Connected", "Discover and add"]);
     assert.strictEqual(pills[0].classList.contains("active"), true);
     assert.strictEqual(pills[0].getAttribute("aria-selected"), "true");
+    // The badge counts what can be acted on now, not the whole catalog.
+    assert.strictEqual(pills[0].querySelector(".agents-subtab-count"), null);
+    assert.strictEqual(pills[1].querySelector(".agents-subtab-count").textContent, "1");
 
-    // The list is the default half, and the WSL rescan rides with it: its
+    // Connected is the default half, and the WSL rescan rides with it: its
     // results land as instance rows inside agent cards, not as discovery hits.
-    assert.ok(harness.content.querySelector(".agent-section"));
+    const connectedSection = harness.content.querySelector(".agent-section-connected");
+    assert.ok(connectedSection);
+    // Only one category here, so the grouping layer is dropped entirely
+    // instead of wrapping the rows in a lone "Coding AI" header.
+    assert.strictEqual(connectedSection.querySelector(".agent-category-group"), null);
+    assert.deepStrictEqual(
+      connectedSection.querySelectorAll(".agent-summary-row .row-label").map((node) => node.textContent),
+      ["Qwen Code"]
+    );
     assert.ok(subtabs.querySelector(".custom-tool-wsl-scan"));
     assert.strictEqual(harness.content.querySelector(".custom-tool-path-picker"), null);
     assert.strictEqual(harness.content.querySelector(".agent-custom-tools-section"), null);
 
-    // Hint banners are page level: above the switcher, visible from either half.
-    const bannerIndex = harness.content.children
+    // Each banner belongs to the subtab it acts on.
+    const cleanupIndex = harness.content.children
       .findIndex((node) => node.classList.contains("agent-cleanup-hint-banner"));
-    assert.ok(bannerIndex >= 0, "a cleanup hint should render for the missing local agent");
-    assert.ok(bannerIndex < harness.content.children.indexOf(subtabs));
+    assert.ok(cleanupIndex >= 0, "a cleanup hint should render for the missing local agent");
+    assert.ok(cleanupIndex > harness.content.children.indexOf(subtabs));
+    assert.strictEqual(harness.content.querySelector(".agent-install-hint-banner"), null);
 
     pills[1].dispatchEvent({ type: "click", bubbles: false });
     harness.raf.flush();
@@ -4720,11 +4744,10 @@ describe("settings renderer browser environment", () => {
     const discoverPills = discoverSubtabs.querySelectorAll(".segmented button");
     assert.strictEqual(discoverPills[1].classList.contains("active"), true);
     assert.ok(harness.content.querySelector(".custom-tool-path-picker"));
-    assert.strictEqual(harness.content.querySelector(".agent-section"), null);
+    assert.strictEqual(harness.content.querySelector(".agent-section-connected"), null);
     assert.strictEqual(discoverSubtabs.querySelector(".custom-tool-wsl-scan"), null);
-    const stillBannerIndex = harness.content.children
-      .findIndex((node) => node.classList.contains("agent-cleanup-hint-banner"));
-    assert.ok(stillBannerIndex >= 0 && stillBannerIndex < harness.content.children.indexOf(discoverSubtabs));
+    assert.strictEqual(harness.content.querySelector(".agent-cleanup-hint-banner"), null);
+    assert.ok(harness.content.querySelector(".agent-install-hint-banner"));
 
     // The pill is the only heading for this half, and an unrecognized path
     // states its status once, localized, with no badge repeating it.
@@ -4997,7 +5020,7 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(calls, 1);
   });
 
-  it("groups agents into connected, recommended, and unavailable sections", () => {
+  it("splits connected agents from detected and undetected ones across the subtabs", () => {
     const harness = loadAgentsTabForTest({
       snapshot: {
         agents: {
@@ -5026,20 +5049,40 @@ describe("settings renderer browser environment", () => {
 
     harness.core.ops.requestRender({ content: true });
 
+    const labelsFor = (section) => section.querySelectorAll(".agent-summary-row .row-label").map((el) => el.textContent);
+
+    // Connected subtab: only the connected agents, and no section title —
+    // the pill already says "Connected".
     const connected = harness.content.querySelector(".agent-section-connected");
+    assert.ok(connected);
+    assert.strictEqual(connected.querySelector(".section-title"), null);
+    assert.deepStrictEqual(labelsFor(connected), ["Hermes Agent"]);
+    assert.strictEqual(harness.content.querySelector(".agent-section-recommended"), null);
+    assert.strictEqual(harness.content.querySelector(".agent-section-unavailable"), null);
+
+    harness.core.runtime.agentsSubtab = "discover";
+    harness.core.ops.requestRender({ content: true });
+
     const recommended = harness.content.querySelector(".agent-section-recommended");
     const unavailable = harness.content.querySelector(".agent-section-unavailable");
-    assert.ok(connected);
     assert.ok(recommended);
     assert.ok(unavailable);
-    assert.strictEqual(connected.querySelector(".section-title").textContent, "Connected");
     assert.strictEqual(recommended.querySelector(".section-title").textContent, "Detected locally");
-    assert.strictEqual(unavailable.querySelector(".section-title").textContent, "Not detected locally");
-
-    const labelsFor = (section) => section.querySelectorAll(".agent-summary-row .row-label").map((el) => el.textContent);
-    assert.deepStrictEqual(labelsFor(connected), ["Hermes Agent"]);
     assert.deepStrictEqual(labelsFor(recommended), ["Qwen Code"]);
+    assert.strictEqual(harness.content.querySelector(".agent-section-connected"), null);
+
+    // The undetected catalog is a collapsed group with a neutral count, and
+    // the manual-add block sits above it.
+    const group = unavailable.querySelector(".agent-unavailable-group");
+    assert.ok(group);
+    assert.strictEqual(group.querySelector(".collapsible-group-text .row-label").textContent, "Not detected locally");
+    assert.strictEqual(group.querySelector(".agent-section-count").textContent, "1");
+    assert.ok(group.classList.contains("collapsed"));
     assert.deepStrictEqual(labelsFor(unavailable), ["Pi"]);
+    assert.ok(
+      harness.content.children.indexOf(harness.content.querySelector(".agent-custom-tools-section"))
+      < harness.content.children.indexOf(unavailable)
+    );
   });
 
   it("renders an install hint banner for detected local agents that are not integrated", () => {
@@ -5066,6 +5109,7 @@ describe("settings renderer browser environment", () => {
       skippedAgentIds: ["claude-code", "codex"],
     };
     harness.core.runtime.agentInstallationHintsFetched = true;
+    harness.core.runtime.agentsSubtab = "discover";
 
     harness.core.ops.requestRender({ content: true });
 
@@ -5873,6 +5917,7 @@ describe("settings renderer browser environment", () => {
       snapshot: {
         agents: {
           "gemini-cli": {
+            integrationInstalled: true,
             enabled: true,
             notificationHookEnabled: true,
           },
