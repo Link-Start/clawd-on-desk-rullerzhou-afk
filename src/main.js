@@ -1621,6 +1621,7 @@ const _stateCtx = {
   }),
   getSessionAliases: () => _settingsController.get("sessionAliases"),
   getIdleVisualChoice,
+  isAgentEnabled: (agentId) => _isAgentEnabled({ agents: _settingsController.get("agents") }, agentId),
   hasAnyEnabledAgent: () => {
     // `get("agents")` returns the live reference (no clone) — we're only
     // reading. Missing agents field falls back to "assume enabled" (the

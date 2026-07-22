@@ -60,7 +60,7 @@ describe("detectRunningAgentProcesses() agent coverage", () => {
     api.cleanup();
   });
 
-  it("includes agy.exe, kimi.exe, and pi.exe in the Windows PowerShell process query", async () => {
+  it("builds the Windows query from the explicit conservative roster", async () => {
     let seenFile = "";
     let seenScript = "";
     childProcess.execFile = (file, args, opts, cb) => {
@@ -79,19 +79,27 @@ describe("detectRunningAgentProcesses() agent coverage", () => {
     assert.match(seenScript, /'agy\.exe'/);
     assert.match(seenScript, /'kimi\.exe'/);
     assert.match(seenScript, /'codewhale\.exe'/);
+    assert.match(seenScript, /'qwen\.exe'/);
+    assert.match(seenScript, /'mimo\.exe'/);
     assert.match(seenScript, /'pi\.exe'/);
     assert.match(seenScript, /'qodercli\.exe'/);
     assert.match(seenScript, /'qoder-cli\.exe'/);
     // Conservative: only the Qoder CLI counts as active agent work. The IDE
     // process (qoder.exe) must NOT trigger startup recovery.
     assert.doesNotMatch(seenScript, /'qoder\.exe'/);
+    assert.doesNotMatch(seenScript, /'cursor\.exe'/);
+    assert.doesNotMatch(seenScript, /'qoderwork\.exe'/);
+    assert.doesNotMatch(seenScript, /'workbuddy\.exe'/);
     assert.match(seenScript, /Get-CimInstance Win32_Process/);
     assert.match(seenScript, /-Filter/);
     assert.doesNotMatch(seenScript, /Win32_Process \| Where-Object/);
-    assert.match(seenScript, /CommandLine LIKE '%claude-code%'/);
+    assert.match(
+      seenScript,
+      /\$nodeNeedles = @\('claude-code','codex','copilot','codebuddy','kimi-code'\)/
+    );
   });
 
-  it("includes agy, kimi, and Pi package markers in macOS/Linux pgrep query", async () => {
+  it("builds the POSIX query from exact names plus known package markers", async () => {
     let seenCommand = "";
     childProcess.exec = (cmd, opts, cb) => {
       seenCommand = cmd;
@@ -104,12 +112,60 @@ describe("detectRunningAgentProcesses() agent coverage", () => {
     });
 
     assert.strictEqual(found, true);
-    assert.match(seenCommand, /claude-code\|codex\|copilot\|codebuddy\|kimi/);
+    assert.match(seenCommand, /claude-code\|codex\|copilot\|codebuddy\|kimi-code/);
     assert.match(seenCommand, /pgrep -x 'agy'/);
     assert.match(seenCommand, /pgrep -x 'codewhale'/);
+    assert.match(seenCommand, /pgrep -x 'qwen'/);
+    assert.match(seenCommand, /pgrep -x 'mimo'/);
     assert.match(seenCommand, /pi-coding-agent/);
     assert.match(seenCommand, /pgrep -x 'qodercli'/);
     assert.match(seenCommand, /pgrep -x 'qoder-cli'/);
     assert.doesNotMatch(seenCommand, /pgrep -x 'pi'/);
+    assert.doesNotMatch(seenCommand, /pgrep -x '[Cc]ursor'/);
+    assert.doesNotMatch(seenCommand, /pgrep -x 'QoderWork'/);
+    assert.doesNotMatch(seenCommand, /WorkBuddy/);
+  });
+
+  it("filters the process query to enabled agents", async () => {
+    api.cleanup();
+    api = require("../src/state")(makeCtx({
+      hasAnyEnabledAgent: () => true,
+      isAgentEnabled: (agentId) => agentId === "qoder",
+    }));
+    let seenScript = "";
+    childProcess.execFile = (file, args, opts, cb) => {
+      seenScript = args[args.length - 1];
+      cb(null, "12345");
+    };
+    Object.defineProperty(process, "platform", { value: "win32" });
+
+    const found = await new Promise((resolve) => {
+      api.detectRunningAgentProcesses((result) => resolve(result));
+    });
+
+    assert.strictEqual(found, true);
+    assert.match(seenScript, /'qodercli\.exe'/);
+    assert.match(seenScript, /'qoder-cli\.exe'/);
+    assert.doesNotMatch(seenScript, /'qoder\.exe'/);
+    assert.doesNotMatch(seenScript, /'claude\.exe'/);
+    assert.match(seenScript, /\$nodeNeedles = @\(\)/);
+  });
+
+  it("does not scan when the only enabled agent has an empty process surface", async () => {
+    api.cleanup();
+    api = require("../src/state")(makeCtx({
+      hasAnyEnabledAgent: () => true,
+      isAgentEnabled: (agentId) => agentId === "cursor-agent",
+    }));
+    let calls = 0;
+    childProcess.execFile = () => { calls++; };
+    Object.defineProperty(process, "platform", { value: "win32" });
+
+    const found = await new Promise((resolve) => {
+      api.detectRunningAgentProcesses((result) => resolve(result));
+    });
+
+    assert.strictEqual(found, false);
+    assert.strictEqual(calls, 0);
   });
 });

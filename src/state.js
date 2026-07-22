@@ -39,6 +39,7 @@ const { normalizeTranscriptPath } = require("./transcript-path");
 const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
 const { ANTIGRAVITY_QUOTA_FIELDS } = require("../hooks/antigravity-context-usage");
 const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
+const { getStartupRecoveryProcessNames } = require("../agents/registry");
 const {
   readTranscriptTailEntries: readClaudeTranscriptTailEntries,
   extractLastAssistantTextFromEntries: extractLastClaudeAssistantTextFromEntries,
@@ -2138,27 +2139,52 @@ function detectRunningAgentProcesses(callback) {
   if (_detectInFlight) return;
   _detectInFlight = true;
   const done = (result) => { _detectInFlight = false; callback(result); };
-  // Agent gate short-circuit: if every agent is disabled, skip the system
-  // call entirely — nothing we could "find" should keep startup recovery
-  // alive. When at least one agent is enabled, we still run the combined
-  // detection because the query can't attribute individual processes back
-  // to agent ids without per-name process queries, and the result
-  // is only a boolean for startup recovery — not a session creator.
+  // Skip the system call when every integration is disabled, then build the
+  // query from each enabled agent's explicit conservative detection surface.
   if (typeof ctx.hasAnyEnabledAgent === "function" && !ctx.hasAnyEnabledAgent()) {
+    done(false);
+    return;
+  }
+  const isEnabled = typeof ctx.isAgentEnabled === "function"
+    ? (agentId) => ctx.isAgentEnabled(agentId)
+    : () => true;
+  const processEntries = getStartupRecoveryProcessNames()
+    .filter((entry) => entry && entry.name && entry.agentId && isEnabled(entry.agentId));
+  // Preserve node-shaped CLI detection only as a weak keep-awake fallback.
+  // A match here never creates a session or publishes a task-level state.
+  const commandLineNeedles = [
+    { agentId: "claude-code", needle: "claude-code" },
+    { agentId: "codex", needle: "codex" },
+    { agentId: "copilot-cli", needle: "copilot" },
+    { agentId: "codebuddy", needle: "codebuddy" },
+    { agentId: "kimi-cli", needle: "kimi-code" },
+  ].filter((entry) => isEnabled(entry.agentId));
+  const platformCommandLineNeedles = process.platform === "win32" || !isEnabled("pi")
+    ? commandLineNeedles
+    : [
+        ...commandLineNeedles,
+        { agentId: "pi", needle: "@earendil-works/pi-coding-agent" },
+        { agentId: "pi", needle: "pi-coding-agent/dist/cli.js" },
+      ];
+  if (processEntries.length === 0 && platformCommandLineNeedles.length === 0) {
     done(false);
     return;
   }
   const { execFile, exec } = require("child_process");
   if (process.platform === "win32") {
-    // Keep this WQL filter built only from hard-coded literals. Real process
-    // names are matched by WMI; external input must not be spliced into it.
+    // Registry declarations are source-controlled literals. External input
+    // must never be spliced into this WQL filter.
+    const names = [...new Set(processEntries.map((entry) => String(entry.name).toLowerCase()))];
+    const quotedNames = names.map((name) => `'${name.replace(/'/g, "''")}'`).join(",");
+    const quotedNeedles = platformCommandLineNeedles
+      .map((entry) => `'${entry.needle.replace(/'/g, "''")}'`)
+      .join(",");
     const psScript =
-      "$names = 'claude.exe','codex.exe','copilot.exe','gemini.exe','agy.exe','codebuddy.exe','kiro-cli.exe','kimi.exe','codewhale.exe','opencode.exe','mimo.exe','pi.exe','hermes.exe','qodercli.exe','qoder-cli.exe','qoderwork.exe'; " +
+      `$names = @(${quotedNames}); ` +
+      `$nodeNeedles = @(${quotedNeedles}); ` +
       "$nameFilters = $names | ForEach-Object { \"Name='$_'\" }; " +
-      // kimi.exe only covers the native (install-script) build; the npm
-      // install of Kimi Code runs as node.exe, recognizable by the package
-      // directory name in its command line (#563).
-      "$filter = ($nameFilters + \"(Name='node.exe' AND CommandLine LIKE '%claude-code%')\" + \"(Name='node.exe' AND CommandLine LIKE '%kimi-code%')\") -join ' OR '; " +
+      "$nodeFilters = $nodeNeedles | ForEach-Object { \"(Name='node.exe' AND CommandLine LIKE '%$_%')\" }; " +
+      "$filter = ($nameFilters + $nodeFilters) -join ' OR '; " +
       "$match = Get-CimInstance Win32_Process -Filter $filter | Select-Object -First 1; " +
       "if ($match) { $match.ProcessId }";
     execFile(
@@ -2168,11 +2194,17 @@ function detectRunningAgentProcesses(callback) {
       (err, stdout) => done(!err && /\d+/.test(stdout))
     );
   } else {
-    // WorkBuddy is a GUI Electron app: current macOS builds use
-    // "WorkBuddy AI Helper"; older builds used "WorkBuddy Helper". The Windows/Linux process
-    // names are not yet confirmed on real hardware, so they are intentionally
-    // omitted from the WQL filter above until verified (see agents/workbuddy.js).
-    exec("pgrep -f 'claude-code|codex|copilot|codebuddy|kimi|@earendil-works/pi-coding-agent|pi-coding-agent/dist/cli\\.js' || pgrep -x 'gemini' || pgrep -x 'agy' || pgrep -x 'kiro-cli' || pgrep -x 'codewhale' || pgrep -x 'opencode' || pgrep -x 'mimo' || pgrep -x 'hermes' || pgrep -x 'qodercli' || pgrep -x 'qoder-cli' || pgrep -x '[Qq]oder[Ww]ork' || pgrep -f 'WorkBuddy( AI)? Helper'", { timeout: 3000 },
+    const shellQuote = (value) => `'${String(value).replace(/'/g, `'"'"'`)}'`;
+    const regexEscape = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const exactClauses = [...new Set(processEntries.map((entry) => String(entry.name)))]
+      .map((name) => `pgrep -x ${shellQuote(name)}`);
+    const markerPattern = platformCommandLineNeedles
+      .map((entry) => regexEscape(entry.needle))
+      .join("|");
+    const clauses = markerPattern
+      ? [`pgrep -f ${shellQuote(markerPattern)}`, ...exactClauses]
+      : exactClauses;
+    exec(clauses.join(" || "), { timeout: 3000 },
       (err) => done(!err)
     );
   }
