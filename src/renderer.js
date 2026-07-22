@@ -747,7 +747,15 @@ let pendingSvgFile = null; // tracks the SVG currently being loaded (for dedup)
 let pendingAssetUrl = null;
 let activeSwapToken = 0;
 let swapVisibilityRescueTimer = null;
+let petVisualReadyNotified = false;
 currentIdleSvg = currentDisplayedSvg;
+
+function notifyPetVisualReadyOnce() {
+  if (petVisualReadyNotified) return;
+  if (!window.electronAPI || typeof window.electronAPI.notifyPetVisualReady !== "function") return;
+  petVisualReadyNotified = true;
+  window.electronAPI.notifyPetVisualReady();
+}
 
 /**
  * Swap to a new animation file.
@@ -907,6 +915,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       clawdEl = next;
       currentDisplayedSvg = file;
       currentDisplayedAssetUrl = url;
+      notifyPetVisualReadyOnce();
 
       if (state && tracksEyesForFile(state, file)) {
         attachEyeTracking(next);
@@ -984,6 +993,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       clawdEl = next;
       currentDisplayedSvg = file;
       currentDisplayedAssetUrl = url;
+      notifyPetVisualReadyOnce();
       scheduleLowPowerIdlePause();
     };
 

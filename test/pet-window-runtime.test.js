@@ -246,6 +246,17 @@ describe("pet-window-runtime", () => {
     assert.doesNotMatch(mainSource, /ownedHitWin\.webContents\.reload\(\)/);
   });
 
+  it("wires the first-rendered-visual signal to the non-relocating visibility recovery", () => {
+    const mainSource = fs.readFileSync(path.join(SRC_DIR, "main.js"), "utf8");
+    const preloadSource = fs.readFileSync(path.join(SRC_DIR, "preload.js"), "utf8");
+    const rendererSource = fs.readFileSync(path.join(SRC_DIR, "renderer.js"), "utf8");
+
+    assert.match(preloadSource, /notifyPetVisualReady:\s*\(\)\s*=>\s*ipcRenderer\.send\("pet-visual-ready"\)/);
+    assert.match(rendererSource, /notifyPetVisualReadyOnce\(\);/);
+    assert.match(mainSource, /recoverVisiblePetAfterRendererLoad:\s*\(event\)\s*=>\s*\{/);
+    assert.match(mainSource, /petWindowRuntime\.recoverVisiblePetAfterRendererLoad\(\);/);
+  });
+
   it("creates the render window as non-focusable and materializes the initial virtual bounds", () => {
     const instances = [];
     const harness = createRuntime();
@@ -558,6 +569,51 @@ describe("pet-window-runtime", () => {
     assert.ok(harness.calls.some((call) => call[0] === "reassertWinTopmost"));
     assert.ok(harness.calls.some((call) => call[0] === "scheduleHwndRecovery"));
     assert.ok(harness.calls.some((call) => call[0] === "flushRuntimeStateToPrefs"));
+  });
+
+  it("recovers a nominally visible pet after renderer load without relocating it", () => {
+    const renderWin = makeWindow({ x: 189, y: 403, width: 207, height: 207 });
+    const harness = createRuntime({ renderWin });
+    renderWin.calls.length = 0;
+    harness.hitWin.calls.length = 0;
+    harness.calls.length = 0;
+
+    assert.equal(harness.runtime.recoverVisiblePetAfterRendererLoad(), "recovered");
+
+    assert.deepStrictEqual(renderWin.calls.find((call) => call[0] === "setBounds"), [
+      "setBounds",
+      { x: 189, y: 403, width: 207, height: 207 },
+    ]);
+    assert.ok(renderWin.calls.some((call) => call[0] === "showInactive"));
+    assert.ok(harness.hitWin.calls.some((call) => call[0] === "showInactive"));
+    assert.ok(harness.calls.some((call) => call[0] === "reassertWinTopmost"));
+    assert.ok(harness.calls.some((call) => call[0] === "scheduleHwndRecovery"));
+    assert.ok(!harness.calls.some((call) => call[0] === "flushRuntimeStateToPrefs"));
+  });
+
+  it("does not resurrect a pet intentionally hidden when the renderer reloads", () => {
+    const harness = createRuntime();
+    harness.runtime.setPetHidden(true);
+    harness.renderWin.calls.length = 0;
+    harness.hitWin.calls.length = 0;
+    harness.calls.length = 0;
+
+    assert.equal(harness.runtime.recoverVisiblePetAfterRendererLoad(), "hidden");
+    assert.ok(!harness.renderWin.calls.some((call) => call[0] === "showInactive"));
+    assert.ok(!harness.hitWin.calls.some((call) => call[0] === "showInactive"));
+    assert.ok(!harness.calls.some((call) => call[0] === "reassertWinTopmost"));
+  });
+
+  it("keeps the renderer-load recovery Windows-only", () => {
+    const harness = createRuntime({ isWin: false });
+    harness.renderWin.calls.length = 0;
+    harness.hitWin.calls.length = 0;
+    harness.calls.length = 0;
+
+    assert.equal(harness.runtime.recoverVisiblePetAfterRendererLoad(), "unsupported");
+    assert.deepStrictEqual(harness.renderWin.calls, []);
+    assert.deepStrictEqual(harness.hitWin.calls, []);
+    assert.deepStrictEqual(harness.calls, []);
   });
 });
 

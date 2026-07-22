@@ -124,6 +124,9 @@ Recommended all-platform checks:
 
 Windows checks:
 
+- Required: cold-start the packaged app twice with a saved upgrade position;
+  the first rendered pet visual must appear at that position without using
+  "Bring Pet to Primary Display" / "将桌宠拉回主屏".
 - Required: fullscreen/borderless game or video app smoke. The pet should float
   over the fullscreen app when overlay mode is on; clicking or dragging the pet
   must not kick the app out of fullscreen.

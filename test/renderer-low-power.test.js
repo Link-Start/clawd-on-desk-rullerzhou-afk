@@ -761,6 +761,20 @@ describe("renderer object-channel selection", () => {
     assert.strictEqual(harness.api.pendingNext.tagName, "OBJECT");
     assert.strictEqual(harness.api.pendingSvgFile, "next.svg");
   });
+
+  it("notifies main once the first pet visual is actually swapped into view", () => {
+    const harness = createRendererHarness();
+
+    harness.api.swapToFile("first.svg", "idle", false);
+    harness.api.pendingNext.listeners.get("load")();
+    harness.api.swapToFile("second.svg", "working", false);
+    harness.api.pendingNext.listeners.get("load")();
+
+    assert.deepStrictEqual(
+      harness.electronCalls.filter((call) => call.name === "notifyPetVisualReady"),
+      [{ name: "notifyPetVisualReady", args: [] }]
+    );
+  });
 });
 
 describe("renderer Cloudling pointer bridge", () => {

@@ -82,6 +82,10 @@ describe("i18n locales", () => {
     assertLocaleObjectParity(i18n, "runtime");
   });
 
+  it("uses the requested Simplified Chinese desktop-pet recovery wording", () => {
+    assert.strictEqual(i18n.zh.bringPetToPrimaryDisplay, "将桌宠拉回主屏");
+  });
+
   it("keeps Settings locale keysets aligned with English", () => {
     assertLocaleObjectParity(loadSettingsI18nStrings(), "settings");
   });

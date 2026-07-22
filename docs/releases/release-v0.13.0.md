@@ -80,6 +80,11 @@ This release welcomes **seven first-time contributors**.
 - **Windows DWM cloak recovery** (#525, #701) — the pet can detect and recover
   from an unexpectedly cloaked window across watchdog and power/display-wake
   paths.
+- **Windows first-frame visibility recovery** — after the first pet visual is
+  actually rendered, Clawd replays the existing window bounds and native
+  visibility/topmost recovery sequence without relocating the saved pet
+  position. This prevents an upgrade launch from requiring the tray recovery
+  action before the pet appears.
 - **Desktop shell fullscreen detection** (#721) — Explorer/desktop shell
   windows are no longer mistaken for fullscreen applications. Thanks to
   returning contributor @KaiC5504.
@@ -136,7 +141,12 @@ Thanks also to returning contributors **@KaiC5504**, **@Yike-Ye**, and
   from occupied port 23333 to 23334, and returned a valid `GET /state` health
   response. The NSIS cleanup entry point also removed a managed MiMo plugin
   from JSONC while preserving its comment, trailing comma, third-party plugin,
-  and unrelated settings.
+  and unrelated settings. After the first draft installer exposed a blank pet
+  on upgrade launch, the rebuilt package was cold-started twice with the saved
+  pre-fix position/display snapshot: both runs kept the saved `189,403`
+  position, reported a visible uncloaked native window, and the first run's
+  captured HWND contained the rendered Cloudling visual without using the tray
+  recovery action.
 - Windows ARM64: not real-machine validated for v0.13.0.
 - macOS: not real-machine validated for the final v0.13.0 package in this
   Windows-first release environment.

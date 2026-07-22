@@ -400,6 +400,39 @@ function createPetWindowRuntime(options = {}) {
     return "failed";
   }
 
+  // A transparent Windows BrowserWindow can finish its first load while the
+  // native HWND is nominally visible but still parked below the useful z-order
+  // or waiting for a compositor refresh. The manual "bring to primary display"
+  // action heals that state because it replays bounds, shows both layers, and
+  // re-asserts topmost. Run the same non-relocating sequence after the renderer
+  // finishes loading so startup/crash recovery does not require that menu
+  // action. Intentional hiding and in-flight geometry transitions remain
+  // authoritative.
+  function recoverVisiblePetAfterRendererLoad() {
+    if (!isWin) return "unsupported";
+    const win = getRenderWindow();
+    if (!isLiveWindow(win)) return "no-window";
+    if (petHidden) return "hidden";
+    if (getMiniTransitioning() || isMiniAnimating() || dragLocked) return "busy";
+    if (settingsSizePreviewSyncFrozen) return "frozen";
+
+    // Replaying the exact virtual bounds is intentional: setBounds() gives a
+    // transparent HWND a compositor refresh without discarding the user's
+    // saved display/edge position. applyPetWindowBounds also preserves a
+    // virtual negative-Y offset used by top-edge pinning.
+    const bounds = getPetWindowBounds();
+    if (bounds) {
+      applyPetWindowBounds(bounds);
+      syncHitWin();
+      repositionAnchoredSurfaces();
+    }
+    showPetWindows();
+    reapplyMacVisibility();
+    reassertWinTopmost();
+    scheduleHwndRecovery();
+    return "recovered";
+  }
+
   function bringPetToPrimaryDisplay() {
     const win = getRenderWindow();
     if (!isLiveWindow(win)) return;
@@ -982,6 +1015,7 @@ function createPetWindowRuntime(options = {}) {
     setPetHidden,
     togglePetVisibility,
     recoverIfCloaked,
+    recoverVisiblePetAfterRendererLoad,
     bringPetToPrimaryDisplay,
     getViewportOffsetY,
     setViewportOffsetY,

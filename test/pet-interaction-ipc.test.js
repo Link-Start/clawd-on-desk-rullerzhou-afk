@@ -55,6 +55,7 @@ function createHarness(overrides = {}) {
     getCurrentState: () => state.currentState,
     getCurrentSvg: () => state.currentSvg,
     sendToRenderer: (...args) => calls.push(["sendToRenderer", ...args]),
+    recoverVisiblePetAfterRendererLoad: (event) => calls.push(["recoverVisiblePetAfterRendererLoad", event.sender]),
     setDragLocked: (value) => calls.push(["setDragLocked", value]),
     setMouseOverPet: (value) => calls.push(["setMouseOverPet", value]),
     beginDragSnapshot: () => calls.push(["beginDragSnapshot"]),
@@ -130,6 +131,7 @@ test("pet interaction IPC registers owned channels and disposes them", () => {
     "pause-cursor-polling",
     "pet-drop-paths",
     "pet-interaction:reveal-session-hud",
+    "pet-visual-ready",
     "play-click-reaction",
     "resume-from-reaction",
     "show-context-menu",
@@ -139,6 +141,16 @@ test("pet interaction IPC registers owned channels and disposes them", () => {
   runtime.dispose();
 
   assert.strictEqual(ipcMain.listeners.size, 0);
+});
+
+test("pet interaction IPC delegates the first rendered visual recovery signal", () => {
+  const { ipcMain, calls } = createHarness();
+
+  ipcMain.send("pet-visual-ready");
+
+  assert.deepStrictEqual(calls.filter((c) => c[0] === "recoverVisiblePetAfterRendererLoad"), [
+    ["recoverVisiblePetAfterRendererLoad", "sender-web-contents"],
+  ]);
 });
 
 test("pet interaction IPC delegates pet-interaction:reveal-session-hud to revealSessionHud", () => {

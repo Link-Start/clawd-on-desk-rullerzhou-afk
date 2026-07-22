@@ -16,6 +16,10 @@ function registerPetInteractionIpc(options = {}) {
   const getCurrentState = requiredDependency(options.getCurrentState, "getCurrentState");
   const getCurrentSvg = requiredDependency(options.getCurrentSvg, "getCurrentSvg");
   const sendToRenderer = requiredDependency(options.sendToRenderer, "sendToRenderer");
+  const recoverVisiblePetAfterRendererLoad = requiredDependency(
+    options.recoverVisiblePetAfterRendererLoad,
+    "recoverVisiblePetAfterRendererLoad"
+  );
   const setDragLocked = requiredDependency(options.setDragLocked, "setDragLocked");
   const setMouseOverPet = requiredDependency(options.setMouseOverPet, "setMouseOverPet");
   const beginDragSnapshot = requiredDependency(options.beginDragSnapshot, "beginDragSnapshot");
@@ -74,6 +78,7 @@ function registerPetInteractionIpc(options = {}) {
 
   on("show-context-menu", showContextMenu);
   on("drag-move", () => moveWindowForDrag());
+  on("pet-visual-ready", (event) => recoverVisiblePetAfterRendererLoad(event));
 
   on("pause-cursor-polling", () => {
     setIdlePaused(true);

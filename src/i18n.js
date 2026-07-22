@@ -377,7 +377,7 @@ const i18n = {
     medium: "中 (M)",
     large: "大 (L)",
     sendToDisplay: "发送到显示器",
-    bringPetToPrimaryDisplay: "把宠物拉回主屏",
+    bringPetToPrimaryDisplay: "将桌宠拉回主屏",
     displayLabel: "显示器 {n}",
     displayLabelPrimary: "显示器 {n}（主屏）",
     displayResolution: "{w}×{h}",

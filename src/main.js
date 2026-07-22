@@ -3662,6 +3662,12 @@ function createWindow() {
     getCurrentState: () => _state.getCurrentState(),
     getCurrentSvg: () => _state.getCurrentSvg(),
     sendToRenderer,
+    recoverVisiblePetAfterRendererLoad: (event) => {
+      if (!win || win.isDestroyed()) return;
+      if (!event || event.sender !== win.webContents) return;
+      if (themeRuntime.isReloadInProgress()) return;
+      petWindowRuntime.recoverVisiblePetAfterRendererLoad();
+    },
     setDragLocked: (value) => { petWindowRuntime.setDragLocked(value); },
     setMouseOverPet: (value) => { mouseOverPet = !!value; },
     beginDragSnapshot: () => beginDragSnapshot(),
