@@ -34,6 +34,7 @@ jobs:
         with:
           node-version-file: .nvmrc
       - run: npm install
+      - run: npm test
       - run: npm run fetch:sidecars -- --target darwin-x64,darwin-arm64
       - run: node scripts/verify-sidecar-binaries.js prebuild:mac
       - run: npx electron-builder --mac --publish never
@@ -52,6 +53,7 @@ jobs:
         with:
           node-version-file: .nvmrc
       - run: npm install
+      - run: npm test
       - run: npm run fetch:sidecars -- --target linux-x64
       - run: node scripts/verify-sidecar-binaries.js prebuild:linux
       - run: npx electron-builder --linux --publish never

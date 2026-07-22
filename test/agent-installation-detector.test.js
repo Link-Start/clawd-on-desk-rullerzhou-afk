@@ -379,5 +379,16 @@ describe("agent installation detector", () => {
       assert.strictEqual(workbuddy.clawdIntegration.detected, true);
       assert.ok(workbuddy.clawdIntegration.detail.includes(".workbuddy"));
     });
+
+    it("ignores a bare legacy toolchain directory without settings.json", () => {
+      const homeDir = makeHome();
+      mkdirp(path.join(homeDir, ".workbuddy"));
+
+      const report = detectAgentInstallations({ homeDir, now: 1, env: {} });
+      const workbuddy = byId(report, "workbuddy");
+
+      assert.strictEqual(workbuddy.detectedInstalled, false);
+      assert.strictEqual(workbuddy.clawdIntegration.detected, false);
+    });
   });
 });

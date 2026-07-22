@@ -322,6 +322,36 @@ describe("Codex remote monitor — stale-cleanup re-read dedup", () => {
     assert.strictEqual(entry, null);
   });
 
+  it("recovers a request that begins exactly at the 1 MiB tail boundary", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-codex-remote-boundary-"));
+    tmpDirs.push(dir);
+    const filePath = path.join(dir, ROLLOUT_NAME);
+    const sessionMetaLine = JSON.stringify(META) + "\n";
+    const requestLine = JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "request_user_input",
+        call_id: "call_remote_exact_tail_boundary",
+        arguments: JSON.stringify({ questions: [{ id: "q", header: "Choice", question: "Pick one", options: [] }] }),
+      },
+    }) + "\n";
+    const tailWindow = 1024 * 1024;
+    const fillerLength = tailWindow - Buffer.byteLength(requestLine, "utf8") - 1;
+    assert.ok(fillerLength > 0);
+    fs.writeFileSync(filePath, sessionMetaLine + requestLine + "x".repeat(fillerLength) + "\n", "utf8");
+    assert.strictEqual(fs.statSync(filePath).size - tailWindow, Buffer.byteLength(sessionMetaLine, "utf8"));
+    const oldTime = new Date(Date.now() - 600000);
+    fs.utimesSync(filePath, oldTime, oldTime);
+    const s = spy();
+
+    const entry = __test.recoverStalePendingUserInputEntry(filePath, ROLLOUT_NAME, { postState: s.postState });
+
+    assert.ok(entry, "the complete first tail record must not be dropped");
+    assert.ok(entry.pendingUserInputs.has("call_remote_exact_tail_boundary"));
+    assert.strictEqual(s.posted.length, 1);
+  });
+
   it("does not recover a file older than RECOVERY_MAX_AGE_MS even with a genuinely unresolved question", () => {
     // #707 follow-up review, finding 3: without an age cap, a session killed
     // with an unanswered question resurrects as a permanent ghost card on

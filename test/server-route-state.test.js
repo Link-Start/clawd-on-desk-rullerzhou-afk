@@ -578,12 +578,37 @@ describe("server-route-state POST", () => {
     const id = "custom-nova-ai-0123456789ab";
     const res = await callStatePost(JSON.stringify({
       state: "working",
-      session_id: "nova:sid",
+      session_id: "sid",
       event: "PreToolUse",
       agent_id: id,
     }), { ctx: { getCustomAgentIds: () => [id] } });
     assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.calls.updateSession[0][0], `${id}:sid`);
     assert.strictEqual(res.calls.updateSession[0][3].agentId, id);
+  });
+
+  it("namespaces identical custom and built-in session ids independently", async () => {
+    const firstId = "custom-nova-ai-0123456789ab";
+    const secondId = "custom-orbit-ai-0123456789ab";
+    const customIds = [firstId, secondId];
+    const post = (agent_id, session_id, event = "PreToolUse") => callStatePost(JSON.stringify({
+      state: "working",
+      session_id,
+      event,
+      agent_id,
+    }), { ctx: { getCustomAgentIds: () => customIds } });
+
+    const [first, second, customDefault, builtin] = await Promise.all([
+      post(firstId, "shared"),
+      post(secondId, "shared", "SessionEnd"),
+      post(firstId, ""),
+      post("claude-code", "shared"),
+    ]);
+
+    assert.strictEqual(first.calls.updateSession[0][0], `${firstId}:shared`);
+    assert.strictEqual(second.calls.updateSession[0][0], `${secondId}:shared`);
+    assert.strictEqual(customDefault.calls.updateSession[0][0], `${firstId}:default`);
+    assert.strictEqual(builtin.calls.updateSession[0][0], "shared");
   });
 
   it("rejects stale custom ids before hook_source fallback", async () => {

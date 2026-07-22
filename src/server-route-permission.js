@@ -1192,7 +1192,7 @@ function handlePermissionPost(req, res, options) {
         const abortHandler = () => {
           if (res.writableFinished) return;
           ctx.permLog("abortHandler fired (elicitation)");
-          ctx.resolvePermissionEntry(permEntry, "deny", "Client disconnected");
+          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
         };
         permEntry.abortHandler = abortHandler;
         res.on("close", abortHandler);
@@ -1239,7 +1239,7 @@ function handlePermissionPost(req, res, options) {
       const abortHandler = () => {
         if (res.writableFinished) return;
         ctx.permLog("abortHandler fired");
-        ctx.resolvePermissionEntry(permEntry, "deny", "Client disconnected");
+        ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
       };
       permEntry.abortHandler = abortHandler;
       res.on("close", abortHandler);

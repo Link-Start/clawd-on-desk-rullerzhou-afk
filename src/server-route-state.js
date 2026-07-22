@@ -162,6 +162,20 @@ function handleStatePost(req, res, options) {
       const rawAgentPid = data.agent_pid ?? data.claude_pid ?? data.cursor_pid;
       const agentPid = Number.isFinite(rawAgentPid) && rawAgentPid > 0 ? Math.floor(rawAgentPid) : null;
       const agentId = agentIdentity.agentId;
+      // State sessions share one process-wide Map keyed only by session id.
+      // Registered custom applications commonly send generic ids such as
+      // "default" or "project-a", so namespace them at the trust boundary to
+      // prevent two custom apps (or a custom app and a built-in agent) from
+      // overwriting or ending each other's sessions.
+      if (agentIdentity.source === "custom") {
+        const rawCustomSessionId = typeof session_id === "string" && session_id.trim()
+          ? session_id.trim()
+          : "default";
+        const customSessionPrefix = `${agentId}:`;
+        session_id = rawCustomSessionId.startsWith(customSessionPrefix)
+          ? rawCustomSessionId
+          : `${customSessionPrefix}${rawCustomSessionId}`;
+      }
       const host = typeof data.host === "string" ? data.host : null;
       const wslDistro = typeof data.wsl_distro === "string" && data.wsl_distro.trim()
         ? data.wsl_distro.trim()

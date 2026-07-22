@@ -134,7 +134,7 @@ describe("permission bubble terminal fallback (issue #689)", () => {
     });
   }
 
-  it("does not offer the fallback on Hermes cards (204 no-decision fails open = allow)", () => {
+  it("does not offer a terminal fallback when Hermes has no native approval prompt", () => {
     const harness = createHarness();
     harness.show({ toolName: "Bash", isHermes: true });
 
@@ -178,6 +178,21 @@ describe("permission bubble terminal fallback (issue #689)", () => {
     assert.strictEqual(buttons.length, 1);
     buttons[0].click();
     assert.deepStrictEqual(harness.decisions, ["deny"]);
+  });
+
+  it("hands Hermes clarification back to its native UI and focuses the terminal", () => {
+    const harness = createHarness();
+    harness.show({
+      isElicitation: true,
+      isHermes: true,
+      toolName: "clarify",
+      toolInput: { questions: [] },
+    });
+
+    const buttons = harness.terminalButtons();
+    assert.strictEqual(buttons.length, 1);
+    buttons[0].click();
+    assert.deepStrictEqual(harness.decisions, ["deny-and-focus"]);
   });
 
   it("keeps plan review's single terminal action and deny-and-focus semantics", () => {

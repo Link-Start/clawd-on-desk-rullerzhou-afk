@@ -782,10 +782,10 @@ function showPermissionBubble(permEntry) {
   bub.on("closed", () => {
     const idx = pendingPermissions.indexOf(permEntry);
     if (idx !== -1) {
-      // Qwen + Copilot + Hermes are fail-open agents: a closed bubble means "no
-      // decision, let the native flow run" so the user isn't forced into a
-      // deny they didn't pick. CC/CodeBuddy still get an explicit deny so
-      // the hook unblocks instead of waiting for the long timeout.
+      // Qwen + Copilot can hand no-decision back to their native flow. Hermes
+      // has no native permission UI, so its opt-in plugin gate treats this as
+      // a retryable block. In every case we avoid fabricating a user denial.
+      // CC/CodeBuddy still get an explicit deny for this user-close action.
       const behavior = (permEntry.isQwenCode || permEntry.isCopilotCli || permEntry.isHermes) ? "no-decision" : "deny";
       resolvePermissionEntry(permEntry, behavior, "Bubble window closed by user");
     }
@@ -925,10 +925,10 @@ function buildPermissionBubblePayload(permEntry) {
     isCodexUserInputNotify: permEntry.isCodexUserInputNotify || false,
     codexUserInputCallId: permEntry.codexUserInputCallId || null,
     isRemote: !!permEntry.host,
-    // Hermes must NOT get the go-to-terminal fallback: its wire protocol has
-    // no "no decision, user answers in the terminal" shape — the plugin treats
-    // our 204 no-decision exactly like allow (fail-open past the opt-in
-    // CLAWD_HERMES_PERMISSION_TOOLS gate). See handleDecide's isHermes branch.
+    // Hermes must NOT get the regular go-to-terminal fallback: its opt-in
+    // permission gate has no native approval prompt to hand back to. A 204 is
+    // converted into a retryable block by the plugin. Clarify elicitation is
+    // different and can hand control to Hermes' native clarification UI.
     isHermes: permEntry.isHermes || false,
     // Display-only detail for the passive Kimi notify card: the real tool
     // name plus the whitelisted tool_input subset let the renderer reuse the
@@ -2036,13 +2036,10 @@ function handleDecide(event, behavior) {
       resolvePermissionEntry(perm, "allow");
       return;
     }
-    // ⚠ Hermes no-decision is NOT neutral: the plugin maps our 204 to None,
-    // which its pre_tool_call gate treats exactly like allow — the tool runs
-    // (fail-open past CLAWD_HERMES_PERMISSION_TOOLS). The renderer therefore
-    // never offers deny-and-focus on Hermes cards (isHermes in the bubble
-    // payload); this branch only backstops unknown/legacy actions. Do not add
-    // a Hermes UI entry point for deny-and-focus until the plugin protocol
-    // grows a real "hand back to terminal" answer.
+    // Hermes' opt-in permission gate has no native approval prompt. The plugin
+    // maps no-decision to a retryable block, while clarify elicitation maps it
+    // to Hermes' native clarification UI. This branch backstops unknown/legacy
+    // actions without fabricating allow or deny.
     resolvePermissionEntry(perm, "no-decision", `Unsupported Hermes bubble action: ${String(behavior)}`);
     if (behavior === "deny-and-focus") {
       ctx.focusTerminalForSession(perm.sessionId, { fallbackEntry: buildPermissionFocusEntry(perm) });
@@ -2400,6 +2397,7 @@ function dismissInteractivePermissionBubbles() {
     dismissInteractivePermissionWithoutDecision(perm, "interactive-bubbles-dismissed");
   }
   repositionBubbles();
+  repositionDependentBubbles();
   syncPermissionShortcuts();
   permLog(`dismissInteractivePermissionBubbles(): cleared ${toDismiss.length}`);
   return toDismiss.length;
@@ -2463,14 +2461,15 @@ function cleanup() {
   if (typeof unsubscribeShortcuts === "function") {
     try { unsubscribeShortcuts(); } catch {}
   }
-  // Clean up all pending permission requests. Codex/Qwen/Copilot/Antigravity
-  // get no-decision so their native flow can continue; Claude/CodeBuddy get
-  // explicit deny so they don't hang while quitting.
+  // Clean up all pending permission requests without deciding on the user's
+  // behalf. Each protocol gets its normal no-decision fallback: bodyless
+  // replies for supported hooks, socket close for Claude/CodeBuddy, and no
+  // bridge reply for opencode-family requests.
   for (const perm of [...pendingPermissions]) {
     if (perm._delayTimer) clearTimeout(perm._delayTimer);
     if (perm.autoExpireTimer) clearTimeout(perm.autoExpireTimer);
-    if (perm.isCodex || perm.isQwenCode || perm.isCopilotCli || perm.isAntigravity || perm.isHermes) resolvePermissionEntry(perm, "no-decision", "Clawd is quitting");
-    else resolvePermissionEntry(perm, "deny", "Clawd is quitting");
+    if (isPassiveNotifyEntry(perm)) dismissPassiveNotify(perm, "Clawd is quitting");
+    else dismissInteractivePermissionWithoutDecision(perm, "Clawd is quitting");
   }
 }
 

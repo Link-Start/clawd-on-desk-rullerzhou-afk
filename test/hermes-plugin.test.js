@@ -654,6 +654,29 @@ print(json.dumps({"result": result, "calls": calls, "logs": logs}, sort_keys=Tru
     assert.strictEqual(result.logs[0].event, "post_permission_skipped_no_server");
   });
 
+  it("fails closed when an opted-in permission tool receives no decision", () => {
+    const output = runPluginPython(String.raw`
+import importlib.util
+import json
+import sys
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("hermes_plugin", r"hooks/hermes-plugin/__init__.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+hook_events = []
+mod._post_permission = lambda *args, **kwargs: None
+mod._handle_hook = lambda event_name, **kwargs: hook_events.append(event_name)
+result = mod._handle_permission_request("execute_bash", args={"command": "rm -rf build"})
+print(json.dumps({"result": result, "hook_events": hook_events}, sort_keys=True))
+`);
+    const result = JSON.parse(output);
+    assert.strictEqual(result.result.action, "block");
+    assert.match(result.result.message, /did not return a permission decision/i);
+    assert.deepStrictEqual(result.hook_events, ["pre_tool_call"]);
+  });
+
   it("does not issue the long permission POST when the short probe is not Clawd", () => {
     const output = runPluginPython(String.raw`
 import importlib.util

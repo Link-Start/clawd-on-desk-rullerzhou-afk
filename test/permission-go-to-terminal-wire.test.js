@@ -8,10 +8,10 @@
 //      DESTROYED (dropped connection = non-blocking hook error → native
 //      prompt takes over immediately), never parked until the hook timeout,
 //      and never answered with a deny on the user's behalf.
-//   2. The hermes plugin treats a 204 no-decision exactly like allow
-//      (fail-open past its CLAWD_HERMES_PERMISSION_TOOLS gate), so the bubble
-//      payload must forward isHermes for the renderer to suppress the action,
-//      and the defensive handleDecide branch must still never emit a deny.
+//   2. Hermes has no native approval prompt for opt-in permission tools, so
+//      the payload must forward isHermes for the renderer to suppress the
+//      misleading action. Its defensive backend branch must never fabricate
+//      a deny; the plugin converts no-decision into a retryable block.
 
 "use strict";
 
@@ -178,30 +178,29 @@ describe("go-to-terminal wire semantics (issue #689)", () => {
     assert.strictEqual(pendingPermissions.length, 0);
   });
 
-  it("opencode: leaves the already-ACKed bridge response untouched", () => {
-    const ctx = makeCtx();
-    const perm = initPermission(ctx);
-    const { pendingPermissions, handleDecide } = perm;
+  for (const agentId of ["opencode", "mimocode"]) {
+    it(`${agentId}: deny-and-focus leaves the family bridge unanswered`, () => {
+      const ctx = makeCtx();
+      const perm = initPermission(ctx);
+      const { pendingPermissions, handleDecide } = perm;
+      const bubble = makeFakeBubble();
+      const permEntry = makePermEntry(createMockResponse(), {
+        bubble,
+        agentId,
+        familyRequestId: `per_${agentId}`,
+        familyBridgeUrl: "http://127.0.0.1:1/reply",
+        familyBridgeToken: "token",
+        toolName: "bash",
+      });
+      permEntry.res = null;
+      pendingPermissions.push(permEntry);
 
-    // The opencode plugin's POST is 200-ACKed on arrival — by the time the
-    // bubble is up, res is already finished. The destroy guard must not touch
-    // it, and no bridge reply is owed (native TUI owns the request).
-    const res = createMockResponse();
-    res.end();
-    const bubble = makeFakeBubble();
-    const permEntry = makePermEntry(res, {
-      bubble,
-      isOpencode: true,
-      toolName: "bash",
+      handleDecide(makeEventFor(bubble), "deny-and-focus");
+
+      assert.strictEqual(pendingPermissions.indexOf(permEntry), -1, "entry must be removed");
+      assert.strictEqual(ctx.focusTerminalCalls.length, 1);
     });
-    pendingPermissions.push(permEntry);
-
-    handleDecide(makeEventFor(bubble), "deny-and-focus");
-
-    assert.strictEqual(res.destroyed, false, "finished ACK socket must not be destroyed");
-    assert.strictEqual(pendingPermissions.indexOf(permEntry), -1, "entry must be removed");
-    assert.strictEqual(ctx.focusTerminalCalls.length, 1);
-  });
+  }
 
   it("forwards isHermes in the bubble payload so the renderer suppresses the action", () => {
     const ctx = makeCtx();

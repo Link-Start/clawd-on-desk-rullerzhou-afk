@@ -5,6 +5,7 @@ const fs = require("fs");
 const electron = require("electron");
 
 const RELEASES_LATEST_URL = "https://github.com/rullerzhou-afk/clawd-on-desk/releases/latest";
+const DEPENDENCY_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 
 function makeTranslate(ctx) {
   return (key, fallback) => {
@@ -847,14 +848,14 @@ function initUpdater(ctx, deps = {}) {
         await new Promise((resolve, reject) => {
           execFileFn("npm", ["install", "--no-fund", "--no-audit"], {
             cwd: repoRoot,
-            timeout: 120000,
+            timeout: DEPENDENCY_INSTALL_TIMEOUT_MS,
             shell: runtimePlatform === "win32",
           }, (err) => (err ? reject(err) : resolve()));
         });
       } catch (err) {
         err.updateOperation = "Install Updated Dependencies";
         err.updateFailureType = "Dependency Install Failed";
-        err.updateNextStep = "Fix the npm install error, then try the update again.";
+        err.updateNextStep = "Run npm install in the Clawd repository, then restart Clawd.";
         throw err;
       }
     }
@@ -1347,6 +1348,7 @@ function initUpdater(ctx, deps = {}) {
 
 module.exports = initUpdater;
 module.exports.__test = {
+  DEPENDENCY_INSTALL_TIMEOUT_MS,
   compareVersions,
   findWindowsArm64InstallerAsset,
   formatVersionForMessage,

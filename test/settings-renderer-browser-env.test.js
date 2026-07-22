@@ -37,6 +37,13 @@ const VERIFIED_GITHUB_CONTRIBUTORS = [
   "NeroAyase",
   "divergentD",
   "Ne9roni",
+  "jiaxuan1101",
+  "kkirito16",
+  "200780381",
+  "Dxy2326",
+  "lurui1997",
+  "JesmonX",
+  "chen86860",
 ];
 
 function createDeferred() {

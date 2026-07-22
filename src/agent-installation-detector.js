@@ -327,7 +327,8 @@ function detectInstallation(descriptor, paths, options) {
     }
     case "workbuddy":
       for (const target of paths.configTargets || []) {
-        if (dirExists(fsImpl, target.parentDir)) {
+        const isLegacy = target.label === "legacy";
+        if ((!isLegacy && dirExists(fsImpl, target.parentDir)) || (isLegacy && fileExists(fsImpl, target.configPath))) {
           return installationResult(true, "high", "parent-dir", `${target.parentDir} exists`);
         }
       }

@@ -35,9 +35,12 @@ function createFixture(platform = "darwin") {
   const distRoot = path.join(packageRoot, "dist");
   const platformPath = expectedPlatformPath(platform);
   fs.mkdirSync(packageRoot, { recursive: true });
+  writeFile(path.join(rootDir, "package.json"), JSON.stringify({ devDependencies: { electron: "^41.10.2" } }));
   writeFile(path.join(packageRoot, "package.json"), JSON.stringify({ version: "41.10.2" }));
   writeFile(path.join(packageRoot, "path.txt"), platformPath);
   writeFile(path.join(distRoot, platformPath), "binary", platform === "win32" ? undefined : 0o755);
+
+  writeFile(path.join(distRoot, "version"), "41.10.2");
 
   if (platform === "darwin") {
     const frameworksRoot = path.join(distRoot, "Electron.app", "Contents", "Frameworks");
@@ -48,7 +51,6 @@ function createFixture(platform = "darwin") {
     for (const appName of MAC_HELPER_APPS) {
       fs.mkdirSync(path.join(frameworksRoot, appName), { recursive: true });
     }
-    writeFile(path.join(distRoot, "version"), "41.10.2");
   }
 
   return { rootDir, packageRoot, distRoot, platformPath };
@@ -121,7 +123,7 @@ test("non-executable launcher fails on POSIX", () => {
   const fixture = createFixture("linux");
   const target = path.join(fixture.distRoot, fixture.platformPath);
   fs.chmodSync(target, 0o644);
-  const result = verifyFixture(fixture, "linux");
+  const result = verifyFixture(fixture, "linux", { hostPlatform: "linux" });
   assert.equal(result.ok, false);
   assert.match(result.invalid[0].reason, /executable mode/);
 });
@@ -168,6 +170,26 @@ test("dist/version mismatch fails", () => {
   const result = verifyFixture(fixture);
   assert.equal(result.ok, false);
   assert.equal(result.invalid[0].path, target);
+});
+
+for (const platform of ["win32", "linux"]) {
+  test(`${platform} also rejects a dist/version mismatch`, () => {
+    const fixture = createFixture(platform);
+    const target = path.join(fixture.distRoot, "version");
+    writeFile(target, "41.0.2");
+    const result = verifyFixture(fixture, platform);
+    assert.equal(result.ok, false);
+    assert.ok(result.invalid.some((item) => item.path === target));
+  });
+}
+
+test("installed Electron must satisfy the project's declared range", () => {
+  const fixture = createFixture("win32");
+  const projectPackage = path.join(fixture.rootDir, "package.json");
+  writeFile(projectPackage, JSON.stringify({ devDependencies: { electron: "^42.0.0" } }));
+  const result = verifyFixture(fixture, "win32");
+  assert.equal(result.ok, false);
+  assert.ok(result.invalid.some((item) => item.path === projectPackage));
 });
 
 test("complete Windows and Linux fixtures pass without macOS checks", () => {

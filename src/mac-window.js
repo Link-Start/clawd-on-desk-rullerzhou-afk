@@ -91,19 +91,15 @@ function initSkyLight() {
     "void *",
     "int",
   ]);
-  // #640 Phase 2: pulling a window back OUT of the private space (de-delegation).
-  const SLSRemoveWindowsFromSpaces = lib.func("SLSRemoveWindowsFromSpaces", "int", ["int", "void *", "void *"]);
-  const SLSGetActiveSpace = lib.func("SLSGetActiveSpace", "uint64", ["int"]);
-
   const connection = SLSMainConnectionID();
   const space = SLSSpaceCreate(connection, 1, 0);
 
   skyLight = {
     connection,
     space,
+    lib,
     SLSSpaceAddWindowsAndRemoveFromSpaces,
-    SLSRemoveWindowsFromSpaces,
-    SLSGetActiveSpace,
+    deDelegateApi: undefined,
   };
 
   // Same strategy as Masko Code: create an absolute-level system Space that is
@@ -112,6 +108,27 @@ function initSkyLight() {
   SLSShowSpaces(connection, makeNSNumberArray(space));
 
   return skyLight;
+}
+
+function resolveSkyLightDeDelegateApi(lib) {
+  try {
+    return {
+      SLSRemoveWindowsFromSpaces: lib.func("SLSRemoveWindowsFromSpaces", "int", ["int", "void *", "void *"]),
+      SLSGetActiveSpace: lib.func("SLSGetActiveSpace", "uint64", ["int"]),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function initSkyLightDeDelegateApi() {
+  const api = initSkyLight();
+  if (api.deDelegateApi === undefined) {
+    // These newer private symbols are optional. Missing de-delegation support
+    // must not disable the older stationary-space path entirely.
+    api.deDelegateApi = resolveSkyLightDeDelegateApi(api.lib);
+  }
+  return api.deDelegateApi;
 }
 
 function nativeHandleToPointer(handle) {
@@ -184,8 +201,7 @@ function applyStationaryCollectionBehavior(browserWindow) {
     msgVoidBool(nsWindow, selSetMovable, false);
     msgVoidLong(nsWindow, selSetAnimationBehavior, NSWindowAnimationBehaviorNone);
     msgVoidLong(nsWindow, selSetLevel, CGAssistiveTechHighWindowLevel);
-    delegateWindowToStationarySpace(nsWindow);
-    return true;
+    return delegateWindowToStationarySpace(nsWindow);
   } catch (err) {
     if (!warnedApplyFailure) {
       console.warn("Clawd: failed to apply macOS stationary window behavior:", err.message);
@@ -250,13 +266,10 @@ function deDelegateWindowFromStationarySpace(browserWindow, level = 0) {
     const windowNumber = Number(msgLong(nsWindow, selWindowNumber)) || 0;
     if (!windowNumber) return false;
 
-    const {
-      connection,
-      space,
-      SLSRemoveWindowsFromSpaces,
-      SLSSpaceAddWindowsAndRemoveFromSpaces,
-      SLSGetActiveSpace,
-    } = initSkyLight();
+    const { connection, space, SLSSpaceAddWindowsAndRemoveFromSpaces } = initSkyLight();
+    const deDelegateApi = initSkyLightDeDelegateApi();
+    if (!deDelegateApi) return false;
+    const { SLSRemoveWindowsFromSpaces, SLSGetActiveSpace } = deDelegateApi;
 
     // Resolve the landing Space before mutating any window membership. If the
     // lookup fails or returns 0, leave the stationary setup untouched so the
@@ -302,5 +315,6 @@ module.exports = {
   deDelegateWindowFromStationarySpace,
   __test: {
     runDeDelegateTransaction,
+    resolveSkyLightDeDelegateApi,
   },
 };

@@ -472,6 +472,33 @@ describe("CodexLogMonitor", () => {
     assert.strictEqual(recovered, null);
   });
 
+  it("recovers a request that begins exactly at the 1 MiB tail boundary", () => {
+    const testFile = path.join(dateDir, TEST_FILENAME);
+    const sessionMetaLine = JSON.stringify({ type: "session_meta", payload: { cwd: "/projects/boundary" } }) + "\n";
+    const requestLine = JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "request_user_input",
+        call_id: "call_exact_tail_boundary",
+        arguments: JSON.stringify({ questions: [{ id: "q", header: "Choice", question: "Pick one", options: [] }] }),
+      },
+    }) + "\n";
+    const tailWindow = 1024 * 1024;
+    const fillerLength = tailWindow - Buffer.byteLength(requestLine, "utf8") - 1;
+    assert.ok(fillerLength > 0);
+    fs.writeFileSync(testFile, sessionMetaLine + requestLine + "x".repeat(fillerLength) + "\n", "utf8");
+    assert.strictEqual(fs.statSync(testFile).size - tailWindow, Buffer.byteLength(sessionMetaLine, "utf8"));
+    const oldTime = new Date(Date.now() - 600000);
+    fs.utimesSync(testFile, oldTime, oldTime);
+
+    monitor = new CodexLogMonitor(makeConfig(tmpDir), () => {}, {});
+    const recovered = monitor._recoverStalePendingUserInput(testFile, path.basename(testFile));
+
+    assert.ok(recovered, "the complete first tail record must not be dropped");
+    assert.ok(recovered.pendingUserInputs.has("call_exact_tail_boundary"));
+  });
+
   it("does not recover a file older than RECOVERY_MAX_AGE_MS even with a genuinely unresolved question", () => {
     // #707 follow-up review, finding 3: without an age cap, a session killed
     // with an unanswered question resurrects as a permanent ghost card on

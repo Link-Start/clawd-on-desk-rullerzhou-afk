@@ -9,14 +9,13 @@ module.exports = {
   processNames: {
     // NOTE on process names — WorkBuddy is a GUI Electron app, not a bare CLI
     // like `claude`/`codebuddy`. Hooks fire from inside the app, so this list
-    // only feeds src/state.js zero-session startup recovery (it never creates
-    // or reaps tracked sessions). Verified on macOS: the app bundle ships
-    // Current 5.2.3 ships "WorkBuddy AI Helper" variants; older builds shipped
-    // "WorkBuddy Helper" variants. The main
+    // only feeds zero-session startup recovery (it never creates or reaps
+    // tracked sessions). Verified on macOS: current 5.2.3 ships "WorkBuddy AI
+    // Helper" variants; older builds shipped "WorkBuddy Helper" variants. The main
     // executable is the bare "Electron" binary, which we deliberately DO NOT
     // list — matching it would false-positive on dev-mode Clawd and other
-    // unrenamed Electron apps. Windows/Linux names are best-guess assumptions
-    // pending real-device confirmation (tasklist / ps).
+    // unrenamed Electron apps. Windows/Linux names remain best-effort startup
+    // recovery hints; hooks are still the authority for tracked sessions.
     win: ["WorkBuddy.exe", "workbuddy.exe"],
     mac: [
       "WorkBuddy AI Helper",

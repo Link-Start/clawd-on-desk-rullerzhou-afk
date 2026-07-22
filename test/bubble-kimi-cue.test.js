@@ -79,9 +79,9 @@ describe("bubble-renderer Kimi tool-aware cue", () => {
     );
   });
 
-  it("stays passive: dismiss-only button set, no Deny, no suggestions", () => {
+  it("stays passive while labeling its focus action truthfully", () => {
     const branch = kimiBranch();
-    assert.match(branch, /btnAllow\.textContent = bubbleText\(data\.lang, "gotIt"\);/);
+    assert.match(branch, /btnAllow\.textContent = bubbleText\(data\.lang, "goToTerminal"\);/);
     assert.match(branch, /btnDeny\.style\.display = "none";/);
     assert.match(branch, /suggestionsContainer\.innerHTML = "";/);
     // No decision wiring inside the branch — display only.

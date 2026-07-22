@@ -56,7 +56,10 @@ function resolveWorkBuddySettingsPath(options = {}) {
   if (fsImpl.existsSync(current.settingsPath) || fsImpl.existsSync(current.parentDir)) {
     return current.settingsPath;
   }
-  if (fsImpl.existsSync(legacy.settingsPath) || fsImpl.existsSync(legacy.parentDir)) {
+  // A bare ~/.workbuddy directory may contain only WorkBuddy's toolchain
+  // binaries. Preserve genuine legacy installs only when their settings file
+  // already exists; never create a dead config from directory presence alone.
+  if (fsImpl.existsSync(legacy.settingsPath)) {
     return legacy.settingsPath;
   }
   return current.settingsPath;
@@ -201,13 +204,14 @@ function registerWorkBuddyHooks(options = {}) {
   // migrate marker-scoped Clawd hooks away from the inactive generation. This
   // preserves foreign hooks and prevents Settings from leaving a temporary
   // checkout reference in ~/.workbuddy after installing the live hooks into
-  // ~/.workbuddy-ai. An unreadable inactive config still fails closed instead
-  // of silently leaving executable stale commands behind. Invalid JSON is the
-  // one safe exception: WorkBuddy cannot execute hooks from an unparseable file,
-  // so record the skipped path without poisoning an already-successful install.
+  // ~/.workbuddy-ai. Once the active write succeeds, inactive cleanup errors
+  // are warnings: throwing here would leave live hooks on disk while Settings
+  // records the integration as uninstalled. A later sync/uninstall can retry
+  // the stale marker cleanup without creating that disk/prefs split.
   let migratedRemoved = 0;
   let migrationBackupPaths = [];
   const migrationSkippedPaths = [];
+  const migrationFailedPaths = [];
   if (!options.settingsPath) {
     const inactivePaths = workBuddySettingsCandidates(options)
       .map((candidate) => candidate.settingsPath)
@@ -223,10 +227,16 @@ function registerWorkBuddyHooks(options = {}) {
         migratedRemoved += migration.removed || 0;
         migrationBackupPaths.push(...(migration.backupPaths || []));
       } catch (err) {
-        if (!err || err.code !== "INVALID_JSON") throw err;
-        migrationSkippedPaths.push(inactivePath);
-        if (!options.silent) {
-          console.warn(`Clawd: skipped invalid inactive WorkBuddy config ${inactivePath}`);
+        if (err && err.code === "INVALID_JSON") {
+          migrationSkippedPaths.push(inactivePath);
+          if (!options.silent) console.warn(`Clawd: skipped invalid inactive WorkBuddy config ${inactivePath}`);
+        } else {
+          migrationFailedPaths.push({
+            settingsPath: inactivePath,
+            code: err && err.code ? err.code : "UNKNOWN",
+            message: err && err.message ? err.message : String(err),
+          });
+          if (!options.silent) console.warn(`Clawd: could not clean inactive WorkBuddy config ${inactivePath}`);
         }
       }
     }
@@ -245,6 +255,10 @@ function registerWorkBuddyHooks(options = {}) {
     migratedRemoved,
     migrationBackupPaths,
     migrationSkippedPaths,
+    migrationFailedPaths,
+    warnings: migrationFailedPaths.map((failure) =>
+      `Could not clean inactive WorkBuddy config ${failure.settingsPath}: ${failure.message}`
+    ),
   };
 }
 

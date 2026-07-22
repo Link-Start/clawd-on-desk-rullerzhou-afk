@@ -674,18 +674,18 @@ function createElicitationQuestionCard(question, questionIndex) {
   return questionCard;
 }
 
-function renderElicitationTerminalFallback() {
+function renderElicitationTerminalFallback(data) {
   const btn = document.createElement("button");
   btn.className = "btn-suggestion";
   btn.textContent = bubbleText(currentLang, "goToTerminal");
   btn.addEventListener("click", () => {
     btn.textContent = "...";
     disableAll();
-    // Use plain "deny" — permission.js's elicitation branch already calls
-    // focusTerminalForSession after sending the Elicitation deny response.
-    // "deny-and-focus" hides the bubble without writing to perm.res, which
-    // would leave the blocking Elicitation HTTP hook open.
-    window.bubbleAPI.decide("deny");
+    // Claude elicitation requires an explicit deny response to hand control
+    // back to its terminal prompt. Hermes clarify instead treats deny as
+    // cancellation; deny-and-focus is normalized to a bodyless no-decision,
+    // which lets Hermes open its native clarification UI.
+    window.bubbleAPI.decide(data && data.isHermes ? "deny-and-focus" : "deny");
   });
   suggestionsContainer.appendChild(btn);
 }
@@ -751,7 +751,7 @@ function renderElicitationForm(data) {
   elicitationForm.classList.add("visible");
   commandBlock.style.display = "none";
   suggestionsContainer.innerHTML = "";
-  renderElicitationTerminalFallback();
+  renderElicitationTerminalFallback(data);
   renderElicitationStep();
 }
 
@@ -1007,7 +1007,7 @@ function show(data) {
       commandBlock.textContent = (data.toolInput && data.toolInput.command) || bubbleText(data.lang, "checkKimiTerminal");
     }
     toolPill.style.display = "";
-    btnAllow.textContent = bubbleText(data.lang, "gotIt");
+    btnAllow.textContent = bubbleText(data.lang, "goToTerminal");
     btnAllow.disabled = false;
     btnDeny.style.display = "none";
     suggestionsContainer.innerHTML = "";
@@ -1091,9 +1091,9 @@ function show(data) {
         suggestionsContainer.appendChild(btn);
       });
     }
-    // Hermes cards get no terminal fallback: its protocol can't express
-    // "no decision, user answers in the terminal" — our 204 fails open
-    // (= allow) past the plugin's permission gate. See handleDecide/isHermes.
+    // Hermes permission cards get no terminal fallback: the protocol has no
+    // native approval prompt to hand back to, so no-decision becomes a
+    // retryable block. Hermes clarify uses the elicitation path above.
     if (!data.isHermes) renderRegularTerminalFallback(data.lang);
   }
   // Re-enable buttons

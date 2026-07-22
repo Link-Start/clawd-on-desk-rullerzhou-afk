@@ -363,16 +363,14 @@ function reportHasUnparseableCommand(report) {
 }
 
 /**
- * Stricter than hasNoAutomaticRepairWork(): whether an explicit Install/Fix
- * write actually left the config genuinely healthy, suitable for reporting
- * a user-facing "ok" instead of a blind trust of the installer's return
- * value. A `command-unparseable` command is never auto-repairable, so
- * hasNoAutomaticRepairWork() alone would call it clean even when a
- * Clawd-owned hook command is sitting there broken — that must not be
- * reported back to the user as a successful Install/Fix.
+ * Whether an explicit Install/Fix write actually left the config genuinely
+ * healthy, suitable for reporting a user-facing "ok" instead of blindly
+ * trusting the installer's return value. Any unhealthy report fails this
+ * stricter gate, including non-automatic issues such as a missing core event
+ * or an unparseable Clawd-owned command.
  */
 function isExplicitRepairVerified(report) {
-  return hasNoAutomaticRepairWork(report) && !reportHasUnparseableCommand(report);
+  return !!report && report.status === "healthy";
 }
 
 module.exports = {

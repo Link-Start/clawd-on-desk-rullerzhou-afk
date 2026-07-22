@@ -3,6 +3,7 @@
 const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 const test = require("node:test");
 
 const ROOT = path.join(__dirname, "..");
@@ -39,7 +40,27 @@ const VERIFIED_GITHUB_CONTRIBUTORS = [
   "royhuang91",
   "Schlaflied",
   "KaiC5504",
+  "jiaxuan1101",
+  "kkirito16",
+  "200780381",
+  "Dxy2326",
+  "lurui1997",
+  "JesmonX",
+  "chen86860",
 ];
+
+function loadSettingsContributors() {
+  const source = fs.readFileSync(path.join(ROOT, "src", "settings-i18n.js"), "utf8");
+  const context = {};
+  context.globalThis = context;
+  vm.runInNewContext(source, context, { filename: "settings-i18n.js" });
+  return Array.from(context.ClawdSettingsI18n.CONTRIBUTORS);
+}
+
+function extractContributorLogins(markdown, filename) {
+  const section = extractContributorSection(markdown, filename);
+  return [...section.matchAll(/href="https:\/\/github\.com\/([^"/]+)"/g)].map((match) => match[1]);
+}
 
 function extractContributorTable(markdown, filename) {
   const tables = [...markdown.matchAll(/<table>[\s\S]*?<\/table>/g)]
@@ -129,5 +150,17 @@ test("README contributor sections include verified GitHub contributors", () => {
         `${filename} should include ${login}`,
       );
     }
+  }
+});
+
+test("all README contributor lists exactly match Settings About", () => {
+  const expected = loadSettingsContributors();
+  assert.strictEqual(new Set(expected).size, expected.length, "Settings contributors should not contain duplicates");
+
+  for (const filename of ALL_READMES) {
+    const markdown = fs.readFileSync(path.join(ROOT, filename), "utf8");
+    const actual = extractContributorLogins(markdown, filename);
+    assert.strictEqual(new Set(actual).size, actual.length, `${filename} should not contain duplicate contributors`);
+    assert.deepStrictEqual(actual.slice().sort(), expected.slice().sort(), `${filename} contributors should match Settings About`);
   }
 });

@@ -1246,7 +1246,7 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [entry]);
   });
 
-  it("recovers via 204 when the Hermes bubble fails to construct", async () => {
+  it("returns 204 so the Hermes plugin blocks and asks the user to retry when the bubble fails", async () => {
     const res = await callPermissionPost(JSON.stringify({
       agent_id: "hermes",
       session_id: "hermes:s1",
@@ -1340,6 +1340,28 @@ describe("server-route-permission POST — CC subagent requests (#451)", () => {
     assert.strictEqual(entry.subagentId, null);
     assert.strictEqual(entry.subagentType, null);
   });
+
+  for (const [label, toolName, toolInput] of [
+    ["permission", "Bash", { command: "npm test" }],
+    ["elicitation", "AskUserQuestion", { questions: [{ question: "Continue?" }] }],
+  ]) {
+    it(`records a disconnected Claude ${label} as no-decision, not a user denial`, async () => {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: "claude-code",
+        session_id: "sid-disconnect",
+        tool_name: toolName,
+        tool_input: toolInput,
+      }));
+
+      assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+      const entry = res.ctx.pendingPermissions[0];
+      res.emit("close");
+      assert.strictEqual(res.ctx.calls.resolved.length, 1);
+      assert.strictEqual(res.ctx.calls.resolved[0].entry, entry);
+      assert.strictEqual(res.ctx.calls.resolved[0].behavior, "no-decision");
+      assert.strictEqual(res.ctx.calls.resolved[0].message, "Client disconnected");
+    });
+  }
 
   it("destroys the connection when the subagent sub-gate is off", async () => {
     const res = await callPermissionPost(subagentBody(), {

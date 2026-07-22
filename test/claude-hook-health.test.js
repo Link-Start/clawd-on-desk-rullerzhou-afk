@@ -404,6 +404,12 @@ describe("hasNoAutomaticRepairWork / isExplicitRepairVerified", () => {
     return inspectClaudeHookHealth(raw, baseOptions());
   }
 
+  function missingCoreEventOnlyReport() {
+    const settings = buildHealthySettings();
+    delete settings.hooks.Stop;
+    return inspectClaudeHookHealth(JSON.stringify(settings), baseOptions());
+  }
+
   it("both agree a genuinely healthy report is verified", () => {
     const report = healthyReport();
     assert.strictEqual(hasNoAutomaticRepairWork(report), true);
@@ -427,6 +433,14 @@ describe("hasNoAutomaticRepairWork / isExplicitRepairVerified", () => {
       false,
       "an explicit Install/Fix must not report success while a Clawd-owned command is unparseable"
     );
+  });
+
+  it("a missing-core-event-only report cannot pass explicit post-write verification", () => {
+    const report = missingCoreEventOnlyReport();
+    assert.strictEqual(report.status, "unhealthy");
+    assert.ok(report.issues.some((issue) => issue.code === "missing-core-event"));
+    assert.strictEqual(hasNoAutomaticRepairWork(report), true);
+    assert.strictEqual(isExplicitRepairVerified(report), false);
   });
 
   it("neither helper treats a report with real automatic repair work remaining as verified", () => {

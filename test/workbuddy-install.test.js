@@ -77,6 +77,18 @@ describe("WorkBuddy hook installer", () => {
     assert.strictEqual(resolveWorkBuddySettingsPath({ homeDir }), legacy.settingsPath);
   });
 
+  it("does not mistake a bare legacy toolchain directory for active WorkBuddy config", () => {
+    const homeDir = makeTempHome();
+    const [current, legacy] = workBuddySettingsCandidates({ homeDir });
+    fs.mkdirSync(legacy.parentDir, { recursive: true });
+
+    assert.strictEqual(resolveWorkBuddySettingsPath({ homeDir }), current.settingsPath);
+    const result = registerWorkBuddyHooks({ homeDir, silent: true, nodeBin: "/usr/local/bin/node" });
+    assert.strictEqual(result.added, 0);
+    assert.strictEqual(fs.existsSync(legacy.settingsPath), false);
+    assert.strictEqual(fs.existsSync(current.settingsPath), false);
+  });
+
   it("installs into current settings and marker-scoped cleans stale legacy hooks", () => {
     const homeDir = makeTempHome();
     const [current, legacy] = workBuddySettingsCandidates({ homeDir });
@@ -141,7 +153,7 @@ describe("WorkBuddy hook installer", () => {
     assert.strictEqual(fs.readFileSync(current.settingsPath, "utf8"), "{ invalid active json");
   });
 
-  it("still fails closed when an inactive config cannot be read for reasons other than invalid JSON", () => {
+  it("keeps the active install successful when inactive cleanup cannot read a stale config", () => {
     const homeDir = makeTempHome();
     const [current, legacy] = workBuddySettingsCandidates({ homeDir });
     writeSettings(current.settingsPath, {});
@@ -157,10 +169,16 @@ describe("WorkBuddy hook installer", () => {
     };
 
     try {
-      assert.throws(
-        () => registerWorkBuddyHooks({ homeDir, silent: true, nodeBin: "/usr/local/bin/node" }),
-        (err) => err && err.code === "EACCES" && err.settingsPath === legacy.settingsPath
-      );
+      const result = registerWorkBuddyHooks({ homeDir, silent: true, nodeBin: "/usr/local/bin/node" });
+      assert.strictEqual(result.added, WORKBUDDY_HOOK_EVENTS.length);
+      assert.deepStrictEqual(result.migrationFailedPaths, [{
+        settingsPath: legacy.settingsPath,
+        code: "EACCES",
+        message: "Failed to read settings.json: permission denied",
+      }]);
+      assert.strictEqual(result.warnings.length, 1);
+      assert.match(result.warnings[0], /Could not clean inactive WorkBuddy config/);
+      assert.ok(readJson(current.settingsPath).hooks.SessionStart[0].hooks[0].command.includes(MARKER));
     } finally {
       fs.readFileSync = realReadFileSync;
     }

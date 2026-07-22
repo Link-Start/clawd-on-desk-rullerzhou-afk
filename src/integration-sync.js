@@ -200,6 +200,7 @@ function createIntegrationSyncRuntime(options = {}) {
       if (hasPositiveCount(result.added) || hasPositiveCount(result.updated)) {
         console.log(`Clawd: synced WorkBuddy hooks (added ${result.added}, updated ${result.updated})`);
       }
+      for (const warning of result.warnings || []) console.warn(`Clawd: ${warning}`);
       return normalizeCountSyncResult(result, "WorkBuddy", "workbuddy-not-installed");
     } catch (err) {
       console.warn("Clawd: failed to sync WorkBuddy hooks:", err.message);

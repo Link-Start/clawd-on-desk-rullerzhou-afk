@@ -1051,6 +1051,26 @@ describe("checkAgentIntegrations", () => {
     assert.ok(seen.every((command) => command.includes(descriptor.marker)));
   });
 
+  it("does not treat a bare legacy WorkBuddy toolchain directory as active config", () => {
+    const root = makeTempDir();
+    const currentDir = path.join(root, ".workbuddy-ai");
+    const legacyDir = path.join(root, ".workbuddy");
+    const descriptor = {
+      ...workBuddyDescriptor(),
+      parentDir: currentDir,
+      configPath: path.join(currentDir, "settings.json"),
+      configTargets: [
+        { label: "workbuddy-ai", parentDir: currentDir, configPath: path.join(currentDir, "settings.json") },
+        { label: "legacy", parentDir: legacyDir, configPath: path.join(legacyDir, "settings.json") },
+      ],
+    };
+    fs.mkdirSync(legacyDir, { recursive: true });
+
+    const detail = runOne(descriptor);
+    assert.strictEqual(detail.status, "not-installed");
+    assert.strictEqual(detail.parentDirExists, false);
+  });
+
   it("offers WorkBuddy repair when one required hook event is missing", () => {
     const descriptor = workBuddyDescriptor();
     const hooks = nestedHooksConfig(descriptor.hookEvents, descriptor.marker);

@@ -52,7 +52,7 @@ Minimum payload:
 }
 ```
 
-The four fields should be strings. `agent_id` must exactly match a currently registered custom agent. Use a stable `session_id` for one conversation or task so subsequent events update the same Dashboard session.
+The four fields should be strings. `agent_id` must exactly match a currently registered custom agent. Use a stable `session_id` for one conversation or task so subsequent events update the same Dashboard session. Clawd namespaces this value internally with the registered `agent_id`, so separate custom applications may safely reuse values such as `default` or `project-a`.
 
 Common state/event pairs are:
 

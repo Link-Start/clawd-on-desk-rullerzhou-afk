@@ -319,6 +319,13 @@ function hasPermissionAnimationLock() {
   return kimiPermissionHolds.size > 0;
 }
 
+function hasConfirmedPermissionAnimationLock() {
+  // Native PermissionRequest is authoritative and may pin other one-shot
+  // visuals. The legacy timing heuristic is only a passive cue: a slow but
+  // pre-authorized Kimi tool must not swallow another agent's Stop/error.
+  return [...kimiPermissionHolds.values()].some((hold) => hold && hold.source === "confirmed");
+}
+
 function resolveAwaitingInputSinceStop(existing, event) {
   if (POST_COMPLETION_EVENTS.has(event)) return true;
   if (!event || COMPLETION_HOUSEKEEPING_EVENTS.has(event)) return !!(existing && existing.awaitingInputSinceStop === true);
@@ -1326,7 +1333,7 @@ function promoteCompletion(sessionId) {
   session.displayHint = null;
   session.awaitingInputSinceStop = true;
   emitSessionSnapshot({ force: true });
-  if (hasPermissionAnimationLock()) {
+  if (hasConfirmedPermissionAnimationLock()) {
     const display = resolveDisplayState();
     setState(display, getSvgOverride(display));
     return;
@@ -1829,14 +1836,17 @@ function updateSession(sessionId, state, event, opts = {}) {
     }
   }
 
-  // A brand-new PreToolUse for the same Kimi session starts a fresh approval
-  // gate. Drop any leftover hold/suspect from the previous round so the new
-  // suspect heuristic decides cleanly (and the animation doesn't carry over
-  // from the prior tool). Cue-level only: the ledger is per-tool-call
-  // bookkeeping and an incoming gated Pre opens its own entry below.
+  // A brand-new PreToolUse normally starts a fresh approval gate. Preserve an
+  // existing cue, however, when the legacy hook batches a gated Pre followed
+  // by a non-gated Pre: the first tool is still blocked in the terminal and
+  // its ledger/timer remains authoritative until its matching Post arrives.
   if (event === "PreToolUse" && srcAgentId === "kimi-cli") {
-    if (kimiPermissionHolds.has(sessionId)) stopKimiPermissionPoll(sessionId);
-    else cancelPermissionSuspect(sessionId);
+    const pendingGates = kimiPermissionGateLedgers.get(sessionId);
+    const preservePendingGateCue = permissionGateOpen !== true && pendingGates && pendingGates.length > 0;
+    if (!preservePendingGateCue) {
+      if (kimiPermissionHolds.has(sessionId)) stopKimiPermissionPoll(sessionId);
+      else cancelPermissionSuspect(sessionId);
+    }
   }
 
   // Kimi permission heuristic: hook reports permission_suspect=true on
@@ -1873,7 +1883,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     // Permission animation lock: while any permission request is pending,
     // keep the pet on notification and block all other one-shot visuals.
     // (One-shot branch normally bypasses resolveDisplayState()).
-    if (hasPermissionAnimationLock() && state !== "notification") {
+    if (hasConfirmedPermissionAnimationLock() && state !== "notification") {
       return;
     }
     // Mini mode already celebrated completion with mini-happy. Keep the idle
@@ -2177,7 +2187,7 @@ function stopStaleCleanup() {
   if (staleCleanupTimer) { clearInterval(staleCleanupTimer); staleCleanupTimer = null; }
 }
 
-function startKimiPermissionPoll(sessionId, permissionDetail = null) {
+function startKimiPermissionPoll(sessionId, permissionDetail = null, source = "confirmed") {
   if (!sessionId) return;
   // DND / agent permissions-off both suppress the passive bubble at creation
   // time (see shouldSuppressKimiNotifyBubble in permission.js). Skipping the
@@ -2209,6 +2219,7 @@ function startKimiPermissionPoll(sessionId, permissionDetail = null) {
   kimiPermissionHolds.set(sessionId, {
     timer,
     until: maxMs > 0 ? Date.now() + maxMs : null,
+    source: source === "heuristic" ? "heuristic" : "confirmed",
   });
   // Refreshing the hold must still forward fresh detail: with the rich cue,
   // showing request #1's command while the terminal blocks on request #2
@@ -2264,7 +2275,7 @@ function schedulePermissionSuspect(sessionId, permissionDetail = null) {
     // permissionDetail (queue head of the gate ledger, or null for a plain
     // legacy suspect) makes the promoted cue name the tool that actually
     // blocks the terminal; null degrades to the generic copy.
-    startKimiPermissionPoll(sessionId, permissionDetail);
+    startKimiPermissionPoll(sessionId, permissionDetail, "heuristic");
     setState("notification");
   }, delay);
   kimiPermissionSuspectTimers.set(sessionId, { timer, scheduledAt: Date.now() });

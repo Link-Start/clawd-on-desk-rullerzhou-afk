@@ -1909,7 +1909,12 @@ function checkAgent(descriptor, options) {
   // Multi-generation agents (#563: kimi legacy + kimi-code) declare ordered
   // configTargets; the first whose directory exists is the one doctor judges.
   const activeTarget = Array.isArray(descriptor.configTargets)
-    ? descriptor.configTargets.find((target) => dirExists(options.fs, target.parentDir))
+    ? descriptor.configTargets.find((target) => {
+      if (descriptor.agentId === "workbuddy" && target.label === "legacy") {
+        return fileExists(options.fs, target.configPath);
+      }
+      return dirExists(options.fs, target.parentDir);
+    })
     : null;
   const effectiveDescriptor = activeTarget
     ? { ...descriptor, parentDir: activeTarget.parentDir, configPath: activeTarget.configPath }

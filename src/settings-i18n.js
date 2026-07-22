@@ -3777,6 +3777,7 @@
     "sLingli", "ustin-star", "cod3hulk", "lxgxhsy", "rebootcrab-blip",
     "zhaoxv210", "serenNan", "IatomicreactorI", "quantai1314", "Git-creat7", "undownding", "chrono-meta",
     "Yike-Ye", "xiaoshidefeng", "yanguibao1997", "JasonZH6600", "V1staz", "royhuang91", "Schlaflied", "KaiC5504",
+    "jiaxuan1101", "kkirito16", "200780381", "Dxy2326", "lurui1997", "JesmonX", "chen86860",
   ];
 
   root.ClawdSettingsI18n = {

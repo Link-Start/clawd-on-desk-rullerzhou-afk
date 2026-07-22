@@ -42,6 +42,33 @@ function existingFileStat(fsModule, filePath) {
   }
 }
 
+function parseSemverTriplet(value) {
+  const match = String(value || "").trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+  return match ? match.slice(1).map(Number) : null;
+}
+
+function compareSemverTriplets(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] < right[index] ? -1 : 1;
+  }
+  return 0;
+}
+
+function electronVersionSatisfiesSpec(version, spec) {
+  const actual = parseSemverTriplet(version);
+  const rawSpec = String(spec || "").trim();
+  if (!actual || !rawSpec) return false;
+  const operator = rawSpec[0] === "^" || rawSpec[0] === "~" ? rawSpec[0] : "";
+  const base = parseSemverTriplet(operator ? rawSpec.slice(1) : rawSpec.replace(/^=/, ""));
+  if (!base) return false;
+  if (!operator) return compareSemverTriplets(actual, base) === 0;
+  if (compareSemverTriplets(actual, base) < 0) return false;
+  if (operator === "~") return actual[0] === base[0] && actual[1] === base[1];
+  if (base[0] > 0) return actual[0] === base[0];
+  if (base[1] > 0) return actual[0] === 0 && actual[1] === base[1];
+  return actual[0] === 0 && actual[1] === 0 && actual[2] === base[2];
+}
+
 function postinstallSkipReason(options) {
   if (options.context !== "postinstall") return "";
   if (options.env.ELECTRON_SKIP_BINARY_DOWNLOAD) return "electron-download-skipped";
@@ -55,6 +82,7 @@ function verifyElectronInstall(options = {}) {
   const pathModule = options.path || path;
   const env = options.env || process.env;
   const platform = options.platform || process.platform;
+  const hostPlatform = options.hostPlatform || process.platform;
   const arch = options.arch || process.arch;
   const rootDir = options.rootDir || pathModule.join(__dirname, "..");
   const packageRoot = options.packageRoot || pathModule.join(rootDir, "node_modules", "electron");
@@ -80,6 +108,7 @@ function verifyElectronInstall(options = {}) {
   const invalid = [];
   const platformPath = expectedPlatformPath(platform);
   const packageJsonPath = pathModule.join(packageRoot, "package.json");
+  const projectPackageJsonPath = pathModule.join(rootDir, "package.json");
   let electronVersion = "unknown";
 
   if (!platformPath) {
@@ -101,6 +130,24 @@ function verifyElectronInstall(options = {}) {
     } catch (error) {
       invalid.push({
         path: packageJsonPath,
+        reason: `invalid JSON: ${error && error.message ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  if (electronVersion !== "unknown" && existingFileStat(fsModule, projectPackageJsonPath)) {
+    try {
+      const projectPackage = JSON.parse(fsModule.readFileSync(projectPackageJsonPath, "utf8"));
+      const declaredSpec = projectPackage.devDependencies && projectPackage.devDependencies.electron;
+      if (typeof declaredSpec !== "string" || !electronVersionSatisfiesSpec(electronVersion, declaredSpec)) {
+        invalid.push({
+          path: projectPackageJsonPath,
+          reason: `installed Electron ${electronVersion} does not satisfy declared range ${JSON.stringify(declaredSpec)}`,
+        });
+      }
+    } catch (error) {
+      invalid.push({
+        path: projectPackageJsonPath,
         reason: `invalid JSON: ${error && error.message ? error.message : String(error)}`,
       });
     }
@@ -131,15 +178,29 @@ function verifyElectronInstall(options = {}) {
       ? pathModule.resolve(env.ELECTRON_OVERRIDE_DIST_PATH)
       : pathModule.join(packageRoot, "dist");
     const executablePath = pathModule.join(distRoot, platformPath);
+    const versionPath = pathModule.join(distRoot, "version");
     const executableStat = existingFileStat(fsModule, executablePath);
     if (!executableStat) {
       missing.push(executablePath);
     } else if (
       platform !== "win32" &&
+      hostPlatform !== "win32" &&
       Number.isInteger(executableStat.mode) &&
       (executableStat.mode & 0o111) === 0
     ) {
       invalid.push({ path: executablePath, reason: "executable mode is missing" });
+    }
+
+    if (!existingFileStat(fsModule, versionPath)) {
+      missing.push(versionPath);
+    } else {
+      const distVersion = fsModule.readFileSync(versionPath, "utf8").trim().replace(/^v/, "");
+      if (electronVersion !== "unknown" && distVersion !== electronVersion) {
+        invalid.push({
+          path: versionPath,
+          reason: `expected Electron ${electronVersion}, got ${JSON.stringify(distVersion)}`,
+        });
+      }
     }
 
     if (platform === "darwin") {
@@ -147,7 +208,6 @@ function verifyElectronInstall(options = {}) {
       const frameworksRoot = pathModule.join(contentsRoot, "Frameworks");
       const frameworkRoot = pathModule.join(frameworksRoot, "Electron Framework.framework");
       const frameworkBinary = pathModule.join(frameworkRoot, "Versions", "A", "Electron Framework");
-      const versionPath = pathModule.join(distRoot, "version");
 
       for (const directoryPath of [frameworksRoot, frameworkRoot]) {
         if (!isExistingDirectory(fsModule, directoryPath)) missing.push(directoryPath);
@@ -158,17 +218,6 @@ function verifyElectronInstall(options = {}) {
         if (!isExistingDirectory(fsModule, helperPath)) missing.push(helperPath);
       }
 
-      if (!existingFileStat(fsModule, versionPath)) {
-        missing.push(versionPath);
-      } else {
-        const distVersion = fsModule.readFileSync(versionPath, "utf8").replace(/^v/, "");
-        if (electronVersion !== "unknown" && distVersion !== electronVersion) {
-          invalid.push({
-            path: versionPath,
-            reason: `expected Electron ${electronVersion}, got ${JSON.stringify(distVersion)}`,
-          });
-        }
-      }
     }
 
     return {
@@ -289,6 +338,7 @@ module.exports = {
   expectedPlatformPath,
   isExistingDirectory,
   existingFileStat,
+  electronVersionSatisfiesSpec,
   postinstallSkipReason,
   verifyElectronInstall,
   formatElectronInstallFailure,

@@ -314,6 +314,27 @@ describe("Kimi permission suspect heuristic", () => {
     assert.strictEqual(api.resolveDisplayState(), "notification");
   });
 
+  it("does not let a heuristic Kimi hold swallow another agent's one-shot", () => {
+    api.updateSession("kimi-a", "working", "PreToolUse", {
+      agentId: "kimi-cli",
+      permissionSuspect: true,
+    });
+    mock.timers.tick(1000);
+    assert.strictEqual(api.getCurrentState(), "notification");
+
+    api.updateSession("claude-a", "attention", "Stop", { agentId: "claude-code" });
+    // The current notification finishes its minimum display interval, then
+    // the external one-shot plays instead of being dropped.
+    mock.timers.tick(5000);
+    assert.strictEqual(api.getCurrentState(), "attention");
+
+    // Once the one-shot finishes, the still-pending Kimi cue becomes visible
+    // again instead of being lost permanently.
+    mock.timers.tick(5000);
+    assert.strictEqual(api.getCurrentState(), "notification");
+    assert.strictEqual(api.resolveDisplayState(), "notification");
+  });
+
   it("PostToolUseFailure also cancels suspect (error path is treated as auto-approved)", () => {
     api.updateSession("kimi-a", "working", "PreToolUse", {
       agentId: "kimi-cli",
@@ -455,6 +476,19 @@ describe("Kimi permission gate ledger (batched approvals)", () => {
     mock.timers.tick(5000);
     assert.strictEqual(ctx._kimiNotifyShown.length, 1);
     assert.strictEqual(api.resolveDisplayState(), "working");
+  });
+
+  it("preserves the first gated cue when a later batched Pre is non-gated", () => {
+    gatedPre("kimi-a", "t1", { toolName: "shell", permissionToolInput: { command: "Remove-Item a.txt" } });
+    api.updateSession("kimi-a", "working", "PreToolUse", {
+      agentId: "kimi-cli",
+      toolName: "read_file",
+    });
+
+    mock.timers.tick(1000);
+    assert.strictEqual(api.resolveDisplayState(), "notification");
+    assert.strictEqual(ctx._kimiNotifyShown.length, 1);
+    assert.strictEqual(ctx._kimiNotifyDetails[0].toolName, "shell");
   });
 
   it("auto-approved chain never flashes: consecutive gated Posts inside the window cancel the re-arm", () => {

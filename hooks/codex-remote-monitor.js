@@ -400,12 +400,17 @@ function recoverStalePendingUserInputEntry(filePath, fileName, options = {}) {
 
   const tailLen = Math.min(stat.size, RECOVERY_TAIL_SCAN_BYTES);
   const tailStart = stat.size - tailLen;
+  // A non-zero tailStart can still be an exact record boundary. Inspect the
+  // preceding byte before deciding whether the first scanned line is only a
+  // fragment; otherwise a request starting exactly 1 MiB from EOF is lost.
+  const tailStartsOnRecordBoundary = tailStart === 0
+    || readByteRange(filePath, tailStart - 1, 1).text === "\n";
   const { text: tailText, bytesRead: tailBytesRead } = readByteRange(filePath, tailStart, tailLen);
   const rawLines = tailText.split("\n");
-  // The window can start mid-line when tailStart > 0 — drop that first
-  // fragment rather than risk a false JSON.parse failure silently masking a
-  // genuine question.
-  if (tailStart > 0) rawLines.shift();
+  // Drop the first fragment only when the preceding byte proves the window
+  // really started mid-line. At an exact newline boundary, the first line is
+  // a complete record and must be retained.
+  if (!tailStartsOnRecordBoundary) rawLines.shift();
   // The window always ends at true EOF, so a non-empty last element is a
   // genuinely incomplete final line — preserve it the same way pollFile's
   // own `entry.partial` does, instead of consuming those bytes unparsed.
@@ -599,7 +604,10 @@ function runRecoverySweep(candidates, options = {}) {
   let bytesScanned = 0;
   for (const candidate of candidates) {
     if (filesScanned >= RECOVERY_SWEEP_MAX_FILES) break;
-    const candidateCost = Math.min(candidate.size, RECOVERY_HEAD_LINE_MAX_BYTES + RECOVERY_TAIL_SCAN_BYTES);
+    const candidateCost = Math.min(
+      candidate.size,
+      RECOVERY_HEAD_LINE_MAX_BYTES + RECOVERY_TAIL_SCAN_BYTES + 1
+    );
     // Check BEFORE adding — accumulating post-hoc lets exactly one
     // over-budget candidate slip through every time the running total lands
     // just under the cap (#707 follow-up review round 4).

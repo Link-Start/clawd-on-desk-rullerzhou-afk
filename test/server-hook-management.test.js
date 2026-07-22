@@ -144,6 +144,9 @@ function makeServer(overrides = {}) {
   const ctx = createGuardedIntegrationCtx({
     manageClaudeHooksAutomatically: true,
     autoStartWithClaude: false,
+    // The compact default fixture above intentionally represents one declared
+    // core event. Tests that exercise broader coverage override this list.
+    coreEvents: ["Stop"],
     createHttpServer: httpFactory.createHttpServer,
     setImmediate: (fn) => fn(),
     setTimeout: timers.setTimeout,
@@ -684,6 +687,25 @@ describe("server Claude hook operation queue (default, non-injected implementati
         result.verifyIssues.some((issue) => issue.code === "command-unparseable"),
         JSON.stringify(result.verifyIssues)
       );
+    });
+  });
+
+  it("syncClawdHooks reports failure when a non-repairable declared core event remains missing", async () => {
+    await withPatchedInstallModule({
+      registerHooksAsync: async () => ({ added: 0, updated: 0, removed: 0 }),
+    }, async () => {
+      const { api } = makeServer({
+        syncClawdHooksImpl: undefined,
+        coreEvents: ["Stop", "PreToolUse"],
+      });
+
+      const result = await api.syncClawdHooks({ source: "doctor", automatic: false });
+
+      assert.strictEqual(result.status, "error");
+      assert.match(result.message, /did not verify healthy/);
+      assert.ok(result.verifyIssues.some((issue) => (
+        issue.code === "missing-core-event" && issue.event === "PreToolUse"
+      )));
     });
   });
 

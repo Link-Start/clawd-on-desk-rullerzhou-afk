@@ -521,7 +521,7 @@ describe("Codex permission response sanitizer", () => {
     assert.strictEqual(api.pendingPermissions.length, 0);
   });
 
-  it("cleans up Qwen permissions as no-decision when Clawd quits", () => {
+  it("cleans up Qwen and Claude permissions without deciding when Clawd quits", () => {
     const { api } = createCodexDecisionHarness();
     const qwenRes = createFakeRes();
     const claudeRes = createFakeRes();
@@ -549,7 +549,8 @@ describe("Codex permission response sanitizer", () => {
 
     assert.strictEqual(qwenRes.statusCode, 204);
     assert.strictEqual(qwenRes.body, "");
-    assert.match(claudeRes.body, /deny/);
+    assert.strictEqual(claudeRes.destroyed, true);
+    assert.strictEqual(claudeRes.body, "");
     assert.strictEqual(api.pendingPermissions.length, 0);
   });
 });

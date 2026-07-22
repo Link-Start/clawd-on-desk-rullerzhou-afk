@@ -21,6 +21,20 @@ function makeTransaction(overrides = {}) {
 }
 
 describe("macOS stationary Space de-delegation transaction", () => {
+  it("keeps optional de-delegation symbols separate from the base stationary API", () => {
+    const calls = [];
+    const lib = {
+      func(name) {
+        calls.push(name);
+        if (name === "SLSGetActiveSpace") throw new Error("symbol unavailable");
+        return () => {};
+      },
+    };
+
+    assert.strictEqual(__test.resolveSkyLightDeDelegateApi(lib), null);
+    assert.deepStrictEqual(calls, ["SLSRemoveWindowsFromSpaces", "SLSGetActiveSpace"]);
+  });
+
   it("does not mutate Space membership or level without a valid active Space", () => {
     const { calls, transaction } = makeTransaction({ activeSpace: 0 });
 
