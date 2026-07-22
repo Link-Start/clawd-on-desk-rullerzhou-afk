@@ -6,6 +6,7 @@ const assert = require("node:assert");
 const {
   createForegroundFullscreenProbe,
   rectCoversMonitor,
+  isDesktopShellWindowClass,
   FULLSCREEN_TOLERANCE_PX,
 } = require("../src/win-fullscreen-detect");
 
@@ -33,6 +34,14 @@ function fakeKoffi(behavior) {
             return (_h, infoOut) => {
               if (behavior.monitorRect) infoOut.rcMonitor = behavior.monitorRect;
               return behavior.getMonitorInfo !== false;
+            };
+          }
+          if (signature.includes("GetClassNameW")) {
+            return (_hwnd, bufOut, _maxLen) => {
+              const name = behavior.className === undefined ? "FakeApp" : behavior.className;
+              if (name === null) return 0;
+              for (let i = 0; i < name.length; i++) bufOut[i] = name.charCodeAt(i);
+              return name.length;
             };
           }
           throw new Error(`unexpected func: ${signature}`);
@@ -73,6 +82,24 @@ describe("rectCoversMonitor", () => {
   it("returns false for missing rects", () => {
     assert.strictEqual(rectCoversMonitor(null, MONITOR), false);
     assert.strictEqual(rectCoversMonitor(FULLSCREEN_RECT, null), false);
+  });
+});
+
+describe("isDesktopShellWindowClass", () => {
+  it("matches the desktop shell window classes", () => {
+    assert.strictEqual(isDesktopShellWindowClass("Progman"), true);
+    assert.strictEqual(isDesktopShellWindowClass("WorkerW"), true);
+  });
+
+  it("compares case-insensitively (Win32 class names are case-insensitive)", () => {
+    assert.strictEqual(isDesktopShellWindowClass("progman"), true);
+    assert.strictEqual(isDesktopShellWindowClass("WORKERW"), true);
+  });
+
+  it("rejects normal app classes and empty input", () => {
+    assert.strictEqual(isDesktopShellWindowClass("Chrome_WidgetWin_1"), false);
+    assert.strictEqual(isDesktopShellWindowClass(""), false);
+    assert.strictEqual(isDesktopShellWindowClass(null), false);
   });
 });
 
@@ -124,5 +151,52 @@ describe("createForegroundFullscreenProbe", () => {
       koffi: fakeKoffi({ hwnd: {}, getWindowRect: false }),
     });
     assert.strictEqual(probe(), false);
+  });
+
+  // #719: clicking the desktop makes the shell window (Progman, or a WorkerW
+  // when a wallpaper host re-parents the icon view) the foreground window, and
+  // its rect covers the whole monitor — geometry alone says "fullscreen app".
+  it("does not treat the desktop shell (Progman) as a fullscreen app", () => {
+    const probe = createForegroundFullscreenProbe({
+      isWin: true,
+      koffi: fakeKoffi({
+        hwnd: {}, hMonitor: {}, winRect: FULLSCREEN_RECT, monitorRect: MONITOR,
+        className: "Progman",
+      }),
+    });
+    assert.strictEqual(probe(), false);
+  });
+
+  it("does not treat a monitor-covering WorkerW as a fullscreen app", () => {
+    const probe = createForegroundFullscreenProbe({
+      isWin: true,
+      koffi: fakeKoffi({
+        hwnd: {}, hMonitor: {}, winRect: FULLSCREEN_RECT, monitorRect: MONITOR,
+        className: "WorkerW",
+      }),
+    });
+    assert.strictEqual(probe(), false);
+  });
+
+  it("still reports fullscreen for a normal app class covering the monitor", () => {
+    const probe = createForegroundFullscreenProbe({
+      isWin: true,
+      koffi: fakeKoffi({
+        hwnd: {}, hMonitor: {}, winRect: FULLSCREEN_RECT, monitorRect: MONITOR,
+        className: "Chrome_WidgetWin_1",
+      }),
+    });
+    assert.strictEqual(probe(), true);
+  });
+
+  it("falls back to geometry when GetClassNameW fails", () => {
+    const probe = createForegroundFullscreenProbe({
+      isWin: true,
+      koffi: fakeKoffi({
+        hwnd: {}, hMonitor: {}, winRect: FULLSCREEN_RECT, monitorRect: MONITOR,
+        className: null,
+      }),
+    });
+    assert.strictEqual(probe(), true);
   });
 });
