@@ -17,6 +17,7 @@
     "sessionHudShowElapsed",
     "sessionHudShowContextUsage",
     "sessionHudShowQuota",
+    "claudeQuotaCollectionEnabled",
     "quotaMergeSources",
     "sessionHudCleanupDetached",
     "allowEdgePinning",
@@ -457,6 +458,11 @@
       labelKey: "rowQuotaMergeSources",
       descKey: "rowQuotaMergeSourcesDesc",
     });
+    const claudeCollectionRow = helpers.buildSwitchRow({
+      key: "claudeQuotaCollectionEnabled",
+      labelKey: "rowClaudeQuotaCollection",
+      descKey: "rowClaudeQuotaCollectionDesc",
+    });
     // "Merge across machines" only matters with more than one reporting source
     // (WSL / SSH remotes). Hidden by default so single-machine users never see
     // a confusing no-op switch; revealed once multiple sources are confirmed.
@@ -466,7 +472,11 @@
         .then((count) => { if (Number(count) > 1) mergeRow.style.display = ""; })
         .catch(() => {});
     }
-    const optionList = buildOptionList("quota-ring-option-list", [enabledRow, mergeRow]);
+    const optionList = buildOptionList("quota-ring-option-list", [
+      enabledRow,
+      claudeCollectionRow,
+      mergeRow,
+    ]);
     return helpers.buildCollapsibleGroup({
       id: "general:quota-ring",
       title: t("rowQuotaRingGroup"),

@@ -204,6 +204,16 @@ describe("settings-effect-router", () => {
     ]);
   });
 
+  it("re-syncs hidden HUD windows when low-power mode changes", () => {
+    const { calls, emit } = createHarness();
+    emit({ lowPowerIdleMode: true });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { lowPowerIdleMode: true }],
+      ["sendToRenderer", "low-power-idle-mode-change", true],
+      ["syncSessionHudVisibility"],
+    ]);
+  });
+
   it("routes language, session alias, and session HUD effects", () => {
     const { calls, emit } = createHarness();
 

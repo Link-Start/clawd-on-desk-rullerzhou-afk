@@ -395,7 +395,14 @@ module.exports = function initSessionHud(ctx) {
     }
     const coinCount = countQuotaCoins(snapshot, ctx.sessionHudShowQuota !== false);
     const ring = coinCount > 0
-      ? ringGeom.computeQuotaRingBounds({ hitRect, anchorRect, workArea, coinCount, scale })
+      ? ringGeom.computeQuotaRingBounds({
+        hitRect,
+        anchorRect,
+        workArea,
+        coinCount,
+        scale,
+        avoidRects: contentBounds ? [contentBounds] : [],
+      })
       : null;
     return { hitRect, contentBounds, ringContentBounds: ring && ring.contentBounds };
   }
@@ -528,6 +535,10 @@ module.exports = function initSessionHud(ctx) {
 
   // Public API: user clicked the pet to reveal HUD.
   function revealFromPet() {
+    // Quota can expire while both overlay windows are hidden and no session
+    // event arrives. Re-read before deciding eligibility so a stale cached
+    // snapshot cannot resurrect a dead Orbit coin.
+    latestSnapshot = getCurrentSnapshot();
     if (!baseEligible(latestSnapshot)) return;
     if (ctx.sessionHudPinned === true) return;     // pinned already always-show
     if (clickRevealed) {
@@ -683,7 +694,7 @@ module.exports = function initSessionHud(ctx) {
     }
   }
 
-  function computeRingBounds(snapshot, scale = getTextScale()) {
+  function computeRingBounds(snapshot, scale = getTextScale(), avoidRects = []) {
     if (!ctx.win || ctx.win.isDestroyed()) return null;
     const coinCount = countQuotaCoins(snapshot, ctx.sessionHudShowQuota !== false);
     if (coinCount <= 0) return null;
@@ -696,7 +707,14 @@ module.exports = function initSessionHud(ctx) {
     const workArea = typeof ctx.getNearestWorkArea === "function"
       ? ctx.getNearestWorkArea(cx, cy)
       : { x: 0, y: 0, width: 1280, height: 800 };
-    return ringGeom.computeQuotaRingBounds({ hitRect, anchorRect, workArea, coinCount, scale });
+    return ringGeom.computeQuotaRingBounds({
+      hitRect,
+      anchorRect,
+      workArea,
+      coinCount,
+      scale,
+      avoidRects,
+    });
   }
 
   function ensureSessionHud() {
@@ -844,7 +862,9 @@ module.exports = function initSessionHud(ctx) {
     }
 
     // ── Quota ring (quota only; attached beside the pet) ──
-    const ring = show ? computeRingBounds(snapshot, scale) : null;
+    const ring = show
+      ? computeRingBounds(snapshot, scale, hudComputed ? [hudComputed.contentBounds] : [])
+      : null;
     if (!ring) {
       hideQuotaRing();
     } else {

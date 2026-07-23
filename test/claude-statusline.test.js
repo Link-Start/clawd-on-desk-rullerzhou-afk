@@ -57,6 +57,29 @@ describe("Claude Code statusline adapter", () => {
     assert.strictEqual(buildStateBody({ session_id: "abc" }, null), null);
   });
 
+  it("stamps local WSL source fields and preserves an SSH host on remote WSL", () => {
+    const applyWsl = (body, options) => {
+      body.wsl_distro = "Ubuntu";
+      if (!options.remote) body.host = "wsl:Ubuntu";
+      return body;
+    };
+    const local = buildStateBody(
+      { session_id: "local" },
+      { claudeWeekly: { usedPercent: 1 } },
+      { applyWslSourceFields: applyWsl }
+    );
+    assert.strictEqual(local.host, "wsl:Ubuntu");
+    assert.strictEqual(local.wsl_distro, "Ubuntu");
+
+    const remote = buildStateBody(
+      { session_id: "remote" },
+      { claudeWeekly: { usedPercent: 2 } },
+      { remote: true, host: "lab", applyWslSourceFields: applyWsl }
+    );
+    assert.strictEqual(remote.host, "lab");
+    assert.strictEqual(remote.wsl_distro, "Ubuntu");
+  });
+
   it("main() posts state and always writes a stdout line", async () => {
     const writes = [];
     const posted = [];

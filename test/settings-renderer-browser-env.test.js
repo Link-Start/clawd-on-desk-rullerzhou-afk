@@ -4044,6 +4044,7 @@ describe("settings renderer browser environment", () => {
       snapshot: makeGeneralSnapshot({
         sessionHudEnabled: false,
         sessionHudShowQuota: true,
+        claudeQuotaCollectionEnabled: false,
         quotaMergeSources: false,
       }),
       settingsAPI: {
@@ -4054,12 +4055,14 @@ describe("settings renderer browser environment", () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     const ringEnabled = harness.getSwitch("sessionHudShowQuota");
+    const claudeCollection = harness.getSwitch("claudeQuotaCollectionEnabled");
     const mergeSources = harness.getSwitch("quotaMergeSources");
     const ringOptions = harness.content.querySelector(".quota-ring-option-list");
     const hudOptions = harness.content.querySelector(".session-hud-option-list");
     const summary = harness.core.state.mountedControls.sessionHudSummary.element;
 
     assert.ok(ringEnabled);
+    assert.ok(claudeCollection);
     assert.ok(mergeSources);
     assert.ok(ringOptions);
     assert.ok(hudOptions);

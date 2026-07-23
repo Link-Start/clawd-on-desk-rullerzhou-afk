@@ -60,6 +60,52 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(value, max));
 }
 
+function normalizeAvoidRect(rect) {
+  if (!rect || typeof rect !== "object") return null;
+  if (Number.isFinite(rect.x) && Number.isFinite(rect.y)
+    && Number.isFinite(rect.width) && Number.isFinite(rect.height)
+    && rect.width > 0 && rect.height > 0) {
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  }
+  if (isScreenRect(rect) && rect.right > rect.left && rect.bottom > rect.top) {
+    return {
+      x: rect.left,
+      y: rect.top,
+      width: rect.right - rect.left,
+      height: rect.bottom - rect.top,
+    };
+  }
+  return null;
+}
+
+function overlapArea(a, b, gap = 0) {
+  const left = Math.max(a.x, b.x - gap);
+  const top = Math.max(a.y, b.y - gap);
+  const right = Math.min(a.x + a.width, b.x + b.width + gap);
+  const bottom = Math.min(a.y + a.height, b.y + b.height + gap);
+  return Math.max(0, right - left) * Math.max(0, bottom - top);
+}
+
+function resolveAvoidingY({ initialY, minY, maxY, width, height, x, avoidRects, gap }) {
+  const avoids = (Array.isArray(avoidRects) ? avoidRects : [])
+    .map(normalizeAvoidRect)
+    .filter(Boolean);
+  if (!avoids.length) return initialY;
+
+  const candidates = new Set([initialY, minY, maxY]);
+  for (const rect of avoids) {
+    candidates.add(clamp(Math.round(rect.y - gap - height), minY, maxY));
+    candidates.add(clamp(Math.round(rect.y + rect.height + gap), minY, maxY));
+  }
+  const scored = Array.from(candidates).map((y) => {
+    const candidate = { x, y, width, height };
+    const overlap = avoids.reduce((sum, rect) => sum + overlapArea(candidate, rect, gap), 0);
+    return { y, overlap, distance: Math.abs(y - initialY) };
+  });
+  scored.sort((a, b) => a.overlap - b.overlap || a.distance - b.distance || a.y - b.y);
+  return scored[0].y;
+}
+
 // A provider draws a coin when its group carries at least one candidate bucket
 // as an object. Mirrors the renderer's draw rule exactly so the window is never
 // sized for a coin the renderer will not draw (or vice versa).
@@ -145,6 +191,8 @@ function computeQuotaRingBounds({
   coinCount,
   scale = 1,
   sidePreference,
+  avoidRects = [],
+  avoidGap,
 }) {
   // Attach to the pet's actual body (hit rect); fall back to the HUD anchor.
   const followRect = isScreenRect(hitRect) ? hitRect : anchorRect;
@@ -180,7 +228,17 @@ function computeQuotaRingBounds({
 
   const minY = Math.round(workArea.y + margin);
   const maxY = Math.round(workArea.y + workArea.height - margin - contentH);
-  const y = clamp(petCy - Math.round(contentH / 2), minY, maxY);
+  const initialY = clamp(petCy - Math.round(contentH / 2), minY, maxY);
+  const y = resolveAvoidingY({
+    initialY,
+    minY,
+    maxY,
+    x,
+    width: contentW,
+    height: contentH,
+    avoidRects,
+    gap: Number.isFinite(avoidGap) ? Math.max(0, avoidGap) : Math.round(6 * s),
+  });
 
   const contentBounds = { x, y, width: contentW, height: contentH };
   return {
@@ -206,6 +264,8 @@ module.exports = {
   resolveRingSide,
   computeQuotaRingBounds,
   providerHasDrawableQuota,
+  overlapArea,
+  resolveAvoidingY,
   constants: {
     COIN_SIZE,
     COIN_GAP,

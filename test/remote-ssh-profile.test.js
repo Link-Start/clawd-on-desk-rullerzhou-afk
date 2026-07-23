@@ -423,6 +423,21 @@ test("settings-actions: remoteSsh.add inserts new profile and returns commit", (
   assert.deepEqual(r.commit.remoteSsh.profiles.map((p) => p.id), ["p1"]);
 });
 
+test("settings-actions: remoteSsh.add cannot manufacture deployment ownership", () => {
+  const cmd = commandRegistry["remoteSsh.add"];
+  const r = cmd(basicProfile({
+    lastDeployedAt: 12345,
+    managedDeployTargets: [{
+      host: "user@victim",
+      remoteForwardPort: 23333,
+      deployedAt: 12345,
+    }],
+  }), { snapshot: { remoteSsh: { profiles: [] } } });
+  assert.equal(r.status, "ok");
+  assert.equal(r.commit.remoteSsh.profiles[0].lastDeployedAt, undefined);
+  assert.equal(r.commit.remoteSsh.profiles[0].managedDeployTargets, undefined);
+});
+
 test("settings-actions: remoteSsh.add rejects duplicate id", () => {
   const cmd = commandRegistry["remoteSsh.add"];
   const r = cmd(basicProfile(), {
@@ -591,13 +606,14 @@ test("settings-actions: remoteSsh.markDeployed noop when expectedTarget host dri
     },
     { snapshot: { remoteSsh: { profiles: [editedProfile] } } }
   );
-  // No-op: deploy landed on old host, but profile now points to new host.
-  // Stamping would lie about the new host being deployed.
+  // Current-target stamp is still a no-op: deploy landed on old host, but the
+  // ownership ledger must retain that old host so delete can clean it later.
   assert.equal(r.status, "ok");
   assert.equal(r.noop, true);
   assert.equal(r.reason, "target_drift");
   assert.equal(r.targetDrift, "host");
-  assert.equal(r.commit, undefined);
+  assert.equal(r.commit.remoteSsh.profiles[0].lastDeployedAt, undefined);
+  assert.equal(r.commit.remoteSsh.profiles[0].managedDeployTargets[0].host, "user@pi.local");
   assert.equal(editedProfile.lastDeployedAt, undefined,
     "profile must remain un-stamped when target drifted");
 });
@@ -686,6 +702,40 @@ test("settings-actions: remoteSsh.update preserves lastDeployedAt when only cosm
   assert.equal(r.commit.remoteSsh.profiles[0].label, "树莓派");
   assert.equal(r.commit.remoteSsh.profiles[0].lastDeployedAt, 12345,
     "cosmetic edit must keep deploy stamp");
+});
+
+test("settings-actions: remoteSsh.update ignores renderer-supplied deployment ownership", () => {
+  const cmd = commandRegistry["remoteSsh.update"];
+  const owned = {
+    host: "user@pi.local",
+    remoteForwardPort: 23333,
+    deployedAt: 12345,
+  };
+  const current = basicProfile({
+    lastDeployedAt: 12345,
+    managedDeployTargets: [owned],
+  });
+  const forgedEdit = basicProfile({
+    label: "树莓派",
+    lastDeployedAt: 99999,
+    managedDeployTargets: [{
+      host: "user@victim",
+      remoteForwardPort: 23333,
+      deployedAt: 99999,
+    }],
+  });
+  const r = cmd(forgedEdit, {
+    snapshot: { remoteSsh: { profiles: [current] } },
+  });
+  const profile = r.commit.remoteSsh.profiles[0];
+  assert.equal(profile.lastDeployedAt, 12345);
+  assert.deepEqual(profile.managedDeployTargets, [{ ...owned, chainStatusline: false }]);
+
+  const fresh = cmd(forgedEdit, {
+    snapshot: { remoteSsh: { profiles: [basicProfile()] } },
+  }).commit.remoteSsh.profiles[0];
+  assert.equal(fresh.lastDeployedAt, undefined);
+  assert.equal(fresh.managedDeployTargets, undefined);
 });
 
 test("settings-actions: remoteSsh.update preserves detected remote Node on cosmetic edits", () => {

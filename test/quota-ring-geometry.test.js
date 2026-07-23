@@ -158,6 +158,29 @@ describe("quota ring — bounds placement", () => {
     assert.ok(r.contentBounds.y >= shortWa.y);
     assert.ok(r.contentBounds.y + r.contentBounds.height <= shortWa.y + shortWa.height);
   });
+
+  it("moves a four-coin Orbit clear of the visible Session HUD", () => {
+    const pet = { left: 573, top: 306, right: 651, bottom: 424 };
+    const hud = { x: 455, y: 378, width: 296, height: 30 };
+    const r = computeQuotaRingBounds({
+      hitRect: pet,
+      workArea: { x: 0, y: 0, width: 1280, height: 800 },
+      coinCount: 4,
+      scale: 1,
+      avoidRects: [hud],
+    });
+    const overlapW = Math.max(
+      0,
+      Math.min(r.contentBounds.x + r.contentBounds.width, hud.x + hud.width)
+        - Math.max(r.contentBounds.x, hud.x)
+    );
+    const overlapH = Math.max(
+      0,
+      Math.min(r.contentBounds.y + r.contentBounds.height, hud.y + hud.height)
+        - Math.max(r.contentBounds.y, hud.y)
+    );
+    assert.strictEqual(overlapW * overlapH, 0);
+  });
 });
 
 describe("quota ring — window labels & severity", () => {

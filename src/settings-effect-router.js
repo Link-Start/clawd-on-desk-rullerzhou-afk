@@ -100,6 +100,15 @@ function createSettingsEffectRouter(options = {}) {
     }
     if ("lowPowerIdleMode" in changes) {
       sendToRenderer("low-power-idle-mode-change", changes.lowPowerIdleMode);
+      // If the HUD/ring were already hidden when low-power mode was enabled,
+      // no visibility transition would otherwise schedule their delayed
+      // destruction. Re-sync after mirrors update so hidden windows are
+      // reclaimed under the new policy.
+      safeCall(
+        logWarn,
+        "Clawd: low-power Session HUD sync failed:",
+        syncSessionHudVisibility
+      );
     }
     if ("keepAwakeWhileWorking" in changes) {
       safeCall(logWarn, "Clawd: reconcilePowerSaveBlocker failed:", reconcilePowerSaveBlocker);

@@ -91,13 +91,13 @@ function normalizeSourceHost(host) {
   return cleaned ? cleaned.slice(0, SOURCE_HOST_MAX_LENGTH) : null;
 }
 
-// Change detection must ignore capturedAt: it advances on every report even
-// when the numbers are identical, and treating that as a change would
-// broadcast on every token_count line.
+// Change detection must ignore capturedAt/seenAt: both advance independently
+// of the displayed values, and treating either as a value change would
+// broadcast on every statusline refresh.
 function comparableGroup(group) {
   const out = {};
   for (const field of Object.keys(group)) {
-    const { capturedAt, ...rest } = group[field];
+    const { capturedAt, seenAt, ...rest } = group[field];
     out[field] = rest;
   }
   return JSON.stringify(out);
@@ -119,22 +119,24 @@ function newestCapture(group) {
   return newest;
 }
 
-function expireBuckets(group, nowMs) {
+function expireBuckets(group, nowMs, rawSeenByBucket = null) {
   const out = {};
   for (const [field, bucket] of Object.entries(group)) {
     // Clone (capturedAt stripped — it is store-internal write-ordering
-    // metadata, not display data): snapshot consumers must never hold live
-    // references into the store, which doubles as the persistence source of
-    // truth.
+    // metadata): snapshot consumers must never hold live references into the
+    // store, which doubles as the persistence source of truth. Per-bucket
+    // seenAt is exposed as minute-quantized lastSeenAt so a partial provider
+    // refresh cannot make an untouched sibling look fresh.
     // A bucket whose window reset on wall clock is kept but FLAGGED: the
     // pre-reset number would lie high, but hiding the gauge entirely reads
     // as broken — renderers show expired buckets as a dimmed reset state.
-    const { capturedAt, ...cloned } = bucket;
-    if (Number.isFinite(bucket.resetAt) && bucket.resetAt <= nowMs) {
-      out[field] = { ...cloned, expired: true };
-    } else {
-      out[field] = cloned;
-    }
+    const { capturedAt, seenAt, ...cloned } = bucket;
+    const lastSeenAt = Math.floor(Number(seenAt || 0) / SEEN_QUANTUM_MS) * SEEN_QUANTUM_MS;
+    const outputBucket = Number.isFinite(bucket.resetAt) && bucket.resetAt <= nowMs
+      ? { ...cloned, lastSeenAt, expired: true }
+      : { ...cloned, lastSeenAt };
+    out[field] = outputBucket;
+    if (rawSeenByBucket) rawSeenByBucket.set(outputBucket, Number(seenAt));
   }
   return Object.keys(out).length ? out : null;
 }
@@ -165,9 +167,9 @@ function createAccountQuotaStore(options = {}) {
 
   // Map<hostKey, { host, [providerKey]: { group, updatedAt, lastSeenAt } }>
   // ("" = local). updatedAt = last VALUE change (drives display of the
-  // numbers); lastSeenAt = last accepted report of any kind (drives
-  // staleness and merge arbitration — an identical confirmation proves the
-  // reporter is alive even though nothing changed).
+  // numbers); each bucket owns a seenAt (drives staleness and merge
+  // arbitration). Provider lastSeenAt is retained as the max bucket seenAt
+  // for persistence compatibility and summary UI only.
   const sources = new Map();
   let persistTimer = null;
 
@@ -207,14 +209,23 @@ function createAccountQuotaStore(options = {}) {
         if (!group) continue;
         const updatedAt = Number(stored.updatedAt);
         const lastSeenAt = Number(stored.lastSeenAt);
+        const fallbackSeenAt = Number.isFinite(lastSeenAt)
+          ? lastSeenAt
+          : (Number.isFinite(updatedAt) ? updatedAt : nowMs);
+        group = Object.fromEntries(Object.entries(group).map(([field, bucket]) => {
+          const rawBucket = stored.group && stored.group[field];
+          const rawSeenAt = Number(rawBucket && rawBucket.seenAt);
+          return [field, {
+            ...bucket,
+            seenAt: Number.isFinite(rawSeenAt) ? rawSeenAt : fallbackSeenAt,
+          }];
+        }));
         record[providerKey] = {
           group,
           updatedAt: Number.isFinite(updatedAt) ? updatedAt : nowMs,
           // Older persist files predate lastSeenAt — fall back to updatedAt
           // (strictly older-or-equal, so nothing looks fresher than it is).
-          lastSeenAt: Number.isFinite(lastSeenAt)
-            ? lastSeenAt
-            : (Number.isFinite(updatedAt) ? updatedAt : nowMs),
+          lastSeenAt: Math.max(...Object.values(group).map((bucket) => bucket.seenAt)),
         };
         hasAny = true;
       }
@@ -233,14 +244,13 @@ function createAccountQuotaStore(options = {}) {
       for (const providerKey of QUOTA_PROVIDER_KEYS) {
         const stored = record[providerKey];
         if (!stored) continue;
-        if (stored.lastSeenAt + PROVIDER_RETENTION_MS <= nowMs) {
-          delete record[providerKey];
-          pruned = true;
-          continue;
-        }
         for (const [field, bucket] of Object.entries(stored.group)) {
-          if (Number.isFinite(bucket.resetAt)
-            && bucket.resetAt + EXPIRED_BUCKET_DROP_AFTER_MS <= nowMs) {
+          const seenAt = Number(bucket.seenAt);
+          const unconfirmedTooLong = !Number.isFinite(seenAt)
+            || seenAt + PROVIDER_RETENTION_MS <= nowMs;
+          const resetTooLongAgo = Number.isFinite(bucket.resetAt)
+            && bucket.resetAt + EXPIRED_BUCKET_DROP_AFTER_MS <= nowMs;
+          if (unconfirmedTooLong || resetTooLongAgo) {
             delete stored.group[field];
             pruned = true;
           }
@@ -250,6 +260,9 @@ function createAccountQuotaStore(options = {}) {
           pruned = true;
           continue;
         }
+        stored.lastSeenAt = Math.max(
+          ...Object.values(stored.group).map((bucket) => Number(bucket.seenAt) || 0)
+        );
         hasProvider = true;
       }
       if (!hasProvider) {
@@ -263,7 +276,7 @@ function createAccountQuotaStore(options = {}) {
   function persistNow() {
     if (!persistPath) return;
     const body = JSON.stringify({
-      version: 2,
+      version: 3,
       sources: Array.from(sources.values()),
     }, null, 2);
     const dir = path.dirname(persistPath);
@@ -323,26 +336,39 @@ function createAccountQuotaStore(options = {}) {
       }
       const accepted = sanitizeIncomingGroup(group, existing && existing.group, nowMs);
       if (!accepted) continue;
+      const observed = Object.fromEntries(Object.entries(accepted).map(([field, bucket]) => [
+        field,
+        { ...bucket, seenAt: nowMs },
+      ]));
       // Legacy reports and other providers merge per bucket: a partial
       // report must not evict a sibling that is still valid. Window-aware
       // Codex reports are the exception because rate_limits is a complete
       // snapshot and omission is how a removed service-side window appears.
       const merged = windowAwareCodex
-        ? accepted
-        : (existing ? { ...existing.group, ...accepted } : accepted);
+        ? observed
+        : (existing ? { ...existing.group, ...observed } : observed);
       if (!record) {
         record = { host: sourceHost };
         sources.set(key, record);
       }
       const valueChanged = !existing || comparableGroup(existing.group) !== comparableGroup(merged);
-      if (!valueChanged
-        && Math.floor(nowMs / SEEN_QUANTUM_MS) > Math.floor(existing.lastSeenAt / SEEN_QUANTUM_MS)) {
-        seenAdvanced = true;
+      if (!valueChanged && existing) {
+        for (const field of Object.keys(observed)) {
+          const priorSeenAt = Number(existing.group[field] && existing.group[field].seenAt);
+          if (!Number.isFinite(priorSeenAt)
+            || Math.floor(nowMs / SEEN_QUANTUM_MS) > Math.floor(priorSeenAt / SEEN_QUANTUM_MS)) {
+            seenAdvanced = true;
+            break;
+          }
+        }
       }
+      const providerLastSeenAt = Math.max(
+        ...Object.values(merged).map((bucket) => Number(bucket.seenAt) || 0)
+      );
       record[providerKey] = {
         group: merged,
         updatedAt: valueChanged ? nowMs : existing.updatedAt,
-        lastSeenAt: nowMs,
+        lastSeenAt: providerLastSeenAt,
       };
       if (valueChanged) changed = true;
     }
@@ -361,19 +387,18 @@ function createAccountQuotaStore(options = {}) {
   // which is why the per-source shape exists in the first place.
   function snapshot(options = {}) {
     const nowMs = now();
-    pruneStale(nowMs);
+    if (pruneStale(nowMs)) schedulePersist();
     const out = [];
-    // Keep merge arbitration on the exact observation time while exposing
-    // only the minute-quantized stamp to renderers/signatures. A WeakMap
-    // avoids leaking an internal field into snapshots.
-    const rawLastSeenAt = new WeakMap();
+    // Merge arbitration uses exact receive time, while snapshots expose only
+    // minute-quantized stamps to avoid a broadcast on every statusline tick.
+    const rawSeenByBucket = new WeakMap();
     for (const record of sources.values()) {
       const entry = { host: record.host };
       let hasAny = false;
       for (const providerKey of QUOTA_PROVIDER_KEYS) {
         const stored = record[providerKey];
         if (!stored) continue;
-        const group = expireBuckets(stored.group, nowMs);
+        const group = expireBuckets(stored.group, nowMs, rawSeenByBucket);
         if (!group) continue;
         const provider = {
           group,
@@ -382,7 +407,6 @@ function createAccountQuotaStore(options = {}) {
           // snapshot (and its signature) at most once a minute.
           lastSeenAt: Math.floor(stored.lastSeenAt / SEEN_QUANTUM_MS) * SEEN_QUANTUM_MS,
         };
-        rawLastSeenAt.set(provider, stored.lastSeenAt);
         entry[providerKey] = provider;
         hasAny = true;
       }
@@ -424,7 +448,8 @@ function createAccountQuotaStore(options = {}) {
           // bucket but an expired weekly bucket must not mask another
           // source's still-live weekly observation.
           const live = bucket.expired !== true;
-          const seenAt = Number(rawLastSeenAt.get(candidate));
+          const rawSeenAt = Number(rawSeenByBucket.get(bucket));
+          const seenAt = Number.isFinite(rawSeenAt) ? rawSeenAt : Number(bucket.lastSeenAt);
           if (!best
             || (live && !bestLive)
             || (live === bestLive && seenAt > bestSeenAt)) {
@@ -435,17 +460,17 @@ function createAccountQuotaStore(options = {}) {
         }
         if (best) {
           group[field] = best.bucket;
-          selected.push(best.candidate);
+          selected.push(best);
         }
       }
       if (selected.length) {
         merged[providerKey] = {
           group,
-          updatedAt: Math.max(...selected.map((candidate) => Number(candidate.updatedAt))),
+          updatedAt: Math.max(...selected.map(({ candidate }) => Number(candidate.updatedAt))),
           // A merged provider can contain windows from different sources.
           // Age it by the oldest selected observation so an older sibling
           // never borrows another bucket's fresh label.
-          lastSeenAt: Math.min(...selected.map((candidate) => Number(candidate.lastSeenAt))),
+          lastSeenAt: Math.min(...selected.map(({ bucket }) => Number(bucket.lastSeenAt))),
         };
         hasAny = true;
       }
@@ -461,9 +486,15 @@ function createAccountQuotaStore(options = {}) {
     persistNow();
   }
 
+  function prune() {
+    const changed = pruneStale(now());
+    if (changed) schedulePersist();
+    return changed;
+  }
+
   load();
 
-  return { update, snapshot, flush };
+  return { update, snapshot, prune, flush };
 }
 
 module.exports = {

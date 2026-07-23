@@ -198,7 +198,12 @@ function buildQuotaHalfBar(labelText, bucket, resetStyle) {
       ? t("dashboardQuotaResetOn").replace("{date}", formatResetDate(bucket.resetAt))
       : t("dashboardQuotaResetIn").replace("{time}", formatResetIn(bucket.resetAt));
   }
-  labelRow.appendChild(createText("span", "quota-percent", resetText ? `${percentText} · ${resetText}` : percentText));
+  const bucketSeenAt = Number(bucket.lastSeenAt);
+  const asOf = Number.isFinite(bucketSeenAt) && Date.now() - bucketSeenAt > QUOTA_STALE_AFTER_MS
+    ? formatAsOf(bucketSeenAt)
+    : "";
+  const details = [percentText, resetText, asOf].filter(Boolean).join(" · ");
+  labelRow.appendChild(createText("span", "quota-percent", details));
   half.appendChild(labelRow);
 
   const track = document.createElement("div");

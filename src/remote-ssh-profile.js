@@ -42,6 +42,7 @@ const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]/;
 // quoting on the remote even with our ssh-stdin write. Single quote, double
 // quote, backtick, dollar, backslash, exclamation.
 const HOST_PREFIX_FORBIDDEN_RE = /[\x00-\x1f\x7f'"`$\\!]/;
+const MAX_MANAGED_DEPLOY_TARGETS = 8;
 
 function isValidDetectedRemoteNodeBin(value) {
   return typeof value === "string"
@@ -102,6 +103,72 @@ function isValidLabel(value) {
 
 function isValidId(value) {
   return typeof value === "string" && /^[a-zA-Z0-9_-]{1,64}$/.test(value);
+}
+
+function sanitizeManagedDeployTarget(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const target = {
+    host: typeof raw.host === "string" ? raw.host.trim() : "",
+    port: Number.isInteger(raw.port) && raw.port !== 22 ? raw.port : undefined,
+    identityFile: typeof raw.identityFile === "string" && raw.identityFile.length > 0
+      ? raw.identityFile
+      : undefined,
+    remoteForwardPort: Number.isInteger(raw.remoteForwardPort) ? raw.remoteForwardPort : 23333,
+    hostPrefix: typeof raw.hostPrefix === "string" && raw.hostPrefix.length > 0
+      ? raw.hostPrefix
+      : undefined,
+    chainStatusline: raw.chainStatusline === true,
+    deployedAt: Number(raw.deployedAt),
+  };
+  if (!isValidHost(target.host)
+    || (target.port !== undefined && !isValidPort(target.port))
+    || (target.identityFile !== undefined && !isValidIdentityFile(target.identityFile))
+    || !isValidRemoteForwardPort(target.remoteForwardPort)
+    || (target.hostPrefix !== undefined && !isValidHostPrefix(target.hostPrefix))
+    || !Number.isFinite(target.deployedAt)
+    || target.deployedAt <= 0) {
+    return null;
+  }
+  if (isValidDetectedRemoteNodeBin(raw.detectedRemoteNodeBin)) {
+    target.detectedRemoteNodeBin = raw.detectedRemoteNodeBin;
+    if (isValidDetectedRemoteNodeVersion(raw.detectedRemoteNodeVersion)) {
+      target.detectedRemoteNodeVersion = raw.detectedRemoteNodeVersion;
+    }
+    if (isValidDetectedRemoteNodeSource(raw.detectedRemoteNodeSource)) {
+      target.detectedRemoteNodeSource = raw.detectedRemoteNodeSource;
+    }
+    if (Number.isFinite(raw.detectedRemoteNodeAt) && raw.detectedRemoteNodeAt > 0) {
+      target.detectedRemoteNodeAt = raw.detectedRemoteNodeAt;
+    }
+  }
+  for (const key of Object.keys(target)) {
+    if (target[key] === undefined) delete target[key];
+  }
+  return target;
+}
+
+function remoteAccountKey(profile) {
+  if (!profile || typeof profile !== "object") return "";
+  const host = typeof profile.host === "string" ? profile.host.trim() : "";
+  const port = Number.isInteger(profile.port) ? profile.port : 22;
+  return `${host}\n${port}`;
+}
+
+function normalizeManagedDeployTargets(value) {
+  if (!Array.isArray(value)) return [];
+  const byAccount = new Map();
+  for (const raw of value) {
+    const target = sanitizeManagedDeployTarget(raw);
+    if (!target) continue;
+    const account = remoteAccountKey(target);
+    const previous = byAccount.get(account);
+    if (!previous || target.deployedAt >= previous.deployedAt) {
+      byAccount.set(account, target);
+    }
+  }
+  return Array.from(byAccount.values())
+    .sort((a, b) => a.deployedAt - b.deployedAt)
+    .slice(-MAX_MANAGED_DEPLOY_TARGETS);
 }
 
 // Validate a profile candidate. Returns { status: "ok" } or
@@ -170,6 +237,16 @@ function validateProfile(profile) {
       return { status: "error", message: "profile.lastDeployedAt must be a positive finite number" };
     }
   }
+  if (profile.managedDeployTargets !== undefined) {
+    if (!Array.isArray(profile.managedDeployTargets)
+      || profile.managedDeployTargets.length > MAX_MANAGED_DEPLOY_TARGETS
+      || profile.managedDeployTargets.some((target) => !sanitizeManagedDeployTarget(target))) {
+      return {
+        status: "error",
+        message: `profile.managedDeployTargets must contain at most ${MAX_MANAGED_DEPLOY_TARGETS} valid owned targets`,
+      };
+    }
+  }
   if (profile.detectedRemoteNodeBin !== undefined && profile.detectedRemoteNodeBin !== null) {
     if (!isValidDetectedRemoteNodeBin(profile.detectedRemoteNodeBin)) {
       return { status: "error", message: "profile.detectedRemoteNodeBin must be an absolute POSIX path with no control characters" };
@@ -219,6 +296,8 @@ function sanitizeProfile(raw) {
       ? raw.lastDeployedAt
       : undefined,
   };
+  const managedDeployTargets = normalizeManagedDeployTargets(raw.managedDeployTargets);
+  if (managedDeployTargets.length) out.managedDeployTargets = managedDeployTargets;
   if (isValidDetectedRemoteNodeBin(raw.detectedRemoteNodeBin)) {
     out.detectedRemoteNodeBin = raw.detectedRemoteNodeBin;
     if (isValidDetectedRemoteNodeVersion(raw.detectedRemoteNodeVersion)) {
@@ -316,6 +395,7 @@ function deployTargetDrift(a, b) {
 module.exports = {
   REMOTE_FORWARD_PORTS,
   DEPLOY_TARGET_FIELDS,
+  MAX_MANAGED_DEPLOY_TARGETS,
   isValidHost,
   isValidPort,
   isValidRemoteForwardPort,
@@ -332,4 +412,7 @@ module.exports = {
   getDefaults,
   deployTargetFingerprint,
   deployTargetDrift,
+  sanitizeManagedDeployTarget,
+  normalizeManagedDeployTargets,
+  remoteAccountKey,
 };

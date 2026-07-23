@@ -1956,8 +1956,8 @@ describe("updateSession()", () => {
     const entry = snapshot.accountQuota[0];
     assert.strictEqual(entry.host, "pi");
     assert.deepStrictEqual(entry.claudeQuota.group, {
-      claudeFiveHour: { usedPercent: 24, resetAt },
-      claudeWeekly: { usedPercent: 41 },
+      claudeFiveHour: { usedPercent: 24, resetAt, lastSeenAt: 0 },
+      claudeWeekly: { usedPercent: 41, lastSeenAt: 0 },
     });
     assert.ok(Number.isFinite(entry.claudeQuota.updatedAt));
   });

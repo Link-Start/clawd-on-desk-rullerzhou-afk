@@ -25,7 +25,9 @@ describe("account quota store", () => {
     const snapshot = store.snapshot();
     assert.strictEqual(snapshot.length, 1);
     assert.strictEqual(snapshot[0].host, "pi");
-    assert.deepStrictEqual(snapshot[0].claudeQuota.group, group);
+    assert.deepStrictEqual(snapshot[0].claudeQuota.group, {
+      claudeWeekly: { ...group.claudeWeekly, lastSeenAt: 960000 },
+    });
     assert.strictEqual(snapshot[0].claudeQuota.updatedAt, 1000000, "no-op refresh must not look fresher");
   });
 
@@ -110,6 +112,7 @@ describe("account quota store", () => {
       usedPercent: 12,
       windowMinutes: 10080,
       resetAt: 999999,
+      lastSeenAt: 0,
     });
   });
 
@@ -203,7 +206,9 @@ describe("account quota store", () => {
     const snapshot = reloaded.snapshot();
     assert.strictEqual(snapshot.length, 1);
     assert.strictEqual(snapshot[0].host, "pi");
-    assert.deepStrictEqual(snapshot[0].claudeQuota.group, group);
+    assert.deepStrictEqual(snapshot[0].claudeQuota.group, {
+      claudeWeekly: { ...group.claudeWeekly, lastSeenAt: 0 },
+    });
     assert.strictEqual(snapshot[0].claudeQuota.updatedAt, 1234, "persisted stamp survives reload");
   });
 
@@ -382,6 +387,21 @@ describe("account quota store", () => {
     const provider = store.snapshot({ mergeSources: true })[0].claudeQuota;
     assert.strictEqual(provider.group.claudeWeekly.usedPercent, 90);
     assert.strictEqual(provider.lastSeenAt, 60000, "renderer-facing freshness stays minute-quantized");
+  });
+
+  it("does not let a fresh partial window refresh an untouched sibling", () => {
+    let nowMs = 60000;
+    const store = createAccountQuotaStore({ persistPath: null, now: () => nowMs });
+    store.update("a", { claudeQuota: { claudeWeekly: { usedPercent: 90, resetAt: 1000000 } } });
+    nowMs = 120000;
+    store.update("b", { claudeQuota: { claudeWeekly: { usedPercent: 20, resetAt: 1000000 } } });
+    nowMs = 180000;
+    store.update("a", { claudeQuota: { claudeFiveHour: { usedPercent: 10, resetAt: 1000000 } } });
+
+    const merged = store.snapshot({ mergeSources: true })[0].claudeQuota.group;
+    assert.strictEqual(merged.claudeFiveHour.usedPercent, 10);
+    assert.strictEqual(merged.claudeWeekly.usedPercent, 20,
+      "A's fresh 5h report must not make its old weekly bucket beat B");
   });
 
   it("prunes long-expired buckets, unconfirmed providers, and emptied sources", () => {

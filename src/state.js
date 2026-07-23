@@ -1992,7 +1992,10 @@ function isProcessAlive(pid) {
 function cleanStaleSessions() {
   const now = Date.now();
   let changed = false;
-  let snapshotRefreshNeeded = false;
+  // Quota is session-independent and can go stale while no hook events are
+  // arriving. The existing 10-second lifecycle sweep must therefore retire
+  // dead buckets too and force a snapshot refresh when it does.
+  let snapshotRefreshNeeded = accountQuota.prune();
   const staleConfig = typeof ctx.getStaleConfig === "function" ? ctx.getStaleConfig() : null;
   for (const [id, s] of sessions) {
     const decision = getStaleSessionDecision(s, {

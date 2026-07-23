@@ -144,6 +144,9 @@ function makeServer(overrides = {}) {
   const ctx = createGuardedIntegrationCtx({
     manageClaudeHooksAutomatically: true,
     autoStartWithClaude: false,
+    // Most legacy server fixtures predate the opt-in switch and assert the
+    // old registration path. Individual opt-out tests override this to false.
+    claudeQuotaCollectionEnabled: true,
     // The compact default fixture above intentionally represents one declared
     // core event. Tests that exercise broader coverage override this list.
     coreEvents: ["Stop"],
@@ -573,10 +576,71 @@ describe("server Claude hook operation queue (default, non-injected implementati
       registerHooksAsync: async (opts) => { calls.push(["register", opts]); return { added: 1, updated: 0, removed: 0 }; },
       registerClaudeStatusline: (opts) => { calls.push(["statusline", opts]); return { changed: true }; },
     }, async () => {
-      const { api } = makeServer({ syncClawdHooksImpl: undefined });
+      const { api } = makeServer({
+        syncClawdHooksImpl: undefined,
+        claudeQuotaCollectionEnabled: true,
+      });
       const result = await api.syncClawdHooks({ source: "startup", automatic: true });
       assert.strictEqual(result.status, "ok");
       assert.deepStrictEqual(calls.map((c) => c[0]), ["register", "statusline"]);
+    });
+  });
+
+  it("startup keeps Claude quota collection opt-in and removes only a Clawd-owned statusline", async () => {
+    const calls = [];
+    await withPatchedInstallModule({
+      registerHooksAsync: async () => ({ added: 0, updated: 0, removed: 0 }),
+      registerClaudeStatusline: () => { calls.push("register"); return { changed: true }; },
+      unregisterClaudeStatusline: (opts) => {
+        calls.push(["unregister", opts]);
+        return { removed: 1, changed: true };
+      },
+    }, async () => {
+      const { api } = makeServer({
+        syncClawdHooksImpl: undefined,
+        claudeQuotaCollectionEnabled: false,
+      });
+      const result = await api.syncClawdHooks({ source: "startup", automatic: true });
+      assert.strictEqual(result.status, "ok");
+      assert.deepStrictEqual(calls.map((call) => Array.isArray(call) ? call[0] : call), ["unregister"]);
+    });
+  });
+
+  it("explicit Claude quota opt-in refuses to replace a custom statusline", async () => {
+    await withPatchedInstallModule({
+      registerClaudeStatusline: () => ({
+        installed: true,
+        changed: false,
+        skippedExisting: true,
+      }),
+    }, async () => {
+      const { api } = makeServer({ syncClawdHooksImpl: undefined });
+      const result = await api.setClaudeQuotaCollectionEnabled({
+        enabled: true,
+        source: "settings-quota-collection",
+      });
+      assert.strictEqual(result.status, "error");
+      assert.strictEqual(result.reason, "statusline-occupied");
+    });
+  });
+
+  it("explicit Claude quota opt-out unregisters through the serialized ownership-safe path", async () => {
+    const calls = [];
+    await withPatchedInstallModule({
+      unregisterClaudeStatusline: (opts) => {
+        calls.push(opts);
+        return { removed: 1, changed: true };
+      },
+    }, async () => {
+      const { api } = makeServer({ syncClawdHooksImpl: undefined });
+      const result = await api.setClaudeQuotaCollectionEnabled({
+        enabled: false,
+        source: "settings-quota-collection",
+      });
+      assert.strictEqual(result.status, "ok");
+      assert.strictEqual(result.removed, 1);
+      assert.strictEqual(calls.length, 1);
+      assert.strictEqual(calls[0].backup, true);
     });
   });
 

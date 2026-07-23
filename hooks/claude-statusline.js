@@ -21,7 +21,11 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const { readJsonFile } = require("./json-utils");
-const { postStateToRunningServer, readHostPrefix } = require("./server-config");
+const {
+  applyWslSourceFields,
+  postStateToRunningServer,
+  readHostPrefix,
+} = require("./server-config");
 const { readStdinJson } = require("./shared-process");
 const { resolveClaudeRateLimitQuota, resolveClaudeModelLabel } = require("./claude-rate-limits");
 
@@ -130,7 +134,9 @@ function buildStateBody(payload, quota, options = {}) {
   if (options.remote) {
     body.host = options.host || readHostPrefix();
   }
-  return body;
+  return (options.applyWslSourceFields || applyWslSourceFields)(body, {
+    remote: !!options.remote,
+  });
 }
 
 function postStateBody(body, deps, env) {
@@ -185,6 +191,7 @@ async function main(deps = {}) {
     const body = buildStateBody(payload, quota, {
       remote,
       host: remote && deps.readHostPrefix ? deps.readHostPrefix() : undefined,
+      applyWslSourceFields: deps.applyWslSourceFields,
     });
     const postPromise = postStateBody(body, deps, env);
     if (chainPromise) [chainResult] = await Promise.all([chainPromise, postPromise]);

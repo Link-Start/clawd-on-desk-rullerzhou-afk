@@ -99,7 +99,7 @@ function liveBucket(group, field, now) {
   const bucket = group && group[field];
   if (!bucket || typeof bucket !== "object") return null;
   if (bucket.expired === true || (Number.isFinite(bucket.resetAt) && bucket.resetAt <= now)) {
-    return { windowMinutes: bucket.windowMinutes, resetAt: bucket.resetAt, usedPercent: 0, expired: true };
+    return { ...bucket, usedPercent: 0, expired: true };
   }
   return bucket;
 }
@@ -123,17 +123,21 @@ function providerHasDrawableQuota(source, def) {
 // bucket; among equally live candidates the highest used percentage is the
 // most constrained. This keeps Antigravity to one coin while never silently
 // dropping its Claude/GPT quota family.
-function selectRingWindow(group, candidates, now, ring) {
+function selectRingWindow(group, candidates, now, ring, providerSeenAtValue) {
   let selected = null;
   for (const candidate of candidates) {
     const bucket = liveBucket(group, candidate.field, now);
     if (!bucket) continue;
     const reset = bucket.expired === true;
     const pct = Math.max(0, Math.min(100, Number(bucket.usedPercent) || 0));
+    const bucketSeenAt = Number(bucket.lastSeenAt);
+    const seenAt = Number.isFinite(bucketSeenAt) ? bucketSeenAt : providerSeenAtValue;
+    const stale = Number.isFinite(seenAt) && now - seenAt > STALE_AFTER_MS;
     if (!selected
         || (selected.reset && !reset)
-        || (selected.reset === reset && pct > selected.pct)) {
-      selected = { bucket, candidate, reset, pct };
+        || (selected.reset === reset && selected.stale && !stale)
+        || (selected.reset === reset && selected.stale === stale && pct > selected.pct)) {
+      selected = { bucket, candidate, reset, pct, stale, seenAt };
     }
   }
   if (!selected) return null;
@@ -149,6 +153,8 @@ function selectRingWindow(group, candidates, now, ring) {
     resetAt: selected.bucket.resetAt,
     ring,
     field: selected.candidate.field,
+    stale: selected.stale,
+    seenAt: selected.seenAt,
   };
 }
 
@@ -157,12 +163,11 @@ function buildCoinModel(source, def, now, multiSource) {
   const provider = source[def.key];
   const group = provider && provider.group;
   if (!group) return null;
-  const outer = selectRingWindow(group, def.outer, now, "outer");
-  const inner = selectRingWindow(group, def.inner, now, "inner");
+  const providerSeen = providerSeenAt(provider);
+  const outer = selectRingWindow(group, def.outer, now, "outer", providerSeen);
+  const inner = selectRingWindow(group, def.inner, now, "inner", providerSeen);
   if (!outer && !inner) return null;
 
-  const seenAt = providerSeenAt(provider);
-  const stale = seenAt !== null && now - seenAt > STALE_AFTER_MS;
   const windows = [];
   if (outer) windows.push(outer);
   if (inner) windows.push(inner);
@@ -170,10 +175,13 @@ function buildCoinModel(source, def, now, multiSource) {
   const allReset = windows.every((w) => w.reset);
   // Binding window = the most-constrained live window (max used, tie → outer).
   const live = windows.filter((w) => !w.reset);
+  const freshLive = live.filter((w) => !w.stale);
+  const bindingCandidates = freshLive.length ? freshLive : live;
   let binding = null;
-  for (const w of live) {
+  for (const w of bindingCandidates) {
     if (!binding || w.pct > binding.pct) binding = w;
   }
+  const stale = windows.every((w) => w.stale);
   const state = allReset ? "reset" : (stale ? "stale" : "live");
   const near = state === "live" && binding && binding.pct > 85;
 
@@ -190,7 +198,6 @@ function buildCoinModel(source, def, now, multiSource) {
     binding,
     state,
     near: !!near,
-    seenAt,
   };
 }
 
@@ -305,9 +312,9 @@ function coinTooltip(model, now) {
       }
       parts.push(seg);
     }
-  }
-  if (model.state === "stale" && model.seenAt !== null) {
-    parts.push(t("dashboardQuotaAsOf").replace("{time}", formatDurationHM((now - model.seenAt) / 60000)));
+    if (w.stale && Number.isFinite(w.seenAt)) {
+      parts.push(t("dashboardQuotaAsOf").replace("{time}", formatDurationHM((now - w.seenAt) / 60000)));
+    }
   }
   return parts.join(" · ");
 }
@@ -316,7 +323,15 @@ function buildCoinRow(model, now) {
   const row = document.createElement("div");
   row.className = `coin-row is-${model.state}`;
   row.title = coinTooltip(model, now);
+  row.setAttribute("role", "button");
+  row.setAttribute("tabindex", "0");
+  row.setAttribute("aria-label", row.title);
   row.addEventListener("click", () => window.quotaRingAPI.openDashboard());
+  row.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    window.quotaRingAPI.openDashboard();
+  });
 
   const readout = document.createElement("div");
   readout.className = "readout";
@@ -351,7 +366,15 @@ function buildOverflow(count) {
   el.className = "overflow";
   el.textContent = `+${count}`;
   el.title = t("quotaRingOverflow").replace("{n}", count);
+  el.setAttribute("role", "button");
+  el.setAttribute("tabindex", "0");
+  el.setAttribute("aria-label", el.title);
   el.addEventListener("click", () => window.quotaRingAPI.openDashboard());
+  el.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    window.quotaRingAPI.openDashboard();
+  });
   return el;
 }
 
@@ -366,12 +389,12 @@ function fingerprint(now) {
       const resetIn = Number.isFinite(w.resetAt) && w.resetAt > now
         ? Math.ceil((w.resetAt - now) / 60000)
         : 0;
-      return `${w.ring}:${w.field}:${w.pct}:${w.reset ? 1 : 0}:${resetIn}`;
+      const staleAge = w.stale && Number.isFinite(w.seenAt)
+        ? Math.floor((now - w.seenAt) / 60000)
+        : 0;
+      return `${w.ring}:${w.field}:${w.pct}:${w.reset ? 1 : 0}:${resetIn}:${w.stale ? 1 : 0}:${staleAge}`;
     }).join(",");
-    const staleAge = m.state === "stale" && Number.isFinite(m.seenAt)
-      ? Math.floor((now - m.seenAt) / 60000)
-      : 0;
-    return `${m.providerKey}:${m.host || ""}:${m.state}:${windows}:${staleAge}`;
+    return `${m.providerKey}:${m.host || ""}:${m.state}:${windows}`;
   }).join("|");
 }
 

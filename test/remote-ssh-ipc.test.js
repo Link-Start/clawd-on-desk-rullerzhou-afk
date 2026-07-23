@@ -325,7 +325,14 @@ test("remoteSsh:cleanup disconnects, stops the monitor and uninstalls remote int
   const uninstalled = [];
   const ipc = registerRemoteSshIpc({
     ipcMain,
-    settingsController: mockSettingsController([baseProfile]),
+    settingsController: mockSettingsController([{
+      ...baseProfile,
+      managedDeployTargets: [{
+        host: "user@pi",
+        remoteForwardPort: 23333,
+        deployedAt: 12345,
+      }],
+    }]),
     remoteSshRuntime: rt,
     BrowserWindow,
     spawn: makeSucceedingSpawn().spawn,
@@ -348,7 +355,14 @@ test("remoteSsh:cleanup stays ok when the remote uninstall fails (best-effort)",
   const { BrowserWindow } = mockBrowserWindow();
   const ipc = registerRemoteSshIpc({
     ipcMain,
-    settingsController: mockSettingsController([baseProfile]),
+    settingsController: mockSettingsController([{
+      ...baseProfile,
+      managedDeployTargets: [{
+        host: "user@pi",
+        remoteForwardPort: 23333,
+        deployedAt: 12345,
+      }],
+    }]),
     remoteSshRuntime: mockRuntime(),
     BrowserWindow,
     spawn: makeSucceedingSpawn().spawn,
@@ -360,6 +374,91 @@ test("remoteSsh:cleanup stays ok when the remote uninstall fails (best-effort)",
 
   assert.equal(r.status, "ok");
   assert.equal(r.uninstalled, false);
+  ipc.dispose();
+});
+
+test("remoteSsh:cleanup never mutates a never-deployed remote", async () => {
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  let stopped = 0;
+  let uninstalled = 0;
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController([baseProfile]),
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    stopCodexMonitorFn: async () => { stopped += 1; return { ok: true }; },
+    uninstallRemoteIntegrationsFn: async () => { uninstalled += 1; return { ok: true }; },
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "p1");
+  assert.equal(r.status, "ok");
+  assert.equal(r.skipped, "not-owned");
+  assert.equal(stopped, 0);
+  assert.equal(uninstalled, 0);
+  ipc.dispose();
+});
+
+test("remoteSsh:cleanup preserves a shared remote still owned by another profile", async () => {
+  const target = { host: "user@pi", remoteForwardPort: 23333, deployedAt: 12345 };
+  const sibling = {
+    ...baseProfile,
+    id: "p2",
+    label: "Same Pi",
+    managedDeployTargets: [{ ...target, deployedAt: 23456 }],
+  };
+  let uninstalled = 0;
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController([
+      { ...baseProfile, managedDeployTargets: [target] },
+      sibling,
+    ]),
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    uninstallRemoteIntegrationsFn: async () => { uninstalled += 1; return { ok: true }; },
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "p1");
+  assert.equal(r.status, "ok");
+  assert.equal(r.skipped, "shared-owner");
+  assert.equal(r.shared, 1);
+  assert.equal(uninstalled, 0);
+  ipc.dispose();
+});
+
+test("remoteSsh:cleanup uses the deployed target after the profile was edited", async () => {
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const cleanedHosts = [];
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController([{
+      ...baseProfile,
+      host: "user@new-host",
+      managedDeployTargets: [{
+        host: "user@old-host",
+        remoteForwardPort: 23333,
+        deployedAt: 12345,
+      }],
+    }]),
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    stopCodexMonitorFn: async () => ({ ok: true }),
+    uninstallRemoteIntegrationsFn: async ({ profile }) => {
+      cleanedHosts.push(profile.host);
+      return { ok: true };
+    },
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "p1");
+  assert.equal(r.uninstalled, true);
+  assert.deepEqual(cleanedHosts, ["user@old-host"]);
   ipc.dispose();
 });
 
