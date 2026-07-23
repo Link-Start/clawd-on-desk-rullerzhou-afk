@@ -179,6 +179,17 @@ function validateTheme(cfg) {
     }
   }
 
+  if (cfg.customization !== undefined) {
+    if (!isPlainObject(cfg.customization)) {
+      errors.push("customization must be an object when present");
+    } else if (
+      cfg.customization.petTint !== undefined
+      && typeof cfg.customization.petTint !== "boolean"
+    ) {
+      errors.push(`customization.petTint must be a boolean, got ${JSON.stringify(cfg.customization.petTint)}`);
+    }
+  }
+
   if (cfg.roamFlipAssets !== undefined && typeof cfg.roamFlipAssets !== "boolean") {
     errors.push(`roamFlipAssets must be a boolean, got ${JSON.stringify(cfg.roamFlipAssets)}`);
   }
@@ -365,6 +376,10 @@ function buildCapabilities(cfg, options = {}) {
     idleMode: deriveIdleMode(cfg),
     sleepMode: deriveSleepMode(cfg),
     powerProfile: derivePowerProfile(cfg, options),
+    petTint: !!(
+      isPlainObject(cfg && cfg.customization)
+      && cfg.customization.petTint === true
+    ),
   };
 }
 
@@ -600,6 +615,12 @@ function mergeDefaults(raw, themeId, isBuiltin) {
   // trustedRuntime grants script execution capability, so it requires loader-derived built-in trust.
   theme.trustedRuntime = normalizeTrustedRuntime(raw.trustedRuntime, isBuiltin, themeId);
   theme.rendering = normalizeRendering(raw.rendering);
+  theme.customization = {
+    petTint: !!(
+      isPlainObject(raw.customization)
+      && raw.customization.petTint === true
+    ),
+  };
 
   // objectScale
   theme.objectScale = { ...DEFAULT_OBJECT_SCALE, ...(raw.objectScale || {}) };

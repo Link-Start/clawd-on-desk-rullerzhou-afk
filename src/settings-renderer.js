@@ -136,7 +136,18 @@ if (window.settingsAPI && typeof window.settingsAPI.getShortcutFailures === "fun
 }
 
 if (window.settingsAPI && typeof window.settingsAPI.getSnapshot === "function") {
-  window.settingsAPI.getSnapshot().then((snapshot) => {
+  const tintOptionsPromise =
+    typeof window.settingsAPI.getPetTintOptions === "function"
+      ? window.settingsAPI.getPetTintOptions().catch((err) => {
+        console.warn("settings: getPetTintOptions failed", err);
+        return [];
+      })
+      : Promise.resolve([]);
+  Promise.all([
+    window.settingsAPI.getSnapshot(),
+    tintOptionsPromise,
+  ]).then(([snapshot, petTintOptions]) => {
+    core.runtime.petTintOptions = Array.isArray(petTintOptions) ? petTintOptions : [];
     core.ops.applyBootstrap(snapshot);
   });
 }

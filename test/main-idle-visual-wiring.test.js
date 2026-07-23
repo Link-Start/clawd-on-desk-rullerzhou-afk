@@ -28,10 +28,14 @@ describe("main default idle visual wiring", () => {
     assert.ok(tickCtx.includes("  getIdleVisualChoice,"), "tick ctx should expose the live choice");
   });
 
-  it("stamps idleDefaultVisual on both renderer theme-config delivery paths", () => {
+  it("stamps pre-IPC visual choices on both renderer theme-config delivery paths", () => {
     assert.match(
       mainSource,
       /function buildRendererThemeConfig\(\) \{[^}]*idleDefaultVisual = getIdleVisualChoice\(\);/
+    );
+    assert.match(
+      mainSource,
+      /cfg\.petTintPayload = resolvePetTintPayload\(tintId, activeTheme\);/
     );
     assert.ok(
       mainSource.includes("themeConfig: buildRendererThemeConfig(),"),

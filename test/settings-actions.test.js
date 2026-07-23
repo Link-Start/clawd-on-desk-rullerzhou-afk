@@ -67,6 +67,28 @@ describe("updateRegistry pure-data validators", () => {
     assert.strictEqual(updateRegistry.miniEdge("top", deps).status, "error");
   });
 
+  it("petTint accepts only safe per-theme catalog selections", () => {
+    const deps = { snapshot: baseSnapshot };
+    assert.strictEqual(updateRegistry.petTint({}, deps).status, "ok");
+    assert.strictEqual(
+      updateRegistry.petTint({ clawd: "gold", cloudling: "matcha" }, deps).status,
+      "ok"
+    );
+    assert.strictEqual(updateRegistry.petTint({ clawd: "none" }, deps).status, "error");
+    assert.strictEqual(updateRegistry.petTint({ clawd: "custom" }, deps).status, "error");
+    assert.strictEqual(
+      updateRegistry.petTint({ "../unsafe": "gold" }, deps).status,
+      "error"
+    );
+    assert.strictEqual(
+      updateRegistry.petTint({ clawd: "url(file:///secret)" }, deps).status,
+      "error"
+    );
+    assert.strictEqual(updateRegistry.petTint("gold", deps).status, "error");
+    assert.strictEqual(updateRegistry.petTint([], deps).status, "error");
+    assert.strictEqual(updateRegistry.petTint(null, deps).status, "error");
+  });
+
   it("x/y/preMiniX/preMiniY require finite numbers", () => {
     const deps = { snapshot: baseSnapshot };
     assert.strictEqual(updateRegistry.x(0, deps).status, "ok");

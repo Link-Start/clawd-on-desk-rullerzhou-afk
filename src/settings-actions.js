@@ -63,6 +63,7 @@ const {
   isValidTextScale,
   normalizeTextScaleByDisplay,
 } = require("./text-scale");
+const { isPetTintId } = require("./pet-customization-catalog");
 const { isValidDisplaySnapshot } = require("./work-area");
 const {
   MAX_AUTO_CLOSE_SECONDS,
@@ -260,6 +261,24 @@ const updateRegistry = {
   codexHookHealthLastNotified: requireString("codexHookHealthLastNotified", { allowEmpty: true }),
   lowPowerIdleMode: requireBoolean("lowPowerIdleMode"),
   keepAwakeWhileWorking: requireBoolean("keepAwakeWhileWorking"),
+  petTint(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return { status: "error", message: "petTint must be a theme-to-tint object" };
+    }
+    for (const [themeId, tintId] of Object.entries(value)) {
+      if (
+        !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(themeId)
+        || !isPetTintId(tintId)
+        || tintId === "none"
+      ) {
+        return {
+          status: "error",
+          message: `petTint entry "${themeId}" must map a safe theme id to a non-default catalog tint id`,
+        };
+      }
+    }
+    return { status: "ok" };
+  },
   bubbleFollowPet: requireBoolean("bubbleFollowPet"),
   sessionHudEnabled: requireBoolean("sessionHudEnabled"),
   sessionHudShowStateLabels: requireBoolean("sessionHudShowStateLabels"),

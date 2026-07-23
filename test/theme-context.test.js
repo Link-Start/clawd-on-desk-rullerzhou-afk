@@ -129,6 +129,7 @@ test("built-in contexts prefer theme-local assets and expose relative renderer p
     assert.strictEqual(ctx.getRendererAssetsPath(), "../themes/calico/assets");
     assert.strictEqual(ctx.getRendererSourceAssetsPath(), "../themes/calico/assets");
     assert.strictEqual(ctx.getRendererConfig().assetsPath, "../themes/calico/assets");
+    assert.strictEqual(ctx.getRendererConfig().petTintSupported, false);
     assert.strictEqual(ctx.getHitRendererConfig().idleFollowSvg, "idle.apng");
   } finally {
     fixture.cleanup();

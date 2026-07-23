@@ -98,6 +98,30 @@ describe("theme schema validation", () => {
     }
   });
 
+  it("validates and derives the explicit pet tint capability", () => {
+    assert.deepStrictEqual(
+      schema.validateTheme(validThemeJson({ customization: { petTint: true } })),
+      []
+    );
+    for (const customization of ["yes", { petTint: "yes" }]) {
+      const errors = schema.validateTheme(validThemeJson({ customization }));
+      assert.ok(
+        errors.some((error) => error.includes("customization")),
+        `expected a customization error for ${JSON.stringify(customization)}`
+      );
+    }
+
+    assert.strictEqual(schema.buildCapabilities(validThemeJson()).petTint, false);
+    assert.strictEqual(
+      schema.buildCapabilities(validThemeJson({ customization: { petTint: true } })).petTint,
+      true
+    );
+    assert.deepStrictEqual(
+      schema.mergeDefaults(validThemeJson()).customization,
+      { petTint: false }
+    );
+  });
+
   it("mergeDefaults carries roamFlipAssets and defaults it to false", () => {
     assert.strictEqual(schema.mergeDefaults(validThemeJson()).roamFlipAssets, false);
     assert.strictEqual(

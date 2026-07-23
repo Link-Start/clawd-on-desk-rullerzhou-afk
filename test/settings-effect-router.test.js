@@ -356,6 +356,63 @@ describe("settings-effect-router", () => {
     ]);
   });
 
+  it("resolves the active theme's tint without rebuilding quick menus", () => {
+    const clawd = { _id: "clawd", _builtin: true, _capabilities: { petTint: true } };
+    const { calls, emit } = createHarness({
+      routerOptions: { getActiveTheme: () => clawd },
+    });
+
+    emit({ petTint: { clawd: "gold", cloudling: "matcha" } });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { petTint: { clawd: "gold", cloudling: "matcha" } }],
+      ["sendToRenderer", "pet-tint-change", {
+        id: "gold",
+        filter: "sepia(0.8) saturate(2.2) hue-rotate(-18deg) brightness(1.05)",
+      }],
+    ]);
+
+    calls.length = 0;
+    emit({ petTint: { cloudling: "vaporwave" } });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { petTint: { cloudling: "vaporwave" } }],
+      ["sendToRenderer", "pet-tint-change", { id: "none", filter: "" }],
+    ]);
+  });
+
+  it("uses the active theme's pet tint policy", () => {
+    let activeTheme = {
+      _id: "calico",
+      _builtin: true,
+      _capabilities: { petTint: false },
+    };
+    const { calls, emit } = createHarness({
+      routerOptions: { getActiveTheme: () => activeTheme },
+    });
+
+    emit({ petTint: { calico: "vaporwave" } });
+    assert.deepStrictEqual(calls[1], [
+      "sendToRenderer",
+      "pet-tint-change",
+      { id: "none", filter: "" },
+    ]);
+
+    calls.length = 0;
+    activeTheme = {
+      _id: "cloudling",
+      _builtin: true,
+      _capabilities: { petTint: true },
+    };
+    emit({ petTint: { cloudling: "vaporwave" } });
+    assert.deepStrictEqual(calls[1], [
+      "sendToRenderer",
+      "pet-tint-change",
+      {
+        id: "vaporwave",
+        filter: "hue-rotate(75deg) saturate(1.25) brightness(1)",
+      },
+    ]);
+  });
+
   it("broadcasts settings changes only to live renderer windows", () => {
     const calls = [];
     const windows = [

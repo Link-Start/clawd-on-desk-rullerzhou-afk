@@ -67,7 +67,7 @@ function buildBaseCtx(overrides = {}) {
     getMiniMode: () => false,
     getMiniTransitioning: () => false,
     getDisableMiniMode: () => false,
-    getActiveThemeCapabilities: () => ({ miniMode: true }),
+    getActiveThemeCapabilities: () => ({ miniMode: true, petTint: true }),
     openDashboard: () => {},
     openSettingsWindow: () => {},
     togglePetVisibility: () => {},
@@ -196,6 +196,22 @@ describe("menu grouping invariants", () => {
     const menu = initMenu(ctx);
     menu.buildTrayMenu();
     assertNoStraySeparators(trayTemplate, "tray menu");
+  });
+});
+
+describe("pet color menu placement", () => {
+  it("keeps pet colors out of both tray and context quick menus", () => {
+    const initMenu = loadMenuWithElectron(fakeElectron());
+    let trayTemplate = null;
+    const ctx = buildBaseCtx({
+      tray: { setContextMenu(menuObj) { trayTemplate = menuObj.template; } },
+    });
+    const menu = initMenu(ctx);
+
+    menu.buildTrayMenu();
+    menu.buildContextMenu();
+    assert.ok(!trayTemplate.some((item) => item.label === "Pet Color"));
+    assert.ok(!ctx.contextMenu.template.some((item) => item.label === "Pet Color"));
   });
 });
 
