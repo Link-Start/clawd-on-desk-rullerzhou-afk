@@ -13,9 +13,7 @@ const {
   computeHudOuterWidth,
   evaluateBaseEligible,
   evaluateShouldShow,
-  countQuotaSources,
-  computeQuotaStripHeight,
-  computeQuotaStripMinWidth,
+  countQuotaCoins,
   pointInExpandedRect,
   computeAutoHideHotZone,
   pointInHotZone,
@@ -359,77 +357,9 @@ describe("session HUD layout", () => {
     assert.strictEqual(computeHudHeight(-1), constants.HUD_ROW_HEIGHT);
   });
 
-  it("adds the quota strip height and sizes a strip-only card to the strip alone", () => {
-    const strip = computeQuotaStripHeight(1);
-    assert.strictEqual(strip, constants.HUD_QUOTA_ROW_HEIGHT + constants.HUD_QUOTA_STRIP_PADDING_Y);
-    assert.strictEqual(
-      computeHudHeight(2, strip),
-      constants.HUD_ROW_HEIGHT * 2 + strip + constants.HUD_BORDER_Y
-    );
-    // Quota with zero sessions: no phantom session row in the height.
-    assert.strictEqual(computeHudHeight(0, strip), strip + constants.HUD_BORDER_Y);
-    assert.strictEqual(computeQuotaStripHeight(0), 0);
-  });
-
-  it("counts the CSS row gap between multiple quota source rows", () => {
-    // .quota-strip { gap: 3px } — without the gap terms every row past the
-    // first clips 3px of the strip out of the window.
-    assert.strictEqual(
-      computeQuotaStripHeight(3),
-      constants.HUD_QUOTA_ROW_HEIGHT * 3
-        + constants.HUD_QUOTA_ROW_GAP * 2
-        + constants.HUD_QUOTA_STRIP_PADDING_Y
-    );
-  });
-
-  it("computes the strip min width from the widest row's real content", () => {
-    const future = Date.now() + 3600000;
-    const bucket = { usedPercent: 41, resetAt: future };
-    const local2x2 = {
-      sessions: [],
-      accountQuota: [{
-        host: null,
-        claudeQuota: { group: { claudeFiveHour: bucket, claudeWeekly: bucket }, updatedAt: 1 },
-        codexQuota: { group: { codexFiveHour: bucket, codexWeekly: bucket }, updatedAt: 1 },
-      }],
-    };
-    // Single unlabeled local source: chrome + stale badge allowance + two
-    // 2-meter provider groups + provider gap.
-    const pill2 = constants.HUD_QUOTA_PILL_CHROME_W
-      + 2 * (constants.HUD_QUOTA_WINDOW_W + constants.HUD_QUOTA_PILL_ITEM_GAP);
-    assert.strictEqual(
-      computeQuotaStripMinWidth(local2x2, true),
-      Math.max(
-        constants.HUD_QUOTA_STRIP_CHROME_W
-          + constants.HUD_QUOTA_STALE_BADGE_W
-          + pill2 * 2
-          + constants.HUD_QUOTA_PILL_GAP,
-        constants.HUD_QUOTA_MIN_WIDTH
-      )
-    );
-    // A second source adds the host label column to every row.
-    const twoSources = {
-      sessions: [],
-      accountQuota: [
-        local2x2.accountQuota[0],
-        { host: "pi", claudeQuota: { group: { claudeWeekly: bucket }, updatedAt: 1 } },
-      ],
-    };
-    const pill1 = constants.HUD_QUOTA_PILL_CHROME_W
-      + constants.HUD_QUOTA_WINDOW_W
-      + constants.HUD_QUOTA_PILL_ITEM_GAP;
-    const expectedWide = constants.HUD_QUOTA_STRIP_CHROME_W
-      + constants.HUD_QUOTA_SOURCE_LABEL_W
-      + pill2 * 2
-      + constants.HUD_QUOTA_PILL_GAP;
-    assert.strictEqual(computeQuotaStripMinWidth(twoSources, true), expectedWide);
-    assert.ok(expectedWide > constants.HUD_QUOTA_STRIP_CHROME_W + constants.HUD_QUOTA_SOURCE_LABEL_W + pill1);
-    // Disabled or empty: no width demand.
-    assert.strictEqual(computeQuotaStripMinWidth(local2x2, false), 0);
-    assert.strictEqual(computeQuotaStripMinWidth({ sessions: [], accountQuota: [] }, true), 0);
-  });
-
-  it("counts quota sources with the renderer's draw rules (expired still renders)", () => {
+  it("counts one quota coin per (source, provider) with drawable buckets", () => {
+    // The HUD no longer carries a quota strip; quota lives in the pet-attached
+    // ring window. countQuotaCoins drives HUD eligibility and ring sizing.
     const future = Date.now() + 3600000;
     const past = Date.now() - 60000;
     const snapshot = {
@@ -439,13 +369,12 @@ describe("session HUD layout", () => {
         { host: "expired", codexQuota: { group: { codexFiveHour: { usedPercent: 9, resetAt: past, expired: true } }, updatedAt: 1 } },
       ],
     };
-    // Expired buckets render as a dimmed reset ring, so their source still
-    // needs a row in the window-height math.
-    assert.strictEqual(countQuotaSources(snapshot, true), 2);
-    assert.strictEqual(countQuotaSources(snapshot, false), 0, "hudShowQuota off disables the strip");
+    // Expired buckets still draw a dimmed reset coin, so they count.
+    assert.strictEqual(countQuotaCoins(snapshot, true), 2);
+    assert.strictEqual(countQuotaCoins(snapshot, false), 0, "hudShowQuota off hides the ring");
   });
 
-  it("does not count Antigravity third-party-only buckets that the HUD renderer cannot draw", () => {
+  it("does not count Antigravity third-party-only buckets the ring cannot draw", () => {
     const snapshot = {
       sessions: [],
       accountQuota: [{
@@ -456,21 +385,29 @@ describe("session HUD layout", () => {
         },
       }],
     };
-    assert.strictEqual(countQuotaSources(snapshot, true), 0);
-    assert.strictEqual(computeQuotaStripMinWidth(snapshot, true), 0);
+    assert.strictEqual(countQuotaCoins(snapshot, true), 0);
     assert.strictEqual(evaluateBaseEligible({ snapshot, showQuota: true }), false);
   });
 
-  it("quota alone makes the HUD base-eligible (check-before-work with zero sessions)", () => {
+  it("the quota ring is base-eligible independently of the Session HUD master", () => {
     const quotaOnly = {
       sessions: [],
       accountQuota: [
         { host: "pi", claudeQuota: { group: { claudeWeekly: { usedPercent: 41, resetAt: Date.now() + 3600000 } }, updatedAt: 1 } },
       ],
     };
-    assert.strictEqual(evaluateBaseEligible({ snapshot: quotaOnly, showQuota: true }), true);
-    assert.strictEqual(evaluateBaseEligible({ snapshot: quotaOnly, showQuota: false }), false);
-    assert.strictEqual(evaluateBaseEligible({ snapshot: { sessions: [], accountQuota: [] }, showQuota: true }), false);
+    // Quota alone reveals the ring — even with the Session HUD turned OFF
+    // (check a remote's quota before starting any work there).
+    assert.strictEqual(evaluateBaseEligible({ snapshot: quotaOnly, sessionHudEnabled: true, showQuota: true }), true);
+    assert.strictEqual(evaluateBaseEligible({ snapshot: quotaOnly, sessionHudEnabled: false, showQuota: true }), true);
+    // Quota switch off → no ring.
+    assert.strictEqual(evaluateBaseEligible({ snapshot: quotaOnly, sessionHudEnabled: true, showQuota: false }), false);
+    // Sessions with the HUD master off and no quota → nothing to show; the HUD
+    // still respects its own master.
+    const sessionsOnly = { sessions: [mkSession("a")], accountQuota: [] };
+    assert.strictEqual(evaluateBaseEligible({ snapshot: sessionsOnly, sessionHudEnabled: false, showQuota: true }), false);
+    assert.strictEqual(evaluateBaseEligible({ snapshot: sessionsOnly, sessionHudEnabled: true, showQuota: true }), true);
+    assert.strictEqual(evaluateBaseEligible({ snapshot: { sessions: [], accountQuota: [] }, sessionHudEnabled: true, showQuota: true }), false);
   });
 });
 

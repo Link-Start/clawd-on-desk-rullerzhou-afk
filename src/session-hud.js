@@ -4,6 +4,7 @@ const { BrowserWindow, screen } = require("electron");
 const path = require("path");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { clampTextScale, scaleHeight, applyZoomToWindow } = require("./text-scale");
+const ringGeom = require("./quota-ring-geometry");
 
 const isLinux = process.platform === "linux";
 const isMac = process.platform === "darwin";
@@ -69,14 +70,16 @@ function evaluateBaseEligible({
   showQuota,
 }) {
   if (!snapshot) return false;
-  if (sessionHudEnabled === false) return false;
   if (petHidden) return false;
   if (miniMode || miniTransitioning) return false;
-  // Account quota alone is enough to show the HUD: the headline use case
-  // ("check the remote's quota BEFORE starting work") is exactly the
-  // zero-sessions moment.
-  return snapshotHasVisibleSessions(snapshot)
-    || countQuotaSources(snapshot, showQuota) > 0;
+  // The Session HUD (session cards) and the quota ring are INDEPENDENT: the
+  // HUD is gated by its own master switch, the ring by the quota switch. Either
+  // one being eligible reveals the floating UI on a pet click — so the ring can
+  // still be checked ("a remote's quota before starting work") even with the
+  // Session HUD turned off.
+  const hudEligible = sessionHudEnabled !== false && snapshotHasVisibleSessions(snapshot);
+  const ringEligible = countQuotaCoins(snapshot, showQuota) > 0;
+  return hudEligible || ringEligible;
 }
 
 function pointInExpandedRect(point, rect, pad) {
@@ -88,20 +91,18 @@ function pointInExpandedRect(point, rect, pad) {
     && point.y <= rect.bottom + p;
 }
 
-function computeAutoHideHotZone({ petHitRect, expectedHudContentBounds, pad }) {
+function computeAutoHideHotZone({ petHitRect, expectedHudContentBounds, expectedRingContentBounds, pad }) {
   const rects = [];
   if (isScreenRect(petHitRect)) rects.push(petHitRect);
-  if (expectedHudContentBounds) {
-    const r = expectedHudContentBounds;
+  // Both the HUD (below the pet) and the quota ring (beside the pet) are part
+  // of the hot zone: the cursor moving from the pet onto either one must keep
+  // the whole floating UI alive.
+  for (const r of [expectedHudContentBounds, expectedRingContentBounds]) {
+    if (!r) continue;
     if (Number.isFinite(r.x) && Number.isFinite(r.y)
         && Number.isFinite(r.width) && Number.isFinite(r.height)
         && r.width > 0 && r.height > 0) {
-      rects.push({
-        left: r.x,
-        top: r.y,
-        right: r.x + r.width,
-        bottom: r.y + r.height,
-      });
+      rects.push({ left: r.x, top: r.y, right: r.x + r.width, bottom: r.y + r.height });
     } else if (isScreenRect(r)) {
       rects.push(r);
     }
@@ -176,113 +177,19 @@ function computeHudLayout(snapshot, options = {}) {
   return { expanded, folded, rowCount };
 }
 
-// ── Account-quota strip sizing ──
-// The strip renders ABOVE session rows inside a window whose height was
-// historically derived from row count alone; without these terms the strip
-// pushes the session rows below the card's overflow clip and they vanish.
-// Row height must match the renderer CSS (compact label + 3px progress bar),
-// and the source-count logic must mirror the renderer's
-// "would this source draw anything" rules (expired buckets still draw, as a
-// dimmed reset meter).
-const HUD_QUOTA_ROW_HEIGHT = 38;
-const HUD_QUOTA_ROW_GAP = 3; // .quota-strip { gap }
-const HUD_QUOTA_STRIP_PADDING_Y = 12;
-const HUD_QUOTA_MIN_WIDTH = 300;
-
-// Width mirror of the renderer CSS (session-hud.html): the window is sized
-// here in the main process before the strip renders, so a row's real width
-// must be computed from the same data the renderer will draw — a flat floor
-// clips meters as soon as a source label or a third provider appears
-// (.quota-pills does not wrap and the row clips overflow).
-const HUD_QUOTA_WINDOW_W = 58; // .quota-window { width }
-const HUD_QUOTA_PILL_CHROME_W = 80; // longest provider identity + horizontal padding
-const HUD_QUOTA_PILL_ITEM_GAP = 8; // .quota-pill { gap }
-const HUD_QUOTA_PILL_GAP = 12; // .quota-pills { gap }
-const HUD_QUOTA_SOURCE_LABEL_W = 102; // .quota-strip-host max-width 92 + row gap 10
-const HUD_QUOTA_STALE_BADGE_W = 40; // compact age badge on a single local source
-// borders 2 + body padding 6 + strip margins 16 + strip padding 36
-const HUD_QUOTA_STRIP_CHROME_W = 60;
-
-// Mirrors HUD_QUOTA_PROVIDERS in session-hud-renderer.js (browser file, no
-// require) — the renderer draws exactly these two windows per provider,
-// regardless of what else the provider's field list carries.
-const HUD_QUOTA_PROVIDER_BUCKETS = {
-  antigravityQuota: ["geminiFiveHour", "geminiWeekly"],
-  claudeQuota: ["claudeFiveHour", "claudeWeekly"],
-  codexQuota: ["codexFiveHour", "codexWeekly"],
-};
-
-function sourceHasDrawableQuota(source) {
-  if (!source || typeof source !== "object") return false;
-  return Object.entries(HUD_QUOTA_PROVIDER_BUCKETS).some(([providerKey, bucketFields]) => {
-    const entry = source[providerKey];
-    const group = entry && entry.group;
-    return !!(group && bucketFields.some((field) => group[field] && typeof group[field] === "object"));
-  });
+// One coin per (source, provider) with drawable quota. The pet-attached quota
+// ring lives in its OWN window (quota-ring.html), sized and placed by
+// quota-ring-geometry; the HUD no longer carries a quota strip. Here we only
+// need the count — quota alone can keep the pet's floating UI up (the "check a
+// remote's quota before starting work" moment), and the ring window is sized
+// from it.
+function countQuotaCoins(snapshot, showQuota) {
+  return ringGeom.countQuotaCoins(snapshot, showQuota);
 }
 
-function countQuotaSources(snapshot, showQuota) {
-  if (showQuota === false) return 0;
-  const sources = snapshot && Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [];
-  let count = 0;
-  for (const source of sources) {
-    if (!source || typeof source !== "object") continue;
-    if (sourceHasDrawableQuota(source)) {
-      count += 1;
-    }
-  }
-  return count;
-}
-
-function computeQuotaStripHeight(quotaSourceRows) {
-  if (!Number.isFinite(quotaSourceRows) || quotaSourceRows <= 0) return 0;
-  return quotaSourceRows * HUD_QUOTA_ROW_HEIGHT
-    + (quotaSourceRows - 1) * HUD_QUOTA_ROW_GAP
-    + HUD_QUOTA_STRIP_PADDING_Y;
-}
-
-// Minimum window width that fits the widest strip row un-clipped. Mirrors
-// the renderer's drawing rules: one pill per provider that has any bucket,
-// one 58px meter per present window, a source label column when the row can
-// carry one (multi-source or named host), and a small allowance for the
-// compact stale badge otherwise.
-function computeQuotaStripMinWidth(snapshot, showQuota) {
-  if (showQuota === false) return 0;
-  const sources = snapshot && Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [];
-  const drawable = sources.filter(sourceHasDrawableQuota);
-  if (!drawable.length) return 0;
-  const multiSource = drawable.length > 1;
-  let widest = 0;
-  for (const source of drawable) {
-    const pillWidths = [];
-    for (const [providerKey, bucketFields] of Object.entries(HUD_QUOTA_PROVIDER_BUCKETS)) {
-      const entry = source[providerKey];
-      if (!entry || !entry.group) continue;
-      const meters = bucketFields
-        .filter((field) => entry.group[field] && typeof entry.group[field] === "object")
-        .length;
-      if (!meters) continue;
-      pillWidths.push(HUD_QUOTA_PILL_CHROME_W + meters * (HUD_QUOTA_WINDOW_W + HUD_QUOTA_PILL_ITEM_GAP));
-    }
-    if (!pillWidths.length) continue;
-    const labelW = multiSource || source.host
-      ? HUD_QUOTA_SOURCE_LABEL_W
-      : HUD_QUOTA_STALE_BADGE_W;
-    const rowW = HUD_QUOTA_STRIP_CHROME_W + labelW
-      + pillWidths.reduce((sum, w) => sum + w, 0)
-      + (pillWidths.length - 1) * HUD_QUOTA_PILL_GAP;
-    widest = Math.max(widest, rowW);
-  }
-  return widest ? Math.max(widest, HUD_QUOTA_MIN_WIDTH) : 0;
-}
-
-function computeHudHeight(rowCount, quotaStripHeight = 0) {
-  const strip = Number.isFinite(quotaStripHeight) && quotaStripHeight > 0 ? quotaStripHeight : 0;
-  if (!Number.isFinite(rowCount) || rowCount <= 0) {
-    // Strip-only card (quota with zero sessions) sizes to the strip alone.
-    return strip > 0 ? strip + HUD_BORDER_Y : HUD_ROW_HEIGHT;
-  }
-  return rowCount * HUD_ROW_HEIGHT + strip + HUD_BORDER_Y;
+function computeHudHeight(rowCount) {
+  if (!Number.isFinite(rowCount) || rowCount <= 0) return HUD_ROW_HEIGHT;
+  return rowCount * HUD_ROW_HEIGHT + HUD_BORDER_Y;
 }
 
 function computeHudReservedOffset(cardHeight) {
@@ -401,6 +308,12 @@ module.exports = function initSessionHud(ctx) {
   let hudFlippedAbove = false;
   let lastReservedOffset = 0;
   let hiddenDestroyTimer = null;
+  // Pet-attached quota ring — a sibling floating window (quota-ring.html) that
+  // shares this module's reveal / pin / grace / hot-zone lifecycle. The HUD now
+  // shows sessions only; the ring shows account quota beside the pet.
+  let ringWindow = null;
+  let ringDidFinishLoad = false;
+  let ringSide = "left";
 
   function getTextScale() {
     return clampTextScale(typeof ctx.getTextScale === "function" ? ctx.getTextScale() : 1);
@@ -462,22 +375,29 @@ module.exports = function initSessionHud(ctx) {
     const workArea = typeof ctx.getNearestWorkArea === "function"
       ? ctx.getNearestWorkArea(cx, cy)
       : { x: 0, y: 0, width: 1280, height: 800 };
-    const layout = computeHudLayout(snapshot, { showStateLabels: ctx.sessionHudShowStateLabels !== false });
-    const quotaRows = countQuotaSources(snapshot, ctx.sessionHudShowQuota !== false);
-    const height = computeHudHeight(layout.rowCount, computeQuotaStripHeight(quotaRows));
-    let width = getHudWidth(
+    const width = getHudWidth(
       ctx.sessionHudShowElapsed !== false,
       ctx.sessionHudShowStateLabels !== false,
       ctx.sessionHudShowContextUsage !== false
     );
-    if (quotaRows > 0) width = Math.max(width, computeQuotaStripMinWidth(snapshot, ctx.sessionHudShowQuota !== false));
     const widthScale = getHudWidthScale(scale);
     // Must carry the SAME scale the visible HUD was laid out with — an
     // unscaled expectation makes the auto-hide hot zone smaller than the
-    // real window, so the cursor "leaves" while still visually over the HUD
-    // (unreachable pin at 150%).
-    const computed = computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale, widthScale });
-    return { hitRect, contentBounds: computed && computed.contentBounds };
+    // real window, so the cursor "leaves" while still visually over it.
+    const hudEnabled = ctx.sessionHudEnabled !== false;
+    const hasSessions = snapshotHasVisibleSessions(snapshot);
+    let contentBounds = null;
+    if (hudEnabled && hasSessions) {
+      const layout = computeHudLayout(snapshot, { showStateLabels: ctx.sessionHudShowStateLabels !== false });
+      const height = computeHudHeight(layout.rowCount);
+      const computed = computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale, widthScale });
+      contentBounds = computed && computed.contentBounds;
+    }
+    const coinCount = countQuotaCoins(snapshot, ctx.sessionHudShowQuota !== false);
+    const ring = coinCount > 0
+      ? ringGeom.computeQuotaRingBounds({ hitRect, anchorRect, workArea, coinCount, scale })
+      : null;
+    return { hitRect, contentBounds, ringContentBounds: ring && ring.contentBounds };
   }
 
   function evaluateAutoHideCursorNow({ syncOnChange = true } = {}) {
@@ -500,6 +420,7 @@ module.exports = function initSessionHud(ctx) {
       const hotZone = computeAutoHideHotZone({
         petHitRect: expected && expected.hitRect,
         expectedHudContentBounds: expected && expected.contentBounds,
+        expectedRingContentBounds: expected && expected.ringContentBounds,
         pad: Math.round(HOT_ZONE_PAD * scale),
       });
       inHotZone = pointInHotZone(cursor, hotZone);
@@ -626,7 +547,8 @@ module.exports = function initSessionHud(ctx) {
     // already mirrored sessionHudPinned=false so shouldShow would return
     // false and cause the HUD to flash hidden).
     const wasVisible =
-      hudWindow && !hudWindow.isDestroyed() && hudWindow.isVisible();
+      (hudWindow && !hudWindow.isDestroyed() && hudWindow.isVisible())
+      || (ringWindow && !ringWindow.isDestroyed() && ringWindow.isVisible());
     if (wasVisible && baseEligible(latestSnapshot)) {
       // Seed revealed state so the HUD stays visible until the user moves
       // away (grace period), preserving the on-screen experience.
@@ -658,10 +580,110 @@ module.exports = function initSessionHud(ctx) {
   }
 
   function sendI18n() {
-    if (!hudWindow || hudWindow.isDestroyed() || !didFinishLoad) return;
-    if (!hudWindow.webContents || hudWindow.webContents.isDestroyed()) return;
     if (typeof ctx.getI18n !== "function") return;
-    hudWindow.webContents.send("session-hud:lang-change", ctx.getI18n());
+    const payload = ctx.getI18n();
+    if (hudWindow && !hudWindow.isDestroyed() && didFinishLoad
+        && hudWindow.webContents && !hudWindow.webContents.isDestroyed()) {
+      hudWindow.webContents.send("session-hud:lang-change", payload);
+    }
+    if (ringWindow && !ringWindow.isDestroyed() && ringDidFinishLoad
+        && ringWindow.webContents && !ringWindow.webContents.isDestroyed()) {
+      ringWindow.webContents.send("quota-ring:lang-change", payload);
+    }
+  }
+
+  function sendRingSnapshot(snapshot = latestSnapshot, side = ringSide) {
+    if (!snapshot || !ringWindow || ringWindow.isDestroyed() || !ringDidFinishLoad) return;
+    if (!ringWindow.webContents || ringWindow.webContents.isDestroyed()) return;
+    ringWindow.webContents.send("quota-ring:snapshot", {
+      accountQuota: Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [],
+      quotaAgentIcons: snapshot.quotaAgentIcons || {},
+      side,
+    });
+  }
+
+  // The quota ring window mirrors the HUD window's chrome (transparent,
+  // non-focusable, always-on-top panel) — only the preload/page and the
+  // snapshot channel differ.
+  function ensureQuotaRing() {
+    if (ringWindow && !ringWindow.isDestroyed()) return ringWindow;
+    if (!ctx.win || ctx.win.isDestroyed()) return null;
+
+    ringDidFinishLoad = false;
+    const scale = getTextScale();
+    const provisional = ringGeom.constants;
+    ringWindow = new BrowserWindow({
+      parent: ctx.win,
+      width: scaleHeight(provisional.COIN_SIZE + provisional.READOUT_W + 40, scale),
+      height: scaleHeight(provisional.COIN_SIZE * 2 + 40, scale),
+      show: false,
+      frame: false,
+      transparent: true,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      alwaysOnTop: !isMac,
+      focusable: false,
+      hasShadow: false,
+      backgroundColor: "#00000000",
+      ...(isLinux ? { type: LINUX_WINDOW_TYPE } : {}),
+      ...(isMac ? { type: "panel" } : {}),
+      webPreferences: {
+        preload: path.join(__dirname, "preload-quota-ring.js"),
+        nodeIntegration: false,
+        contextIsolation: true,
+      },
+    });
+
+    if (isWin) ringWindow.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
+    if (typeof ctx.guardAlwaysOnTop === "function") ctx.guardAlwaysOnTop(ringWindow);
+
+    ringWindow.loadFile(path.join(__dirname, "quota-ring.html"));
+    ringWindow.webContents.once("did-finish-load", () => {
+      ringDidFinishLoad = true;
+      applyZoomToWindow(ringWindow, getTextScale());
+      sendI18n();
+      syncSessionHud();
+    });
+    ringWindow.on("closed", () => {
+      ringWindow = null;
+      ringDidFinishLoad = false;
+    });
+
+    return ringWindow;
+  }
+
+  function hideQuotaRing() {
+    if (ringWindow && !ringWindow.isDestroyed()) ringWindow.hide();
+  }
+
+  function showQuotaRing(win) {
+    if (!win || win.isDestroyed() || !ringDidFinishLoad) return;
+    if (!win.isVisible()) {
+      win.showInactive();
+      keepOutOfTaskbar(win);
+      if (isMac) deferMacFloatingVisibility(ctx, win);
+      else if (typeof ctx.reapplyMacVisibility === "function") ctx.reapplyMacVisibility();
+    }
+  }
+
+  function computeRingBounds(snapshot, scale = getTextScale()) {
+    if (!ctx.win || ctx.win.isDestroyed()) return null;
+    const coinCount = countQuotaCoins(snapshot, ctx.sessionHudShowQuota !== false);
+    if (coinCount <= 0) return null;
+    const petBounds = typeof ctx.getPetWindowBounds === "function" ? ctx.getPetWindowBounds() : null;
+    if (!petBounds) return null;
+    const hitRect = typeof ctx.getHitRectScreen === "function" ? ctx.getHitRectScreen(petBounds) : null;
+    const anchorRect = typeof ctx.getSessionHudAnchorRect === "function" ? ctx.getSessionHudAnchorRect(petBounds) : null;
+    const cx = petBounds.x + petBounds.width / 2;
+    const cy = petBounds.y + petBounds.height / 2;
+    const workArea = typeof ctx.getNearestWorkArea === "function"
+      ? ctx.getNearestWorkArea(cx, cy)
+      : { x: 0, y: 0, width: 1280, height: 800 };
+    return ringGeom.computeQuotaRingBounds({ hitRect, anchorRect, workArea, coinCount, scale });
   }
 
   function ensureSessionHud() {
@@ -752,14 +774,12 @@ module.exports = function initSessionHud(ctx) {
       ? ctx.getNearestWorkArea(cx, cy)
       : { x: 0, y: 0, width: 1280, height: 800 };
     const layout = computeHudLayout(snapshot, { showStateLabels: ctx.sessionHudShowStateLabels !== false });
-    const quotaRows = countQuotaSources(snapshot, ctx.sessionHudShowQuota !== false);
-    const height = computeHudHeight(layout.rowCount, computeQuotaStripHeight(quotaRows));
-    let width = getHudWidth(
+    const height = computeHudHeight(layout.rowCount);
+    const width = getHudWidth(
       ctx.sessionHudShowElapsed !== false,
       ctx.sessionHudShowStateLabels !== false,
       ctx.sessionHudShowContextUsage !== false
     );
-    if (quotaRows > 0) width = Math.max(width, computeQuotaStripMinWidth(snapshot, ctx.sessionHudShowQuota !== false));
     const widthScale = getHudWidthScale(scale);
     lastHudHeight = height;
     return computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale, widthScale });
@@ -779,36 +799,54 @@ module.exports = function initSessionHud(ctx) {
 
   function syncSessionHud(snapshot = latestSnapshot || getCurrentSnapshot(), options = {}) {
     latestSnapshot = snapshot;
-    // Defend against stale reveal: if base eligibility dropped (e.g. last
-    // session ended), clear any leftover clickRevealed so a future new
-    // session does not pop the HUD without a fresh user click.
+    // Defend against stale reveal: if base eligibility dropped (last session
+    // ended AND quota went away), clear any leftover clickRevealed so a future
+    // new session does not pop the UI without a fresh user click.
     if (!baseEligible(snapshot)) {
       clearReveal();
     }
     syncAutoHidePollLifecycle();
-    if (!shouldShow(snapshot)) {
-      hideSessionHud();
-      return;
-    }
 
-    const win = ensureSessionHud();
-    if (!win || win.isDestroyed()) return;
-
-    // Resolve the scale ONCE per sync and feed the same value to both the
-    // zoom injection and the bounds math — two separate reads could disagree
-    // mid-display-crossing and produce a scaled window with unzoomed content
-    // (or the clipped inverse).
+    const show = shouldShow(snapshot);
+    // Resolve the scale ONCE per sync and feed the same value to both windows
+    // and the bounds math — separate reads could disagree mid-display-crossing.
     const scale = getTextScale();
-    const computed = computeBounds(snapshot, scale);
-    if (!computed) {
+
+    // ── Session HUD (sessions only; gated by its own master, independent of
+    // the quota ring) ──
+    const hudEnabled = ctx.sessionHudEnabled !== false;
+    const hasSessions = snapshotHasVisibleSessions(snapshot);
+    const hudComputed = show && hudEnabled && hasSessions ? computeBounds(snapshot, scale) : null;
+    if (!hudComputed) {
       hideSessionHud();
-      return;
+    } else {
+      const win = ensureSessionHud();
+      if (win && !win.isDestroyed()) {
+        applyZoomToWindow(win, scale);
+        hudFlippedAbove = !!hudComputed.flippedAbove;
+        win.setBounds(hudComputed.bounds);
+        if (options.sendSnapshot !== false) sendSnapshot(snapshot);
+        showSessionHud(win);
+      }
     }
-    applyZoomToWindow(win, scale);
-    hudFlippedAbove = !!computed.flippedAbove;
-    win.setBounds(computed.bounds);
-    if (options.sendSnapshot !== false) sendSnapshot(snapshot);
-    showSessionHud(win);
+
+    // ── Quota ring (quota only; attached beside the pet) ──
+    const ring = show ? computeRingBounds(snapshot, scale) : null;
+    if (!ring) {
+      hideQuotaRing();
+    } else {
+      const rwin = ensureQuotaRing();
+      if (rwin && !rwin.isDestroyed()) {
+        applyZoomToWindow(rwin, scale);
+        rwin.setBounds(ring.bounds);
+        // Send the side whenever it flips (edge crossing) even on a
+        // reposition-only sync, or the renderer keeps the stale layout.
+        const sideChanged = ring.side !== ringSide;
+        ringSide = ring.side;
+        if (options.sendSnapshot !== false || sideChanged) sendRingSnapshot(snapshot, ring.side);
+        showQuotaRing(rwin);
+      }
+    }
   }
 
   function broadcastSessionSnapshot(snapshot) {
@@ -845,6 +883,9 @@ module.exports = function initSessionHud(ctx) {
     hudWindow = null;
     didFinishLoad = false;
     hudFlippedAbove = false;
+    if (ringWindow && !ringWindow.isDestroyed()) ringWindow.destroy();
+    ringWindow = null;
+    ringDidFinishLoad = false;
     lastHudHeight = HUD_ROW_HEIGHT;
     notifyReservedOffsetIfChanged();
   }
@@ -870,9 +911,7 @@ module.exports.__test = {
   computeHudLayout,
   getHudMaxExpandedRows,
   computeHudHeight,
-  countQuotaSources,
-  computeQuotaStripHeight,
-  computeQuotaStripMinWidth,
+  countQuotaCoins,
   computeHudReservedOffset,
   isHudSession,
   getHudWidth,
@@ -892,17 +931,6 @@ module.exports.__test = {
     HUD_LABELS_ONLY_WIDTH_TRIM,
     HUD_HEIGHT,
     HUD_ROW_HEIGHT,
-    HUD_QUOTA_ROW_HEIGHT,
-    HUD_QUOTA_ROW_GAP,
-    HUD_QUOTA_STRIP_PADDING_Y,
-    HUD_QUOTA_MIN_WIDTH,
-    HUD_QUOTA_SOURCE_LABEL_W,
-    HUD_QUOTA_STALE_BADGE_W,
-    HUD_QUOTA_STRIP_CHROME_W,
-    HUD_QUOTA_WINDOW_W,
-    HUD_QUOTA_PILL_CHROME_W,
-    HUD_QUOTA_PILL_ITEM_GAP,
-    HUD_QUOTA_PILL_GAP,
     HUD_MAX_EXPANDED_ROWS,
     HUD_MAX_EXPANDED_ROWS_LABELS,
     HUD_WINDOW_SHELL,

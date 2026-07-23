@@ -58,8 +58,6 @@
     "sessionHudShowStateLabels",
     "sessionHudShowElapsed",
     "sessionHudShowContextUsage",
-    "sessionHudShowQuota",
-    "quotaMergeSources",
     "sessionHudCleanupDetached",
   ];
   const SESSION_HUD_SUMMARY_KEYS = new Set([
@@ -67,8 +65,6 @@
     "sessionHudShowStateLabels",
     "sessionHudShowElapsed",
     "sessionHudShowContextUsage",
-    "sessionHudShowQuota",
-    "quotaMergeSources",
     "sessionHudCleanupDetached",
   ]);
   const BUBBLE_SECONDS_AUTO_COMMIT_DELAY_MS = 600;
@@ -108,6 +104,7 @@
 
     parent.appendChild(helpers.buildSection(t("sectionSession"), [
       buildSessionHudGroup(),
+      buildQuotaRingGroup(),
       buildSessionCleanupGroup(),
       buildDashboardRow(),
     ]));
@@ -446,6 +443,40 @@
     });
   }
 
+  // The quota ring is a sibling of the Session HUD under "Session management",
+  // not a child of it: its switches are never gated by the HUD master, so the
+  // ring can be used with the Session HUD turned off (and vice versa).
+  function buildQuotaRingGroup() {
+    const enabledRow = helpers.buildSwitchRow({
+      key: "sessionHudShowQuota",
+      labelKey: "rowQuotaRingEnabled",
+      descKey: "rowQuotaRingEnabledDesc",
+    });
+    const mergeRow = helpers.buildSwitchRow({
+      key: "quotaMergeSources",
+      labelKey: "rowQuotaMergeSources",
+      descKey: "rowQuotaMergeSourcesDesc",
+    });
+    // "Merge across machines" only matters with more than one reporting source
+    // (WSL / SSH remotes). Hidden by default so single-machine users never see
+    // a confusing no-op switch; revealed once multiple sources are confirmed.
+    mergeRow.style.display = "none";
+    if (window.settingsAPI && typeof window.settingsAPI.getQuotaSourceCount === "function") {
+      Promise.resolve(window.settingsAPI.getQuotaSourceCount())
+        .then((count) => { if (Number(count) > 1) mergeRow.style.display = ""; })
+        .catch(() => {});
+    }
+    const optionList = buildOptionList("quota-ring-option-list", [enabledRow, mergeRow]);
+    return helpers.buildCollapsibleGroup({
+      id: "general:quota-ring",
+      title: t("rowQuotaRingGroup"),
+      desc: t("rowQuotaRingGroupDesc"),
+      defaultCollapsed: true,
+      className: "quota-ring-collapsible",
+      children: [optionList],
+    });
+  }
+
   function buildOptionList(className, rows) {
     const list = document.createElement("div");
     list.className = `settings-option-list ${className || ""}`.trim();
@@ -479,17 +510,6 @@
         labelKey: "rowSessionHudContextUsage",
         descKey: "rowSessionHudContextUsageDesc",
         disabled: !sessionHudControlsEnabled,
-      }),
-      helpers.buildSwitchRow({
-        key: "sessionHudShowQuota",
-        labelKey: "rowSessionHudQuota",
-        descKey: "rowSessionHudQuotaDesc",
-        disabled: !sessionHudControlsEnabled,
-      }),
-      helpers.buildSwitchRow({
-        key: "quotaMergeSources",
-        labelKey: "rowQuotaMergeSources",
-        descKey: "rowQuotaMergeSourcesDesc",
       }),
       helpers.buildSwitchRow({
         key: "sessionHudCleanupDetached",

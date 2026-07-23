@@ -3515,6 +3515,7 @@ registerSettingsIpc({
   fs,
   path,
   settingsController: _settingsController,
+  getQuotaSourceCount: () => _state.getQuotaSourceCount(),
   themeLoader,
   codexPetMain,
   getSettingsWindow,

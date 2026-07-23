@@ -1,0 +1,218 @@
+"use strict";
+
+// ── Pet-attached quota "Orbit" ring geometry ──
+//
+// The account-quota indicators live in their OWN transparent window, attached
+// to the pet's side (not stacked inside the Session HUD, which now shows only
+// sessions). One coin per (source, provider); a coin carries up to two
+// concentric rings — an outer ring for the shorter/rolling window and an inner
+// ring for the weekly window — so a single provider's 5h + weekly both read at
+// a glance without spawning two gauges. Providers beyond the cap collapse into
+// a "+N" affordance that opens the Dashboard.
+//
+// This module owns the PURE geometry: how many coins a snapshot draws, the
+// cluster's pixel footprint, and where it sits relative to the pet (default
+// left — clear of the right-entering permission bubble — flipping to the right
+// only when the left has no room). The renderer (browser context) owns the
+// per-coin visual model; the main process (session-hud.js) requires this for
+// window sizing, positioning, and the auto-hide hot zone.
+
+// Provider → the two bucket fields the coin draws (outer = rolling, inner =
+// weekly). Mirrors HUD_QUOTA_PROVIDERS in quota-ring-renderer.js (browser file,
+// no require). Labels are NOT assumed here — the renderer derives them from
+// each bucket's windowMinutes, so "5h" is a fallback, never a hard limit.
+const RING_PROVIDERS = [
+  { key: "antigravityQuota", outer: "geminiFiveHour", inner: "geminiWeekly" },
+  { key: "claudeQuota", outer: "claudeFiveHour", inner: "claudeWeekly" },
+  { key: "codexQuota", outer: "codexFiveHour", inner: "codexWeekly" },
+];
+
+// Layout constants in CSS px (scaled by textScale by the caller, exactly like
+// the HUD). Kept in sync with quota-ring.html.
+const COIN_SIZE = 26; // outer ring diameter
+const COIN_GAP = 10; // vertical gap between stacked coins
+const READOUT_W = 34; // "%" + window tick column, outer side of each coin
+const COIN_READOUT_GAP = 6; // gap between coin and its readout
+const CLUSTER_PAD = 6; // inner padding around the cluster content
+const OVERFLOW_GAP = 8;
+const OVERFLOW_H = 20; // "+N" pill row
+const RING_PET_GAP = 8; // gap between the pet body and the cluster
+const RING_EDGE_MARGIN = 8; // keep the cluster this far from the work-area edge
+const RING_MAX_COINS = 4; // visible coins before overflow collapses to "+N"
+
+// Transparent window shell (room for the coin drop shadows), mirrors HUD.
+const RING_SHELL = Object.freeze({ top: 6, right: 6, bottom: 8, left: 6 });
+
+function isScreenRect(rect) {
+  return !!rect
+    && Number.isFinite(rect.left)
+    && Number.isFinite(rect.top)
+    && Number.isFinite(rect.right)
+    && Number.isFinite(rect.bottom);
+}
+
+function clamp(value, min, max) {
+  if (max < min) return min;
+  return Math.max(min, Math.min(value, max));
+}
+
+// A provider draws a coin when its group carries at least one of the two
+// bucket fields as an object. Mirrors the renderer's draw rule exactly so the
+// window is never sized for a coin the renderer will not draw (or vice versa).
+function providerHasDrawableQuota(source, def) {
+  const entry = source && source[def.key];
+  const group = entry && entry.group;
+  if (!group) return false;
+  return (group[def.outer] && typeof group[def.outer] === "object")
+    || (group[def.inner] && typeof group[def.inner] === "object");
+}
+
+// Total coins a snapshot draws: one per (source, provider-with-quota).
+function countQuotaCoins(snapshot, showQuota) {
+  if (showQuota === false) return 0;
+  const sources = snapshot && Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [];
+  let count = 0;
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    for (const def of RING_PROVIDERS) {
+      if (providerHasDrawableQuota(source, def)) count += 1;
+    }
+  }
+  return count;
+}
+
+function formatWindowLabel(windowMinutes, fallbackLabel) {
+  const minutes = Number(windowMinutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) return fallbackLabel;
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)}d`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${Math.round(minutes)}m`;
+}
+
+// Severity thresholds match the Dashboard / prior HUD strip: > 85 hot, >= 60
+// warn, else ok. usedPercent semantics (a full ring = nearly exhausted).
+function quotaSeverity(usedPercent) {
+  const p = Number(usedPercent);
+  if (!Number.isFinite(p)) return "ok";
+  if (p > 85) return "hot";
+  if (p >= 60) return "warn";
+  return "ok";
+}
+
+// Content width is fixed (coin + readout column); height grows with the coin
+// count up to the cap, then adds an overflow row. The ring fills with USED
+// percent (matching the Dashboard) and an empty ring is the reset state, so
+// the semantics read from the form — no persistent "used" label needed.
+function ringClusterContentSize(coinCount) {
+  const total = Math.max(0, Math.floor(Number(coinCount) || 0));
+  const visible = Math.min(total, RING_MAX_COINS);
+  const overflow = Math.max(0, total - visible);
+  const rows = Math.max(1, visible);
+
+  const width = CLUSTER_PAD * 2 + READOUT_W + COIN_READOUT_GAP + COIN_SIZE;
+  let height = CLUSTER_PAD * 2
+    + rows * COIN_SIZE
+    + Math.max(0, rows - 1) * COIN_GAP;
+  if (overflow > 0) height += OVERFLOW_GAP + OVERFLOW_H;
+  return { width, height, visible, overflow };
+}
+
+// Default side is LEFT (the permission bubble slides in from the right, so the
+// left flank keeps them apart). Flip to the right only when the left cannot fit
+// the cluster; if neither side fits, keep the side with more room and let the
+// caller clamp.
+function resolveRingSide({ petLeft, petRight, workArea, clusterWidth, gap = RING_PET_GAP, margin = RING_EDGE_MARGIN }) {
+  if (!workArea) return "left";
+  const need = clusterWidth + gap + margin;
+  const leftRoom = petLeft - workArea.x;
+  const rightRoom = (workArea.x + workArea.width) - petRight;
+  if (leftRoom >= need) return "left";
+  if (rightRoom >= need) return "right";
+  return leftRoom >= rightRoom ? "left" : "right";
+}
+
+// Full placement: cluster footprint, chosen side, and the outer window bounds
+// (content + transparent shell). Vertically centered on the pet's follow rect
+// (the anchor rect if provided, else the hit rect), clamped to the work area.
+function computeQuotaRingBounds({
+  hitRect,
+  anchorRect,
+  workArea,
+  coinCount,
+  scale = 1,
+  sidePreference,
+}) {
+  // Attach to the pet's actual body (hit rect); fall back to the HUD anchor.
+  const followRect = isScreenRect(hitRect) ? hitRect : anchorRect;
+  if (!isScreenRect(followRect) || !workArea) return null;
+  const total = Math.max(0, Math.floor(Number(coinCount) || 0));
+  if (total <= 0) return null;
+
+  const s = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  const content = ringClusterContentSize(total);
+  const contentW = Math.round(content.width * s);
+  const contentH = Math.round(content.height * s);
+  const gap = Math.round(RING_PET_GAP * s);
+  const margin = Math.round(RING_EDGE_MARGIN * s);
+  const shell = {
+    top: Math.round(RING_SHELL.top * s),
+    right: Math.round(RING_SHELL.right * s),
+    bottom: Math.round(RING_SHELL.bottom * s),
+    left: Math.round(RING_SHELL.left * s),
+  };
+
+  const petLeft = Math.round(followRect.left);
+  const petRight = Math.round(followRect.right);
+  const petCy = Math.round((followRect.top + followRect.bottom) / 2);
+
+  const side = sidePreference === "left" || sidePreference === "right"
+    ? sidePreference
+    : resolveRingSide({ petLeft, petRight, workArea, clusterWidth: contentW, gap, margin });
+
+  const minX = Math.round(workArea.x + margin);
+  const maxX = Math.round(workArea.x + workArea.width - margin - contentW);
+  let x = side === "left" ? petLeft - gap - contentW : petRight + gap;
+  x = clamp(x, minX, maxX);
+
+  const minY = Math.round(workArea.y + margin);
+  const maxY = Math.round(workArea.y + workArea.height - margin - contentH);
+  const y = clamp(petCy - Math.round(contentH / 2), minY, maxY);
+
+  const contentBounds = { x, y, width: contentW, height: contentH };
+  return {
+    side,
+    visibleCoins: content.visible,
+    overflow: content.overflow,
+    contentBounds,
+    bounds: {
+      x: contentBounds.x - shell.left,
+      y: contentBounds.y - shell.top,
+      width: contentW + shell.left + shell.right,
+      height: contentH + shell.top + shell.bottom,
+    },
+  };
+}
+
+module.exports = {
+  RING_PROVIDERS,
+  countQuotaCoins,
+  formatWindowLabel,
+  quotaSeverity,
+  ringClusterContentSize,
+  resolveRingSide,
+  computeQuotaRingBounds,
+  providerHasDrawableQuota,
+  constants: {
+    COIN_SIZE,
+    COIN_GAP,
+    READOUT_W,
+    COIN_READOUT_GAP,
+    CLUSTER_PAD,
+    OVERFLOW_GAP,
+    OVERFLOW_H,
+    RING_PET_GAP,
+    RING_EDGE_MARGIN,
+    RING_MAX_COINS,
+    RING_SHELL,
+  },
+};

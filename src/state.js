@@ -1199,6 +1199,13 @@ function updateAccountQuota(host, quotas = {}) {
   return changed;
 }
 
+// Distinct reporting sources that currently carry quota (this machine + WSL /
+// SSH remotes), UNmerged. The settings UI hides the "merge across machines"
+// switch when there is only one source, since merging is then a no-op.
+function getQuotaSourceCount() {
+  return accountQuota.snapshot({ mergeSources: false }).length;
+}
+
 // ── #406 Stop completion gate ──
 // A Claude "Stop" maps to "attention" (celebrate + complete sound), but a Stop
 // is not always a real turn completion. Decidable-now signals (live crons,
@@ -2552,6 +2559,7 @@ return {
   updateSessionFocusMetadata,
   updateSessionMetadata,
   updateAccountQuota,
+  getQuotaSourceCount,
   clearPermissionNotification,
   ackSessionCompletion,
   clearSessionsByAgent,
