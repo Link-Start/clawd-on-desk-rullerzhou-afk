@@ -394,11 +394,18 @@ describe("session HUD layout", () => {
       }],
     };
     // Single unlabeled local source: chrome + stale badge allowance + two
-    // 2-donut pills + pill gap. The old flat 300 floor clipped this row.
-    const pill2 = 33 + 2 * (36 + 6);
+    // 2-meter provider groups + provider gap.
+    const pill2 = constants.HUD_QUOTA_PILL_CHROME_W
+      + 2 * (constants.HUD_QUOTA_WINDOW_W + constants.HUD_QUOTA_PILL_ITEM_GAP);
     assert.strictEqual(
       computeQuotaStripMinWidth(local2x2, true),
-      Math.max(constants.HUD_QUOTA_STRIP_CHROME_W + constants.HUD_QUOTA_STALE_BADGE_W + pill2 * 2 + 7, 300)
+      Math.max(
+        constants.HUD_QUOTA_STRIP_CHROME_W
+          + constants.HUD_QUOTA_STALE_BADGE_W
+          + pill2 * 2
+          + constants.HUD_QUOTA_PILL_GAP,
+        constants.HUD_QUOTA_MIN_WIDTH
+      )
     );
     // A second source adds the host label column to every row.
     const twoSources = {
@@ -408,8 +415,13 @@ describe("session HUD layout", () => {
         { host: "pi", claudeQuota: { group: { claudeWeekly: bucket }, updatedAt: 1 } },
       ],
     };
-    const pill1 = 33 + (36 + 6);
-    const expectedWide = constants.HUD_QUOTA_STRIP_CHROME_W + constants.HUD_QUOTA_SOURCE_LABEL_W + pill2 * 2 + 7;
+    const pill1 = constants.HUD_QUOTA_PILL_CHROME_W
+      + constants.HUD_QUOTA_WINDOW_W
+      + constants.HUD_QUOTA_PILL_ITEM_GAP;
+    const expectedWide = constants.HUD_QUOTA_STRIP_CHROME_W
+      + constants.HUD_QUOTA_SOURCE_LABEL_W
+      + pill2 * 2
+      + constants.HUD_QUOTA_PILL_GAP;
     assert.strictEqual(computeQuotaStripMinWidth(twoSources, true), expectedWide);
     assert.ok(expectedWide > constants.HUD_QUOTA_STRIP_CHROME_W + constants.HUD_QUOTA_SOURCE_LABEL_W + pill1);
     // Disabled or empty: no width demand.

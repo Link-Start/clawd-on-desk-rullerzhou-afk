@@ -227,16 +227,12 @@ body { padding: 2px 3px 8px; }
   white-space: nowrap;
 }
 
-/* Account-quota strip: per reporting source, ring gauges grouped in a soft
-   pill per provider, above the session rows. At-a-glance only — the
+/* Account-quota strip: per reporting source, slim window meters grouped by
+   provider, above the session rows. At-a-glance only — the
    Dashboard owns the detailed view. */
 .quota-strip {
-  /* Its own block, not part of the session-list rhythm: inset margins make
-     the separator a floating hairline. Rows center, so the horizontal
-     padding must be symmetric or the visual center drifts; 18px per side
-     also keeps a full row clear of the card-level pin button corner. */
-  margin: 5px 8px 2px;
-  padding: 2px 18px 4px;
+  margin: 4px 8px 1px;
+  padding: 1px 18px 5px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.08);
   display: flex;
   flex-direction: column;
@@ -250,7 +246,7 @@ body { padding: 2px 3px 8px; }
   align-items: center;
   justify-content: center;
   gap: 10px;
-  min-height: 54px;
+  min-height: 38px;
   white-space: nowrap;
   overflow: hidden;
 }
@@ -275,67 +271,79 @@ body { padding: 2px 3px 8px; }
 }
 .quota-pills {
   display: flex;
-  gap: 7px;
+  gap: 12px;
   flex: 0 0 auto;
 }
 .quota-pill {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 9px 3px 8px;
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.045);
+  gap: 8px;
+  padding: 4px 2px;
+}
+.quota-pill + .quota-pill {
+  padding-left: 12px;
+  border-left: 1px solid rgba(0, 0, 0, 0.08);
 }
 @media (prefers-color-scheme: dark) {
-  .quota-pill { background: rgba(255, 255, 255, 0.07); }
+  .quota-pill + .quota-pill { border-left-color: rgba(255, 255, 255, 0.10); }
+}
+.quota-pill-identity {
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
 .quota-pill-label {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  opacity: 0.6;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
 }
 .quota-pill-icon {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   object-fit: contain;
   flex: 0 0 auto;
 }
-.quota-donut-wrap {
+.quota-window {
+  width: 58px;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 0;
+  gap: 4px;
 }
-.quota-donut { display: block; }
-.quota-donut .track {
-  stroke: rgba(0, 0, 0, 0.10);
+.quota-window-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
 }
-@media (prefers-color-scheme: dark) {
-  .quota-donut .track { stroke: rgba(255, 255, 255, 0.14); }
+.quota-window-label {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 500;
 }
-.quota-donut .arc {
-  fill: none;
-  stroke-linecap: round;
-  transform: rotate(-90deg);
-  transform-origin: center;
-}
-.quota-donut .arc.sev-ok { stroke: #10b981; }
-.quota-donut .arc.sev-warn { stroke: #f59e0b; }
-.quota-donut .arc.sev-hot { stroke: #ef4444; }
-.quota-donut .arc.sev-reset { stroke: rgba(128, 128, 128, 0.4); }
-.quota-donut-reset { opacity: 0.55; }
-.quota-donut text {
-  font-size: 11px;
+.quota-window-value {
+  font-size: 10px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  fill: var(--text, currentColor);
 }
-.quota-donut-cap {
-  font-size: 8px;
-  line-height: 1.2;
-  opacity: 0.5;
+.quota-window-track {
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.10);
 }
+@media (prefers-color-scheme: dark) {
+  .quota-window-track { background: rgba(255, 255, 255, 0.13); }
+}
+.quota-window-fill {
+  height: 100%;
+  min-width: 1px;
+  border-radius: 2px;
+}
+.quota-window-fill.sev-ok { background: #10b981; }
+.quota-window-fill.sev-warn { background: #f59e0b; }
+.quota-window-fill.sev-hot { background: #ef4444; }
+.quota-window-fill.sev-reset { background: rgba(128, 128, 128, 0.4); }
+.quota-window-reset { opacity: 0.52; }
 
 .state-chip {
   flex: 0 0 auto;

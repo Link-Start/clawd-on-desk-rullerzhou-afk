@@ -75,6 +75,72 @@ describe("account quota store", () => {
     assert.strictEqual(group.codexWeekly.usedPercent, 43, "partial report must not evict the sibling bucket");
   });
 
+  it("replaces a window-aware Codex snapshot so a removed short window cannot linger", () => {
+    const store = createAccountQuotaStore({ persistPath: null, now: () => 1000 });
+    store.update(null, {
+      codexQuota: {
+        codexFiveHour: {
+          usedPercent: 4,
+          windowMinutes: 300,
+          resetAt: 999999,
+          capturedAt: 100,
+        },
+        codexWeekly: {
+          usedPercent: 43,
+          windowMinutes: 10080,
+          resetAt: 999999,
+          capturedAt: 100,
+        },
+      },
+    });
+    store.update(null, {
+      codexQuota: {
+        codexWeekly: {
+          usedPercent: 12,
+          windowMinutes: 10080,
+          resetAt: 999999,
+          capturedAt: 200,
+        },
+      },
+    });
+
+    const group = store.snapshot()[0].codexQuota.group;
+    assert.strictEqual(group.codexFiveHour, undefined);
+    assert.deepStrictEqual(group.codexWeekly, {
+      usedPercent: 12,
+      windowMinutes: 10080,
+      resetAt: 999999,
+    });
+  });
+
+  it("rejects an older complete Codex snapshot before it can relocate newer windows", () => {
+    const store = createAccountQuotaStore({ persistPath: null, now: () => 1000 });
+    store.update(null, {
+      codexQuota: {
+        codexWeekly: {
+          usedPercent: 12,
+          windowMinutes: 10080,
+          resetAt: 999999,
+          capturedAt: 200,
+        },
+      },
+    });
+
+    assert.strictEqual(store.update(null, {
+      codexQuota: {
+        codexFiveHour: {
+          usedPercent: 99,
+          windowMinutes: 300,
+          resetAt: 999999,
+          capturedAt: 100,
+        },
+      },
+    }), false);
+    const group = store.snapshot()[0].codexQuota.group;
+    assert.strictEqual(group.codexFiveHour, undefined);
+    assert.strictEqual(group.codexWeekly.usedPercent, 12);
+  });
+
   it("shape-sanitizes the reporting host label (control chars stripped, length capped)", () => {
     const store = createAccountQuotaStore({ persistPath: null, now: () => 1000 });
     store.update(`evil\u0000host\n${"x".repeat(200)}`, {
@@ -139,6 +205,31 @@ describe("account quota store", () => {
     assert.strictEqual(snapshot[0].host, "pi");
     assert.deepStrictEqual(snapshot[0].claudeQuota.group, group);
     assert.strictEqual(snapshot[0].claudeQuota.updatedAt, 1234, "persisted stamp survives reload");
+  });
+
+  it("drops only unlabelable v1 Codex cache buckets on upgrade", () => {
+    const persistPath = tempPersistPath();
+    fs.writeFileSync(persistPath, JSON.stringify({
+      version: 1,
+      sources: [{
+        host: null,
+        codexQuota: {
+          group: { codexFiveHour: { usedPercent: 12, resetAt: 9999999 } },
+          updatedAt: 1000,
+          lastSeenAt: 1000,
+        },
+        claudeQuota: {
+          group: { claudeWeekly: { usedPercent: 41, resetAt: 9999999 } },
+          updatedAt: 1000,
+          lastSeenAt: 1000,
+        },
+      }],
+    }));
+
+    const snapshot = createAccountQuotaStore({ persistPath, now: () => 2000 }).snapshot();
+    assert.strictEqual(snapshot.length, 1);
+    assert.strictEqual(snapshot[0].codexQuota, undefined);
+    assert.strictEqual(snapshot[0].claudeQuota.group.claudeWeekly.usedPercent, 41);
   });
 
   it("treats a missing or corrupt persist file as an empty store", () => {

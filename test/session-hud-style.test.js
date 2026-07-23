@@ -16,24 +16,25 @@ describe("session HUD account-quota strip", () => {
     assert.match(sessionHudHtml, /\.quota-strip\s*\{/);
   });
 
-  it("draws ring gauges per provider window with severity coloring", () => {
-    assert.match(sessionHudRenderer, /createQuotaDonut/);
-    assert.match(sessionHudRenderer, /stroke-dasharray/);
+  it("draws compact progress meters per provider window with severity coloring", () => {
+    assert.match(sessionHudRenderer, /createQuotaMeter/);
+    assert.match(sessionHudRenderer, /quota-window-track/);
     assert.match(sessionHudRenderer, /quotaSeverityClass/);
     assert.match(sessionHudRenderer, /sev-hot/);
-    assert.match(sessionHudHtml, /\.quota-donut \.arc\.sev-ok/);
-    assert.match(sessionHudHtml, /\.quota-donut \.arc\.sev-warn/);
-    assert.match(sessionHudHtml, /\.quota-donut \.arc\.sev-hot/);
+    assert.match(sessionHudHtml, /\.quota-window-fill\.sev-ok/);
+    assert.match(sessionHudHtml, /\.quota-window-fill\.sev-warn/);
+    assert.match(sessionHudHtml, /\.quota-window-fill\.sev-hot/);
     assert.match(sessionHudHtml, /\.quota-pill\s*\{/);
+    assert.doesNotMatch(sessionHudRenderer, /createQuotaDonut/);
   });
 
   it("dims reset windows and labels quiet sources instead of posing as live", () => {
     assert.match(sessionHudRenderer, /liveQuotaBucket/);
     assert.match(sessionHudRenderer, /bucket\.resetAt <= now/);
-    // Expired = dimmed 0-ring, never the pre-reset high, never a vanished gauge.
+    // Expired = dimmed 0-meter, never the pre-reset high, never a vanished gauge.
     assert.match(sessionHudRenderer, /usedPercent: 0, expired: true/);
     assert.match(sessionHudRenderer, /sev-reset/);
-    assert.match(sessionHudHtml, /\.quota-donut-reset/);
+    assert.match(sessionHudHtml, /\.quota-window-reset/);
     assert.match(sessionHudRenderer, /HUD_QUOTA_STALE_AFTER_MS/);
     assert.match(sessionHudRenderer, /quota-strip-stale/);
   });
@@ -43,6 +44,12 @@ describe("session HUD account-quota strip", () => {
     assert.match(sessionHudRenderer, /quota-pill-icon/);
     assert.match(sessionHudRenderer, /quota-pill-label/);
     assert.match(sessionHudHtml, /\.quota-pill-icon/);
+  });
+
+  it("labels windows from reporter metadata instead of hard-coding Codex primary as 5h", () => {
+    assert.match(sessionHudRenderer, /formatQuotaWindowLabel/);
+    assert.match(sessionHudRenderer, /bucket && bucket\.windowMinutes/);
+    assert.match(sessionHudRenderer, /minutes \/ \(24 \* 60\).*d/);
   });
 
   it("hides the source label for a single local source (compact default)", () => {

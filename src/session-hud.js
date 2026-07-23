@@ -180,24 +180,24 @@ function computeHudLayout(snapshot, options = {}) {
 // The strip renders ABOVE session rows inside a window whose height was
 // historically derived from row count alone; without these terms the strip
 // pushes the session rows below the card's overflow clip and they vanish.
-// Row height must match the renderer CSS (36px ring + caption + pill padding
-// + row padding), and the source-count logic must mirror the renderer's
+// Row height must match the renderer CSS (compact label + 3px progress bar),
+// and the source-count logic must mirror the renderer's
 // "would this source draw anything" rules (expired buckets still draw, as a
-// dimmed reset ring).
-const HUD_QUOTA_ROW_HEIGHT = 54;
+// dimmed reset meter).
+const HUD_QUOTA_ROW_HEIGHT = 38;
 const HUD_QUOTA_ROW_GAP = 3; // .quota-strip { gap }
-const HUD_QUOTA_STRIP_PADDING_Y = 14;
+const HUD_QUOTA_STRIP_PADDING_Y = 12;
 const HUD_QUOTA_MIN_WIDTH = 300;
 
 // Width mirror of the renderer CSS (session-hud.html): the window is sized
 // here in the main process before the strip renders, so a row's real width
 // must be computed from the same data the renderer will draw — a flat floor
-// clips donuts as soon as a source label or a third provider appears
+// clips meters as soon as a source label or a third provider appears
 // (.quota-pills does not wrap and the row clips overflow).
-const HUD_QUOTA_DONUT_W = 36; // QUOTA_DONUT_SIZE
-const HUD_QUOTA_PILL_CHROME_W = 33; // pill padding 8+9 + 16px icon
-const HUD_QUOTA_PILL_ITEM_GAP = 6; // .quota-pill { gap } (icon→donut, donut→donut)
-const HUD_QUOTA_PILL_GAP = 7; // .quota-pills { gap }
+const HUD_QUOTA_WINDOW_W = 58; // .quota-window { width }
+const HUD_QUOTA_PILL_CHROME_W = 80; // longest provider identity + horizontal padding
+const HUD_QUOTA_PILL_ITEM_GAP = 8; // .quota-pill { gap }
+const HUD_QUOTA_PILL_GAP = 12; // .quota-pills { gap }
 const HUD_QUOTA_SOURCE_LABEL_W = 102; // .quota-strip-host max-width 92 + row gap 10
 const HUD_QUOTA_STALE_BADGE_W = 40; // compact age badge on a single local source
 // borders 2 + body padding 6 + strip margins 16 + strip padding 36
@@ -243,7 +243,7 @@ function computeQuotaStripHeight(quotaSourceRows) {
 
 // Minimum window width that fits the widest strip row un-clipped. Mirrors
 // the renderer's drawing rules: one pill per provider that has any bucket,
-// one 36px donut per present window, a source label column when the row can
+// one 58px meter per present window, a source label column when the row can
 // carry one (multi-source or named host), and a small allowance for the
 // compact stale badge otherwise.
 function computeQuotaStripMinWidth(snapshot, showQuota) {
@@ -258,11 +258,11 @@ function computeQuotaStripMinWidth(snapshot, showQuota) {
     for (const [providerKey, bucketFields] of Object.entries(HUD_QUOTA_PROVIDER_BUCKETS)) {
       const entry = source[providerKey];
       if (!entry || !entry.group) continue;
-      const donuts = bucketFields
+      const meters = bucketFields
         .filter((field) => entry.group[field] && typeof entry.group[field] === "object")
         .length;
-      if (!donuts) continue;
-      pillWidths.push(HUD_QUOTA_PILL_CHROME_W + donuts * (HUD_QUOTA_DONUT_W + HUD_QUOTA_PILL_ITEM_GAP));
+      if (!meters) continue;
+      pillWidths.push(HUD_QUOTA_PILL_CHROME_W + meters * (HUD_QUOTA_WINDOW_W + HUD_QUOTA_PILL_ITEM_GAP));
     }
     if (!pillWidths.length) continue;
     const labelW = multiSource || source.host
@@ -899,6 +899,10 @@ module.exports.__test = {
     HUD_QUOTA_SOURCE_LABEL_W,
     HUD_QUOTA_STALE_BADGE_W,
     HUD_QUOTA_STRIP_CHROME_W,
+    HUD_QUOTA_WINDOW_W,
+    HUD_QUOTA_PILL_CHROME_W,
+    HUD_QUOTA_PILL_ITEM_GAP,
+    HUD_QUOTA_PILL_GAP,
     HUD_MAX_EXPANDED_ROWS,
     HUD_MAX_EXPANDED_ROWS_LABELS,
     HUD_WINDOW_SHELL,

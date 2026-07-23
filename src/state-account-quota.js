@@ -21,8 +21,10 @@
 // Persisted to ~/.clawd/account-quota.json (same directory convention as
 // runtime.json) so last-known numbers survive an app restart. Writes are
 // debounced and atomic; a missing or corrupt file just means an empty
-// store. Only {usedPercent, resetAt} digests and host labels are ever
-// stored - no tokens, no session content.
+// store. Only quota bucket digests and host labels are ever stored - no
+// tokens, no session content. windowMinutes is retained so renderers label
+// the service's actual current window instead of guessing from a legacy
+// field name.
 
 const fs = require("fs");
 const path = require("path");
@@ -101,6 +103,22 @@ function comparableGroup(group) {
   return JSON.stringify(out);
 }
 
+function hasReportedWindow(group) {
+  return Object.values(group || {}).some((bucket) =>
+    Number.isFinite(bucket && bucket.windowMinutes) && bucket.windowMinutes > 0);
+}
+
+function newestCapture(group) {
+  let newest = null;
+  for (const bucket of Object.values(group || {})) {
+    const capturedAt = Number(bucket && bucket.capturedAt);
+    if (Number.isFinite(capturedAt)) {
+      newest = newest === null ? capturedAt : Math.max(newest, capturedAt);
+    }
+  }
+  return newest;
+}
+
 function expireBuckets(group, nowMs) {
   const out = {};
   for (const [field, bucket] of Object.entries(group)) {
@@ -163,6 +181,8 @@ function createAccountQuotaStore(options = {}) {
       return; // missing or corrupt -> empty store
     }
     const nowMs = now();
+    const persistVersion = Number(raw && raw.version);
+    const legacyPersist = !Number.isFinite(persistVersion) || persistVersion < 2;
     const entries = raw && Array.isArray(raw.sources) ? raw.sources : [];
     for (const entry of entries) {
       if (!entry || typeof entry !== "object") continue;
@@ -173,7 +193,17 @@ function createAccountQuotaStore(options = {}) {
       for (const providerKey of QUOTA_PROVIDER_KEYS) {
         const stored = entry[providerKey];
         if (!stored || typeof stored !== "object") continue;
-        const group = normalizeQuotaGroup(stored.group, QUOTA_PROVIDER_FIELDS[providerKey]);
+        let group = normalizeQuotaGroup(stored.group, QUOTA_PROVIDER_FIELDS[providerKey]);
+        // v1 Codex buckets were assigned by primary/secondary position and
+        // did not retain window_minutes. After Codex removed the short
+        // window, that cache could resurrect a fabricated "5h" label on
+        // every app restart. Keep other providers intact, but discard only
+        // those unlabelable legacy Codex buckets.
+        if (providerKey === "codexQuota" && legacyPersist && group) {
+          group = Object.fromEntries(Object.entries(group).filter(([, bucket]) =>
+            Number.isFinite(bucket.windowMinutes) && bucket.windowMinutes > 0));
+          if (!Object.keys(group).length) group = null;
+        }
         if (!group) continue;
         const updatedAt = Number(stored.updatedAt);
         const lastSeenAt = Number(stored.lastSeenAt);
@@ -233,7 +263,7 @@ function createAccountQuotaStore(options = {}) {
   function persistNow() {
     if (!persistPath) return;
     const body = JSON.stringify({
-      version: 1,
+      version: 2,
       sources: Array.from(sources.values()),
     }, null, 2);
     const dir = path.dirname(persistPath);
@@ -280,13 +310,26 @@ function createAccountQuotaStore(options = {}) {
       const group = normalizeQuotaGroup(quotas[providerKey], QUOTA_PROVIDER_FIELDS[providerKey]);
       if (!group) continue;
       const existing = record && record[providerKey];
+      const windowAwareCodex = providerKey === "codexQuota" && hasReportedWindow(group);
+      // A window-aware Codex payload is a complete rate_limits snapshot. A
+      // newer single 7-day primary must retire the old short-window bucket,
+      // not merge with it. Reject an older complete snapshot at provider
+      // scope before it can relocate/erase a newer bucket in another slot.
+      if (windowAwareCodex && existing) {
+        const incomingCapture = newestCapture(group);
+        const existingCapture = newestCapture(existing.group);
+        if (incomingCapture !== null && existingCapture !== null
+          && incomingCapture < existingCapture) continue;
+      }
       const accepted = sanitizeIncomingGroup(group, existing && existing.group, nowMs);
       if (!accepted) continue;
-      // Per-bucket merge, never group replace: real payloads legitimately
-      // carry a single window (e.g. a Codex token_count with primary but no
-      // secondary), and a partial report must not evict a sibling bucket
-      // that is still valid — expiry, not omission, retires buckets.
-      const merged = existing ? { ...existing.group, ...accepted } : accepted;
+      // Legacy reports and other providers merge per bucket: a partial
+      // report must not evict a sibling that is still valid. Window-aware
+      // Codex reports are the exception because rate_limits is a complete
+      // snapshot and omission is how a removed service-side window appears.
+      const merged = windowAwareCodex
+        ? accepted
+        : (existing ? { ...existing.group, ...accepted } : accepted);
       if (!record) {
         record = { host: sourceHost };
         sources.set(key, record);

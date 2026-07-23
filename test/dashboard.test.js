@@ -265,6 +265,10 @@ describe("dashboard window", () => {
     assert.match(rendererSource, /isExpiredBucket/);
     // Quiet sources are labeled instead of presenting old numbers as live.
     assert.match(rendererSource, /QUOTA_STALE_AFTER_MS/);
+    // Codex can change which rate-limit windows it exposes. The Dashboard
+    // must use reporter metadata rather than the legacy slot label.
+    assert.match(rendererSource, /formatQuotaWindowLabel/);
+    assert.match(rendererSource, /bucket && bucket\.windowMinutes/);
     for (const key of [
       "dashboardQuotaSectionAntigravity",
       "dashboardQuotaGroupGemini",

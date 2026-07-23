@@ -120,8 +120,24 @@ function liveBucket(group, field) {
   if (!bucket || typeof bucket !== "object") return null;
   // Window reset on wall clock: render as 0% (nothing reported since the
   // reset) rather than the pre-reset high or a vanished bar.
-  if (bucket.expired === true || isExpiredBucket(bucket)) return { usedPercent: 0 };
+  if (bucket.expired === true || isExpiredBucket(bucket)) {
+    return { ...bucket, usedPercent: 0, expired: true };
+  }
   return bucket;
+}
+
+function formatQuotaWindowLabel(bucket, fallbackLabel) {
+  const minutes = Number(bucket && bucket.windowMinutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) return fallbackLabel;
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)}d`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${Math.round(minutes)}m`;
+}
+
+function quotaResetStyle(bucket, fallbackStyle) {
+  const minutes = Number(bucket && bucket.windowMinutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) return fallbackStyle;
+  return minutes >= 24 * 60 ? "date" : "countdown";
 }
 
 // renderQuotaSummary can run once a second (see the setInterval(render, 1000)
@@ -203,8 +219,20 @@ function buildQuotaGroupRow(headerText, fiveHourBucket, weeklyBucket) {
   if (headerText) row.appendChild(createText("div", "quota-group-header", headerText));
   const halves = document.createElement("div");
   halves.className = "quota-halves";
-  if (fiveHourBucket) halves.appendChild(buildQuotaHalfBar(t("dashboardQuotaFiveHour"), fiveHourBucket, "countdown"));
-  if (weeklyBucket) halves.appendChild(buildQuotaHalfBar(t("dashboardQuotaWeekly"), weeklyBucket, "date"));
+  if (fiveHourBucket) {
+    halves.appendChild(buildQuotaHalfBar(
+      formatQuotaWindowLabel(fiveHourBucket, t("dashboardQuotaFiveHour")),
+      fiveHourBucket,
+      quotaResetStyle(fiveHourBucket, "countdown")
+    ));
+  }
+  if (weeklyBucket) {
+    halves.appendChild(buildQuotaHalfBar(
+      formatQuotaWindowLabel(weeklyBucket, t("dashboardQuotaWeekly")),
+      weeklyBucket,
+      quotaResetStyle(weeklyBucket, "date")
+    ));
+  }
   row.appendChild(halves);
   return row;
 }

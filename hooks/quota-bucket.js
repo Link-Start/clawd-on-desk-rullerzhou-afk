@@ -5,6 +5,10 @@
 // "how much has been used" (0-100) so every source and every renderer means
 // the same thing - a full bar is a warning, not a healthy state.
 //
+// windowMinutes is the reporter's actual rate-limit window. It is display
+// metadata, not a slot name: providers can change which windows they expose
+// without leaving a stale "5h" label in the UI.
+//
 // resetAt is an absolute epoch-ms timestamp, not a countdown. A relative
 // "resets in N seconds" value goes stale the moment the CLI stops refreshing
 // the statusline (the renderer would keep showing the same countdown
@@ -19,6 +23,10 @@ function normalizeQuotaBucket(value) {
   const usedPercent = Number(value.usedPercent);
   if (!Number.isFinite(usedPercent)) return null;
   const out = { usedPercent: Math.max(0, Math.min(100, Math.round(usedPercent))) };
+  const windowMinutes = Number(value.windowMinutes);
+  if (Number.isFinite(windowMinutes) && windowMinutes > 0) {
+    out.windowMinutes = Math.round(windowMinutes);
+  }
   const resetAt = Number(value.resetAt);
   if (Number.isFinite(resetAt)) out.resetAt = Math.round(resetAt);
   // capturedAt (epoch-ms): when the reporter actually observed this number

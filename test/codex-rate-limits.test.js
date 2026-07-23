@@ -10,7 +10,7 @@ const {
 } = require("../hooks/codex-rate-limits");
 
 describe("Codex rate limit quota parser", () => {
-  it("maps primary and secondary into codexFiveHour/codexWeekly, converting resets_at to epoch-ms", () => {
+  it("maps reported short/long windows and preserves their real durations", () => {
     // Shape captured from a real rollout token_count event (plan "plus").
     const quota = resolveCodexRateLimitQuota({
       rate_limits: {
@@ -22,8 +22,41 @@ describe("Codex rate limit quota parser", () => {
     });
 
     assert.deepStrictEqual(quota, {
-      codexFiveHour: { usedPercent: 1, resetAt: 1783669570 * 1000 },
-      codexWeekly: { usedPercent: 43, resetAt: 1784256370 * 1000 },
+      codexFiveHour: { usedPercent: 1, windowMinutes: 300, resetAt: 1783669570 * 1000 },
+      codexWeekly: { usedPercent: 43, windowMinutes: 10080, resetAt: 1784256370 * 1000 },
+    });
+  });
+
+  it("maps a lone 7-day primary to the long slot instead of fabricating a 5h limit", () => {
+    // Current Pro telemetry (2026-07): primary is the only bucket and is
+    // explicitly a seven-day window; secondary is null.
+    const quota = resolveCodexRateLimitQuota({
+      rate_limits: {
+        primary: { used_percent: 12, window_minutes: 10080, resets_at: 1785284243 },
+        secondary: null,
+      },
+    });
+
+    assert.deepStrictEqual(quota, {
+      codexWeekly: {
+        usedPercent: 12,
+        windowMinutes: 10080,
+        resetAt: 1785284243 * 1000,
+      },
+    });
+    assert.strictEqual(quota.codexFiveHour, undefined);
+  });
+
+  it("uses duration rather than primary/secondary position when the order changes", () => {
+    const quota = resolveCodexRateLimitQuota({
+      rate_limits: {
+        primary: { used_percent: 40, window_minutes: 10080 },
+        secondary: { used_percent: 20, window_minutes: 300 },
+      },
+    });
+    assert.deepStrictEqual(quota, {
+      codexWeekly: { usedPercent: 40, windowMinutes: 10080 },
+      codexFiveHour: { usedPercent: 20, windowMinutes: 300 },
     });
   });
 
@@ -101,5 +134,7 @@ describe("Codex quota capture freshness gate", () => {
     }, { capturedAt: 1783669000000 });
     assert.strictEqual(quota.codexFiveHour.capturedAt, 1783669000000);
     assert.strictEqual(quota.codexWeekly.capturedAt, 1783669000000);
+    assert.strictEqual(quota.codexFiveHour.windowMinutes, 300);
+    assert.strictEqual(quota.codexWeekly.windowMinutes, 10080);
   });
 });

@@ -1954,8 +1954,18 @@ describe("CodexLogMonitor", () => {
     // by observation time, not receive time.
     const capturedAt = Date.parse(lineTimestamp);
     assert.deepStrictEqual(tokenEvent.extra.codexQuota, {
-      codexFiveHour: { usedPercent: 1, resetAt: 1783669570000, capturedAt },
-      codexWeekly: { usedPercent: 43, resetAt: 1784256370000, capturedAt },
+      codexFiveHour: {
+        usedPercent: 1,
+        windowMinutes: 300,
+        resetAt: 1783669570000,
+        capturedAt,
+      },
+      codexWeekly: {
+        usedPercent: 43,
+        windowMinutes: 10080,
+        resetAt: 1784256370000,
+        capturedAt,
+      },
     });
   });
 
