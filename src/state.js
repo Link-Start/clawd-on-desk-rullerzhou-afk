@@ -39,6 +39,7 @@ const { normalizeTranscriptPath } = require("./transcript-path");
 const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
 const { ANTIGRAVITY_QUOTA_FIELDS } = require("../hooks/antigravity-context-usage");
 const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
+const { getClaudeStopDisposition } = require("../hooks/claude-stop-disposition");
 const { getStartupRecoveryProcessNames } = require("../agents/registry");
 const {
   readTranscriptTailEntries: readClaudeTranscriptTailEntries,
@@ -103,39 +104,10 @@ const COMPLETION_CANCEL_EVENTS = new Set([
   "SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
   "PermissionRequest", "CodexUserInputRequest", "Elicitation", "StopFailure", "ApiError", "SessionEnd",
 ]);
-// #449: headless sessions (claude -p / Agent SDK hosts such as Obsidian-
-// Claudian) end every intermediate orchestrator step with a REAL Stop and
-// submit the next step right after, so each step celebrated. The follow-up
-// UserPromptSubmit lands within hook-spawn latency (~0.3s) of the Stop, so a
-// 2s quiet window absorbs it; a genuinely final Stop just celebrates 2s late.
-const HEADLESS_COMPLETION_DEBOUNCE_MS = 2000;
-// Claude Desktop can leave a background_tasks entry attached to a user-visible
-// final Stop even after the assistant reply is complete. Treat that bg-only
-// Stop as tentative, not permanently working, when the hook also extracted the
-// assistant's final text.
-const BACKGROUND_TASKS_COMPLETION_DEBOUNCE_MS = 2000;
 const CLAUDE_ELICITATION_COMPLETION_PROBE_DELAY_MS = 2000;
 const CLAUDE_ELICITATION_COMPLETION_PROBE_INTERVAL_MS = 3000;
 const CLAUDE_ELICITATION_COMPLETION_PROBE_MAX_MS = 5 * 60 * 1000;
 const CLAUDE_ELICITATION_COMPLETION_TOOLS = new Set(["AskUserQuestion"]);
-function getCompletionDebounceMs(headless) {
-  const raw = process.env.CLAWD_COMPLETION_DEBOUNCE_MS;
-  const n = Number.parseInt(raw, 10);
-  // Explicit env override wins for every session kind (0 = fully off).
-  if (Number.isFinite(n) && n >= 0 && n <= 10000) return n;
-  // Interactive default stays 0 = celebrate immediately on Stop. The field
-  // gates (PostCompact / background_tasks / session_crons / stop_hook_active)
-  // already suppress the common false completions with zero delay; a terminal
-  // user otherwise wants the celebration the instant the turn ends. Headless
-  // sessions default to the #449 window above.
-  return headless ? HEADLESS_COMPLETION_DEBOUNCE_MS : 0;
-}
-function getBackgroundTasksCompletionDebounceMs(headless) {
-  const raw = process.env.CLAWD_COMPLETION_DEBOUNCE_MS;
-  const n = Number.parseInt(raw, 10);
-  if (Number.isFinite(n) && n >= 0 && n <= 10000) return n;
-  return Math.max(getCompletionDebounceMs(headless), BACKGROUND_TASKS_COMPLETION_DEBOUNCE_MS);
-}
 let lastSessionSnapshotSignature = null;
 let lastSessionSnapshot = null;
 let startupRecoveryActive = false;
@@ -1531,6 +1503,11 @@ function updateSession(sessionId, state, event, opts = {}) {
   }
 
   const existing = sessions.get(sessionId);
+  if (existing && existing.startupRecovered === true) {
+    delete existing.startupRecovered;
+    delete existing.recoveryEventAt;
+    delete existing.recoveryValidUntil;
+  }
   const srcPid = sourcePid || (existing && existing.sourcePid) || null;
   const srcWtHwnd = wtHwnd || (existing && existing.wtHwnd) || null;
   const srcCwd = cwd || (existing && existing.cwd) || "";
@@ -1581,15 +1558,15 @@ function updateSession(sessionId, state, event, opts = {}) {
     && srcAgentId === "claude-code"
   ) {
     cancelCompletionDebounce(sessionId, "stop-superseded");
-    const hasFinalAssistantText = !!srcAssistantLastOutput;
-    const hardLiveWork =
-      sessionCronsCount > 0 ||
-      stopHookActive === true ||
-      (backgroundTasksCount > 0 && !hasFinalAssistantText);
-    const backgroundDebounceMs = backgroundTasksCount > 0 && hasFinalAssistantText
-      ? getBackgroundTasksCompletionDebounceMs(srcHeadless)
-      : 0;
-    const debounceMs = Math.max(getCompletionDebounceMs(srcHeadless), backgroundDebounceMs);
+    const disposition = getClaudeStopDisposition({
+      backgroundTasksCount,
+      sessionCronsCount,
+      stopHookActive,
+      hasFinalAssistantText: !!srcAssistantLastOutput,
+      headless: srcHeadless,
+    });
+    const hardLiveWork = disposition.kind === "hold";
+    const debounceMs = disposition.debounceMs;
     if (hardLiveWork || debounceMs > 0) {
       // Hold the Stop as "working" and DROP the event to null so recentEvents
       // keeps NO "Stop" tail while held. Why null and not "Stop": deriveSessionBadge
@@ -1950,6 +1927,63 @@ function updateSession(sessionId, state, event, opts = {}) {
   }
 }
 
+function restoreSessionFromLease(lease) {
+  if (!lease || typeof lease !== "object") return false;
+  const sessionId = typeof lease.sessionId === "string" ? lease.sessionId : "";
+  const agentId = typeof lease.agentId === "string" ? lease.agentId : "";
+  if (!sessionId || sessionId === "default" || agentId !== "claude-code" || lease.active !== true) return false;
+  if (!Number.isFinite(lease.eventAt) || lease.eventAt <= 0 || lease.validUntil !== null) return false;
+  if (lease.state !== "thinking" && lease.state !== "working" && lease.state !== "juggling") return false;
+  if (sessions.has(sessionId)) return false;
+  if (sessions.size >= MAX_SESSIONS) return false;
+  const pid = Number.isInteger(lease.pid) && lease.pid > 0 ? lease.pid : null;
+  const sourcePid = Number.isInteger(lease.sourcePid) && lease.sourcePid > 0 ? lease.sourcePid : null;
+  if (!pid && !sourcePid) return false;
+  sessions.set(sessionId, {
+    state: lease.state,
+    updatedAt: Date.now(),
+    displayHint: null,
+    sourcePid,
+    wtHwnd: null,
+    cwd: typeof lease.cwd === "string" ? lease.cwd : "",
+    editor: null,
+    pidChain: null,
+    tmuxSocket: null,
+    tmuxClient: null,
+    agentPid: pid,
+    agentId,
+    host: null,
+    wslDistro: null,
+    headless: false,
+    platform: null,
+    model: null,
+    provider: null,
+    codexOriginator: null,
+    codexSource: null,
+    ghosttyTerminalId: null,
+    sessionTitle: typeof lease.title === "string" ? lease.title : null,
+    contextUsage: null,
+    antigravityQuota: null,
+    claudeQuota: null,
+    metadataUpdatedAt: null,
+    assistantLastOutput: null,
+    assistantLastOutputTruncated: false,
+    lastToolName: null,
+    transcriptPath: null,
+    recentEvents: [],
+    pidReachable: true,
+    resumeState: null,
+    awaitingInputSinceStop: false,
+    muteNotificationSound: false,
+    startupRecovered: true,
+    recoveryEventAt: lease.eventAt,
+    recoveryValidUntil: lease.validUntil,
+  });
+  lastSessionSnapshot = null;
+  lastSessionSnapshotSignature = null;
+  return true;
+}
+
 function isProcessAlive(pid) {
   try { _kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
 }
@@ -2184,7 +2218,7 @@ function detectRunningAgentProcesses(callback) {
       `$nodeNeedles = @(${quotedNeedles}); ` +
       "$nameFilters = $names | ForEach-Object { \"Name='$_'\" }; " +
       "$nodeFilters = $nodeNeedles | ForEach-Object { \"(Name='node.exe' AND CommandLine LIKE '%$_%')\" }; " +
-      "$filter = ($nameFilters + $nodeFilters) -join ' OR '; " +
+      "$filter = (@($nameFilters) + @($nodeFilters)) -join ' OR '; " +
       "$match = Get-CimInstance Win32_Process -Filter $filter | Select-Object -First 1; " +
       "if ($match) { $match.ProcessId }";
     execFile(
@@ -2507,7 +2541,7 @@ function cleanup() {
 }
 
 return {
-  setState, applyState, updateSession, resolveDisplayState, resolveVisualBinding, setUpdateVisualState,
+  setState, applyState, updateSession, restoreSessionFromLease, resolveDisplayState, resolveVisualBinding, setUpdateVisualState,
   shouldDropForDnd,
   enableDoNotDisturb, disableDoNotDisturb,
   startStaleCleanup, stopStaleCleanup, startWakePoll, stopWakePoll,

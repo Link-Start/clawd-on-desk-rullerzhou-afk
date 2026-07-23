@@ -151,6 +151,37 @@ describe("detectRunningAgentProcesses() agent coverage", () => {
     assert.match(seenScript, /\$nodeNeedles = @\(\)/);
   });
 
+  for (const [agentId, processName, commandLineNeedle] of [
+    ["claude-code", "claude.exe", "claude-code"],
+    ["codex", "codex.exe", "codex"],
+  ]) {
+    it(`keeps exact-name and node filters separate when only ${agentId} is enabled`, async () => {
+      api.cleanup();
+      api = require("../src/state")(makeCtx({
+        hasAnyEnabledAgent: () => true,
+        isAgentEnabled: (enabledAgentId) => enabledAgentId === agentId,
+      }));
+      let seenScript = "";
+      childProcess.execFile = (file, args, opts, cb) => {
+        seenScript = args[args.length - 1];
+        cb(null, "12345");
+      };
+      Object.defineProperty(process, "platform", { value: "win32" });
+
+      const found = await new Promise((resolve) => {
+        api.detectRunningAgentProcesses((result) => resolve(result));
+      });
+
+      assert.strictEqual(found, true);
+      assert.ok(seenScript.includes(`$names = @('${processName}')`));
+      assert.ok(seenScript.includes(`$nodeNeedles = @('${commandLineNeedle}')`));
+      assert.match(
+        seenScript,
+        /\$filter = \(@\(\$nameFilters\) \+ @\(\$nodeFilters\)\) -join ' OR '/
+      );
+    });
+  }
+
   it("does not scan when the only enabled agent has an empty process surface", async () => {
     api.cleanup();
     api = require("../src/state")(makeCtx({

@@ -127,14 +127,23 @@ function makeChipInfo(entry) {
 }
 
 function stateChipInfo(session) {
-  if (snapshot.hudShowStateLabels === false) return null;
+  if (snapshot.hudShowStateLabels === false) {
+    return session && session.startupRecovered
+      ? { label: t("sessionRecovered"), cls: "chip-recovered" }
+      : null;
+  }
   const rawEvent = session && session.lastEvent && session.lastEvent.rawEvent;
   const eventChip = makeChipInfo(EVENT_CHIP_MAP[rawEvent]);
   if (eventChip && session.badge !== "done" && session.badge !== "interrupted") return eventChip;
 
   if (session.badge === "running") {
     const stateChip = makeChipInfo(STATE_CHIP_MAP[session.state]);
-    if (stateChip) return stateChip;
+    if (stateChip) {
+      return session.startupRecovered
+        ? { label: `${t("sessionRecovered")} · ${stateChip.label}`, cls: `${stateChip.cls} chip-recovered` }
+        : stateChip;
+    }
+    if (session.startupRecovered) return { label: t("sessionRecovered"), cls: "chip-recovered" };
     return { label: t("sessionBadgeRunning"), cls: "chip-working" };
   }
   if (session.badge === "interrupted") {
