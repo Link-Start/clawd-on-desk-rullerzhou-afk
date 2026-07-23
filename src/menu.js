@@ -262,14 +262,7 @@ module.exports = function initMenu(ctx) {
       { label: t("quit"), click: () => requestAppQuit() },
     ];
 
-    const items = joinGroups([
-      stateGroup,
-      noiseGroup,
-      workGroup,
-      systemGroup,
-      appGroup,
-      quitGroup,
-    ]);
+    const items = joinGroups([stateGroup, noiseGroup, workGroup, systemGroup, appGroup, quitGroup]);
     ctx.tray.setContextMenu(Menu.buildFromTemplate(items));
   }
 
@@ -484,13 +477,7 @@ module.exports = function initMenu(ctx) {
       { label: t("quit"), click: () => requestAppQuit() },
     ];
 
-    const template = joinGroups([
-      stateGroup,
-      workGroup,
-      displayGroup,
-      appGroup,
-      quitGroup,
-    ]);
+    const template = joinGroups([stateGroup, workGroup, displayGroup, appGroup, quitGroup]);
     ctx.contextMenu = Menu.buildFromTemplate(template);
   }
 

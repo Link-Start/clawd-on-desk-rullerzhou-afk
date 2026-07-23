@@ -27,6 +27,8 @@ let queuedSystemWakeReplayTimer = null;
 let _lowPowerStaticImageOverrides = {};
 let _petTintPayload = { id: "none", filter: "" };
 let _petTintSupported = false;
+const PET_TINT_FILTER_TOKEN_RE =
+  /^(?:hue-rotate\(-?\d+(?:\.\d+)?deg\)|(?:saturate|brightness|contrast|sepia|grayscale)\(\d+(?:\.\d+)?\))$/;
 
 // ── Theme config (injected via preload.js additionalArguments) ──
 let tc = window.themeConfig || {};
@@ -46,6 +48,9 @@ function initWithConfig(cfg) {
   _forceSvgObjectChannel = !!(tc.rendering && tc.rendering.svgChannel === "object");
   _lowPowerStaticImageOverrides = (tc.rendering && tc.rendering.lowPowerStaticImageOverrides) || {};
   _petTintSupported = tc.petTintSupported === true;
+  if (Object.prototype.hasOwnProperty.call(tc, "petTintPayload")) {
+    _petTintPayload = normalizePetTintPayload(tc.petTintPayload);
+  }
   _imgCacheBustSeq = 0;
   _miniViewBox = tc.miniModeViewBox || null;
   _fileViewBoxes = tc.fileViewBoxes || {};
@@ -451,9 +456,6 @@ window.electronAPI.onViewportOffset((offsetY) => {
 // Main resolves a persisted catalog id to this small payload. The renderer
 // still rejects URL/variable/custom CSS syntax before projecting the filter
 // onto every live pet media element (current, pending, and fading-out).
-const PET_TINT_FILTER_TOKEN_RE =
-  /^(?:hue-rotate\(-?\d+(?:\.\d+)?deg\)|(?:saturate|brightness|contrast|sepia|grayscale)\(\d+(?:\.\d+)?\))$/;
-
 function isSafePetTintFilter(value) {
   if (value === "") return true;
   if (typeof value !== "string" || value.length > 240) return false;

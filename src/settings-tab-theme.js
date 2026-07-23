@@ -202,13 +202,16 @@
           ops.showToast(t("toastSaveFailed") + message, { error: true });
           return;
         }
-        return ops.fetchThemes().then(() => {
-          if (requestSeq !== customizationSelectionSeq) return;
-          const selectedTheme = Array.isArray(runtime.themeList)
-            ? runtime.themeList.find((entry) => entry && entry.id === theme.id && entry.active)
-            : null;
-          if (selectedTheme) customizingThemeId = theme.id;
-        });
+        // The controller has already activated and committed this theme before
+        // returning ok. Mirror that acknowledged result into the renderer's
+        // metadata cache so opening the detail does not depend on a second IPC
+        // fetch that can fail independently.
+        if (Array.isArray(runtime.themeList)) {
+          runtime.themeList = runtime.themeList.map((entry) => (
+            entry ? { ...entry, active: entry.id === theme.id } : entry
+          ));
+        }
+        customizingThemeId = theme.id;
       })
       .catch((err) => {
         if (requestSeq !== customizationSelectionSeq) return;

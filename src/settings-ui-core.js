@@ -1034,13 +1034,21 @@
       runtime.themeList = [];
       return Promise.resolve([]);
     }
+    const previousThemeList = Array.isArray(runtime.themeList) ? runtime.themeList : [];
     return window.settingsAPI.listThemes().then((list) => {
-      runtime.themeList = Array.isArray(list) ? list : [];
+      const nextThemeList = Array.isArray(list) ? list : [];
+      // Built-in themes make an empty successful list impossible in a healthy
+      // install. Main also returns [] when enumeration throws, so preserve an
+      // already-rendered list instead of blanking the entire Theme tab.
+      if (nextThemeList.length === 0 && previousThemeList.length > 0) {
+        return previousThemeList;
+      }
+      runtime.themeList = nextThemeList;
       return runtime.themeList;
     }).catch((err) => {
       console.warn("settings: listThemes failed", err);
-      runtime.themeList = [];
-      return [];
+      runtime.themeList = previousThemeList;
+      return previousThemeList;
     });
   }
 

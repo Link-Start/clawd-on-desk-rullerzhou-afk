@@ -786,6 +786,20 @@ describe("renderer object-channel selection", () => {
 });
 
 describe("renderer pet tint", () => {
+  it("applies the stamped tint before the pre-IPC initial media load", () => {
+    const filter = "sepia(0.8) saturate(2.2) hue-rotate(-18deg) brightness(1.05)";
+    const harness = createRendererHarness({
+      initialObjectData: "",
+      themeConfig: {
+        idleFollowSvg: "first.svg",
+        petTintPayload: { id: "gold", filter },
+      },
+    });
+
+    assert.ok(harness.api.pendingNext, "the initial idle visual should be loading");
+    assert.strictEqual(harness.api.pendingNext.style.filter, filter);
+  });
+
   it("applies the selected filter to current, pending, and fading media elements", () => {
     const harness = createRendererHarness({
       themeConfig: {

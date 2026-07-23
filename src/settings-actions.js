@@ -266,10 +266,14 @@ const updateRegistry = {
       return { status: "error", message: "petTint must be a theme-to-tint object" };
     }
     for (const [themeId, tintId] of Object.entries(value)) {
-      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(themeId) || !isPetTintId(tintId)) {
+      if (
+        !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(themeId)
+        || !isPetTintId(tintId)
+        || tintId === "none"
+      ) {
         return {
           status: "error",
-          message: `petTint entry "${themeId}" must map a safe theme id to a catalog tint id`,
+          message: `petTint entry "${themeId}" must map a safe theme id to a non-default catalog tint id`,
         };
       }
     }

@@ -4593,6 +4593,7 @@ describe("settings renderer browser environment", () => {
   });
 
   it("selects an inactive capable pet and opens its customization in one click", async () => {
+    let listThemesCalls = 0;
     const harness = loadThemeTabForTest({
       themes: [
         {
@@ -4610,6 +4611,12 @@ describe("settings renderer browser environment", () => {
           capabilities: { petTint: true },
         },
       ],
+      settingsAPI: {
+        listThemes: () => {
+          listThemesCalls += 1;
+          return Promise.reject(new Error("theme enumeration unavailable"));
+        },
+      },
     });
     const cloudlingButton = harness.content.querySelectorAll(".theme-customize-btn")
       .find((button) => collectText(findAncestorByClass(button, "theme-card")).includes("Cloudling"));
@@ -4630,6 +4637,34 @@ describe("settings renderer browser environment", () => {
     assert.ok(harness.content.querySelector(".theme-detail-hero"));
     assert.ok(collectText(harness.content.querySelector(".theme-detail-heading")).includes("Cloudling"));
     assert.strictEqual(harness.content.querySelector(".theme-grid"), null);
+    assert.strictEqual(listThemesCalls, 0, "opening details should not depend on a second theme fetch");
+  });
+
+  it("keeps existing theme cards when a refresh returns an impossible empty list", async () => {
+    const harness = loadThemeTabForTest({
+      themes: [
+        {
+          id: "clawd",
+          name: "Clawd",
+          builtin: true,
+          active: true,
+          capabilities: { petTint: true },
+        },
+      ],
+      settingsAPI: {
+        // settings:list-themes reports [] when main catches an enumeration
+        // failure, even though a healthy install always has built-in themes.
+        listThemes: () => Promise.resolve([]),
+      },
+    });
+    const previousThemeList = harness.core.runtime.themeList;
+
+    const result = await harness.core.ops.fetchThemes();
+    harness.renderContent();
+
+    assert.strictEqual(result, previousThemeList);
+    assert.strictEqual(harness.core.runtime.themeList, previousThemeList);
+    assert.strictEqual(harness.content.querySelectorAll(".theme-card").length, 1);
   });
 
   it("opens the active pet detail and saves color independently for that theme", async () => {

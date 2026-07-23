@@ -74,7 +74,7 @@ describe("updateRegistry pure-data validators", () => {
       updateRegistry.petTint({ clawd: "gold", cloudling: "matcha" }, deps).status,
       "ok"
     );
-    assert.strictEqual(updateRegistry.petTint({ clawd: "none" }, deps).status, "ok");
+    assert.strictEqual(updateRegistry.petTint({ clawd: "none" }, deps).status, "error");
     assert.strictEqual(updateRegistry.petTint({ clawd: "custom" }, deps).status, "error");
     assert.strictEqual(
       updateRegistry.petTint({ "../unsafe": "gold" }, deps).status,

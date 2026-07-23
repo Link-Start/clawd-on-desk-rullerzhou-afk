@@ -71,7 +71,6 @@
   let readers = null;
   let helpers = null;
   let ops = null;
-  let runtime = null;
 
   const LANGUAGE_OPTIONS = ["en", "zh", "zh-TW", "ko", "ja"];
 
@@ -1718,8 +1717,7 @@
       }
     }
     for (const key of keys) {
-      if (key === "size" || key === "soundVolume" || key === "textScale"
-        || key === "textScaleByDisplay") continue;
+      if (key === "size" || key === "soundVolume" || key === "textScale" || key === "textScaleByDisplay") continue;
       if (BUBBLE_POLICY_KEYS.has(key)) {
         const meta = state.mountedControls.bubblePolicyControls.get(key);
         if (!meta || !document.body.contains(meta.row)) return false;
@@ -1779,7 +1777,6 @@
     readers = core.readers;
     helpers = core.helpers;
     ops = core.ops;
-    runtime = core.runtime;
     core.tabs.general = {
       render,
       patchInPlace,

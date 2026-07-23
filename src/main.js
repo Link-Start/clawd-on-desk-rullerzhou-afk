@@ -1538,12 +1538,19 @@ function getIdleVisualChoice() {
   return resolveIdleVisualChoice(getActiveTheme(), _settingsController.get("idleVisual"));
 }
 
-// Renderer theme config with the idle choice stamped on — the renderer's
-// pre-IPC first frame should already show the selected visual, not flash the
-// follow sprite. getRendererConfig() returns a fresh object, safe to extend.
+// Renderer theme config with pre-IPC choices stamped on — the first media load
+// should already use the selected idle visual and tint instead of briefly
+// showing theme defaults. getRendererConfig() returns a fresh object, safe to
+// extend.
 function buildRendererThemeConfig() {
   const cfg = themeRuntime.getRendererConfig();
-  if (cfg) cfg.idleDefaultVisual = getIdleVisualChoice();
+  if (cfg) {
+    const activeTheme = getActiveTheme();
+    const tintSelections = _settingsController.get("petTint");
+    const tintId = getPetTintIdForTheme(tintSelections, activeTheme && activeTheme._id);
+    cfg.idleDefaultVisual = getIdleVisualChoice();
+    cfg.petTintPayload = resolvePetTintPayload(tintId, activeTheme);
+  }
   return cfg;
 }
 
