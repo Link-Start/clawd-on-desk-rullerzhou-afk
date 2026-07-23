@@ -17,21 +17,25 @@
 // per-coin visual model; the main process (session-hud.js) requires this for
 // window sizing, positioning, and the auto-hide hot zone.
 
-// Provider → the two bucket fields the coin draws (outer = rolling, inner =
-// weekly). Mirrors HUD_QUOTA_PROVIDERS in quota-ring-renderer.js (browser file,
-// no require). Labels are NOT assumed here — the renderer derives them from
-// each bucket's windowMinutes, so "5h" is a fallback, never a hard limit.
+// Provider → candidate bucket fields for the two rings (outer = rolling, inner
+// = weekly). Antigravity can report both Gemini and Claude/GPT quotas; each ring
+// compresses that timescale to the most constrained candidate, while the
+// Dashboard keeps showing all four values. Mirrors quota-ring-renderer.js.
 const RING_PROVIDERS = [
-  { key: "antigravityQuota", outer: "geminiFiveHour", inner: "geminiWeekly" },
-  { key: "claudeQuota", outer: "claudeFiveHour", inner: "claudeWeekly" },
-  { key: "codexQuota", outer: "codexFiveHour", inner: "codexWeekly" },
+  {
+    key: "antigravityQuota",
+    outer: ["geminiFiveHour", "thirdPartyFiveHour"],
+    inner: ["geminiWeekly", "thirdPartyWeekly"],
+  },
+  { key: "claudeQuota", outer: ["claudeFiveHour"], inner: ["claudeWeekly"] },
+  { key: "codexQuota", outer: ["codexFiveHour"], inner: ["codexWeekly"] },
 ];
 
 // Layout constants in CSS px (scaled by textScale by the caller, exactly like
 // the HUD). Kept in sync with quota-ring.html.
 const COIN_SIZE = 26; // outer ring diameter
 const COIN_GAP = 10; // vertical gap between stacked coins
-const READOUT_W = 34; // "%" + window tick column, outer side of each coin
+const READOUT_W = 44; // "%" + window/source column, outer side of each coin
 const COIN_READOUT_GAP = 6; // gap between coin and its readout
 const CLUSTER_PAD = 6; // inner padding around the cluster content
 const OVERFLOW_GAP = 8;
@@ -56,15 +60,15 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(value, max));
 }
 
-// A provider draws a coin when its group carries at least one of the two
-// bucket fields as an object. Mirrors the renderer's draw rule exactly so the
-// window is never sized for a coin the renderer will not draw (or vice versa).
+// A provider draws a coin when its group carries at least one candidate bucket
+// as an object. Mirrors the renderer's draw rule exactly so the window is never
+// sized for a coin the renderer will not draw (or vice versa).
 function providerHasDrawableQuota(source, def) {
   const entry = source && source[def.key];
   const group = entry && entry.group;
   if (!group) return false;
-  return (group[def.outer] && typeof group[def.outer] === "object")
-    || (group[def.inner] && typeof group[def.inner] === "object");
+  return [...def.outer, ...def.inner].some((field) =>
+    group[field] && typeof group[field] === "object");
 }
 
 // Total coins a snapshot draws: one per (source, provider-with-quota).

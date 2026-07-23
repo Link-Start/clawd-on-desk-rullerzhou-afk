@@ -14,11 +14,34 @@ const STALE_AFTER_MS = 5 * 60 * 1000;
 const MAX_COINS = 4; // must match quota-ring-geometry RING_MAX_COINS
 
 // Mirrors RING_PROVIDERS in quota-ring-geometry.js (that file is CommonJS; this
-// runs in the browser and cannot require it).
+// runs in the browser and cannot require it). Antigravity reports two quota
+// families; each physical ring selects the most constrained candidate for its
+// timescale, and the tooltip identifies which family won.
 const RING_PROVIDERS = [
-  { key: "antigravityQuota", label: "Antigravity", outer: "geminiFiveHour", inner: "geminiWeekly", outerFallback: "5h", innerFallback: "7d" },
-  { key: "claudeQuota", label: "Claude", outer: "claudeFiveHour", inner: "claudeWeekly", outerFallback: "5h", innerFallback: "7d" },
-  { key: "codexQuota", label: "Codex", outer: "codexFiveHour", inner: "codexWeekly", outerFallback: "5h", innerFallback: "7d" },
+  {
+    key: "antigravityQuota",
+    label: "Antigravity",
+    outer: [
+      { field: "geminiFiveHour", fallback: "5h", familyKey: "dashboardQuotaGroupGemini", shortFamily: "G" },
+      { field: "thirdPartyFiveHour", fallback: "5h", familyKey: "dashboardQuotaGroupThirdParty", shortFamily: "C/G" },
+    ],
+    inner: [
+      { field: "geminiWeekly", fallback: "7d", familyKey: "dashboardQuotaGroupGemini", shortFamily: "G" },
+      { field: "thirdPartyWeekly", fallback: "7d", familyKey: "dashboardQuotaGroupThirdParty", shortFamily: "C/G" },
+    ],
+  },
+  {
+    key: "claudeQuota",
+    label: "Claude",
+    outer: [{ field: "claudeFiveHour", fallback: "5h" }],
+    inner: [{ field: "claudeWeekly", fallback: "7d" }],
+  },
+  {
+    key: "codexQuota",
+    label: "Codex",
+    outer: [{ field: "codexFiveHour", fallback: "5h" }],
+    inner: [{ field: "codexWeekly", fallback: "7d" }],
+  },
 ];
 
 // Coin ring geometry (SVG user units == the coin's 26px box).
@@ -88,36 +111,61 @@ function providerSeenAt(provider) {
   return Number.isFinite(updatedAt) ? updatedAt : null;
 }
 
+function providerHasDrawableQuota(source, def) {
+  const provider = source && source[def.key];
+  const group = provider && provider.group;
+  if (!group) return false;
+  return [...def.outer, ...def.inner].some((candidate) =>
+    group[candidate.field] && typeof group[candidate.field] === "object");
+}
+
+// Select one candidate for a physical ring. A live bucket always beats a reset
+// bucket; among equally live candidates the highest used percentage is the
+// most constrained. This keeps Antigravity to one coin while never silently
+// dropping its Claude/GPT quota family.
+function selectRingWindow(group, candidates, now, ring) {
+  let selected = null;
+  for (const candidate of candidates) {
+    const bucket = liveBucket(group, candidate.field, now);
+    if (!bucket) continue;
+    const reset = bucket.expired === true;
+    const pct = Math.max(0, Math.min(100, Number(bucket.usedPercent) || 0));
+    if (!selected
+        || (selected.reset && !reset)
+        || (selected.reset === reset && pct > selected.pct)) {
+      selected = { bucket, candidate, reset, pct };
+    }
+  }
+  if (!selected) return null;
+  const baseLabel = formatWindowLabel(selected.bucket.windowMinutes, selected.candidate.fallback);
+  const family = selected.candidate.familyKey ? t(selected.candidate.familyKey) : "";
+  return {
+    pct: selected.pct,
+    label: selected.candidate.shortFamily
+      ? `${selected.candidate.shortFamily}·${baseLabel}`
+      : baseLabel,
+    detailLabel: family ? `${family} · ${baseLabel}` : baseLabel,
+    reset: selected.reset,
+    resetAt: selected.bucket.resetAt,
+    ring,
+    field: selected.candidate.field,
+  };
+}
+
 // Build the visual model for one coin from a source's provider group.
 function buildCoinModel(source, def, now, multiSource) {
   const provider = source[def.key];
   const group = provider && provider.group;
   if (!group) return null;
-  const outer = liveBucket(group, def.outer, now);
-  const inner = liveBucket(group, def.inner, now);
+  const outer = selectRingWindow(group, def.outer, now, "outer");
+  const inner = selectRingWindow(group, def.inner, now, "inner");
   if (!outer && !inner) return null;
 
   const seenAt = providerSeenAt(provider);
   const stale = seenAt !== null && now - seenAt > STALE_AFTER_MS;
   const windows = [];
-  if (outer) {
-    windows.push({
-      pct: Math.max(0, Math.min(100, Number(outer.usedPercent) || 0)),
-      label: formatWindowLabel(outer.windowMinutes, def.outerFallback),
-      reset: outer.expired === true,
-      resetAt: outer.resetAt,
-      ring: "outer",
-    });
-  }
-  if (inner) {
-    windows.push({
-      pct: Math.max(0, Math.min(100, Number(inner.usedPercent) || 0)),
-      label: formatWindowLabel(inner.windowMinutes, def.innerFallback),
-      reset: inner.expired === true,
-      resetAt: inner.resetAt,
-      ring: "inner",
-    });
-  }
+  if (outer) windows.push(outer);
+  if (inner) windows.push(inner);
 
   const allReset = windows.every((w) => w.reset);
   // Binding window = the most-constrained live window (max used, tie → outer).
@@ -129,10 +177,14 @@ function buildCoinModel(source, def, now, multiSource) {
   const state = allReset ? "reset" : (stale ? "stale" : "live");
   const near = state === "live" && binding && binding.pct > 85;
 
+  const visibleHost = multiSource
+    ? (source.host || t("dashboardQuotaSourceLocal"))
+    : null;
   return {
     providerKey: def.key,
     label: def.label,
-    host: multiSource ? (source.host || t("dashboardQuotaSourceLocal")) : (source.host || null),
+    host: visibleHost || source.host || null,
+    sourceMarker: visibleHost,
     glyphUrl: payload.quotaAgentIcons && payload.quotaAgentIcons[def.key],
     windows,
     binding,
@@ -144,10 +196,12 @@ function buildCoinModel(source, def, now, multiSource) {
 
 function collectCoins(now) {
   const sources = Array.isArray(payload.accountQuota) ? payload.accountQuota : [];
-  const multiSource = sources.length > 1;
+  const drawableSources = sources.filter((source) =>
+    source && typeof source === "object"
+      && RING_PROVIDERS.some((def) => providerHasDrawableQuota(source, def)));
+  const multiSource = drawableSources.length > 1;
   const coins = [];
-  for (const source of sources) {
-    if (!source || typeof source !== "object") continue;
+  for (const source of drawableSources) {
     for (const def of RING_PROVIDERS) {
       const model = buildCoinModel(source, def, now, multiSource);
       if (model) coins.push(model);
@@ -186,13 +240,15 @@ function buildCoinSvg(model) {
 
   svg.appendChild(ringCircle("track", OUTER_R, OUTER_SW, null));
   if (outer && !outer.reset) {
-    const f = ringCircle(`fill ${severityClass(outer.pct)}${model.near ? " is-near" : ""}`, OUTER_R, OUTER_SW, { pct: outer.pct });
+    const outerNear = model.near && model.binding === outer;
+    const f = ringCircle(`fill ${severityClass(outer.pct)}${outerNear ? " is-near" : ""}`, OUTER_R, OUTER_SW, { pct: outer.pct });
     svg.appendChild(f);
   }
   if (dual) {
     svg.appendChild(ringCircle("track", INNER_R, INNER_SW, null));
     if (inner && !inner.reset) {
-      svg.appendChild(ringCircle(`fill ${severityClass(inner.pct)}`, INNER_R, INNER_SW, { pct: inner.pct }));
+      const innerNear = model.near && model.binding === inner;
+      svg.appendChild(ringCircle(`fill ${severityClass(inner.pct)}${innerNear ? " is-near" : ""}`, INNER_R, INNER_SW, { pct: inner.pct }));
     }
   }
 
@@ -241,9 +297,9 @@ function coinTooltip(model, now) {
   if (model.host) parts.push(model.host);
   for (const w of model.windows) {
     if (w.reset) {
-      parts.push(`${w.label} · ${t("quotaRingReset")}`);
+      parts.push(`${w.detailLabel} · ${t("quotaRingReset")}`);
     } else {
-      let seg = `${w.label} · ${w.pct}% ${t("quotaRingUsedWord")}`;
+      let seg = `${w.detailLabel} · ${w.pct}% ${t("quotaRingUsedWord")}`;
       if (Number.isFinite(w.resetAt) && w.resetAt > now) {
         seg += ` · ${t("dashboardQuotaResetIn").replace("{time}", formatDurationHM((w.resetAt - now) / 60000))}`;
       }
@@ -279,6 +335,12 @@ function buildCoinRow(model, now) {
     win.textContent = model.windows[0] ? model.windows[0].label : "";
   }
   readout.append(pct, win);
+  if (model.sourceMarker) {
+    const source = document.createElement("span");
+    source.className = "source";
+    source.textContent = model.sourceMarker;
+    readout.appendChild(source);
+  }
 
   row.append(readout, buildCoinSvg(model));
   return row;
@@ -299,7 +361,18 @@ function buildOverflow(count) {
 let lastFingerprint = "";
 function fingerprint(now) {
   const coins = collectCoins(now);
-  return coins.map((m) => `${m.providerKey}:${m.host || ""}:${m.state}:${m.binding ? m.binding.pct : "x"}`).join("|");
+  return coins.map((m) => {
+    const windows = m.windows.map((w) => {
+      const resetIn = Number.isFinite(w.resetAt) && w.resetAt > now
+        ? Math.ceil((w.resetAt - now) / 60000)
+        : 0;
+      return `${w.ring}:${w.field}:${w.pct}:${w.reset ? 1 : 0}:${resetIn}`;
+    }).join(",");
+    const staleAge = m.state === "stale" && Number.isFinite(m.seenAt)
+      ? Math.floor((now - m.seenAt) / 60000)
+      : 0;
+    return `${m.providerKey}:${m.host || ""}:${m.state}:${windows}:${staleAge}`;
+  }).join("|");
 }
 
 function render() {

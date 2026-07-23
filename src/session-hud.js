@@ -307,7 +307,7 @@ module.exports = function initSessionHud(ctx) {
   let latestSnapshot = null;
   let hudFlippedAbove = false;
   let lastReservedOffset = 0;
-  let hiddenDestroyTimer = null;
+  const hiddenDestroyTimers = { hud: null, ring: null };
   // Pet-attached quota ring — a sibling floating window (quota-ring.html) that
   // shares this module's reveal / pin / grace / hot-zone lifecycle. The HUD now
   // shows sessions only; the ring shows account quota beside the pet.
@@ -485,25 +485,34 @@ module.exports = function initSessionHud(ctx) {
     visibleHoldUntil = 0;
   }
 
-  function cancelHiddenDestroy() {
-    if (!hiddenDestroyTimer) return;
-    clearTimeout(hiddenDestroyTimer);
-    hiddenDestroyTimer = null;
+  function managedWindow(kind) {
+    return kind === "ring" ? ringWindow : hudWindow;
   }
 
-  function scheduleHiddenDestroy() {
-    // Reclaiming the hidden HUD renderer is a low-power-idle-mode behavior;
-    // default mode keeps the window warm so reveals stay instant.
+  function cancelHiddenDestroy(kind) {
+    const kinds = kind ? [kind] : ["hud", "ring"];
+    for (const key of kinds) {
+      const timer = hiddenDestroyTimers[key];
+      if (!timer) continue;
+      clearTimeout(timer);
+      hiddenDestroyTimers[key] = null;
+    }
+  }
+
+  function scheduleHiddenDestroy(kind) {
+    // Reclaiming a hidden HUD/ring renderer is a low-power-idle-mode behavior;
+    // default mode keeps both windows warm so reveals stay instant.
     if (!ctx.lowPowerIdleMode) return;
-    if (!hudWindow || hudWindow.isDestroyed()) return;
-    if (hudWindow.isVisible()) return;
-    if (hiddenDestroyTimer) return;
-    hiddenDestroyTimer = setTimeout(() => {
-      hiddenDestroyTimer = null;
+    const win = managedWindow(kind);
+    if (!win || win.isDestroyed() || win.isVisible()) return;
+    if (hiddenDestroyTimers[kind]) return;
+    hiddenDestroyTimers[kind] = setTimeout(() => {
+      hiddenDestroyTimers[kind] = null;
       // Re-check the flag: the user may have left low-power mode while hidden.
       if (!ctx.lowPowerIdleMode) return;
-      if (!hudWindow || hudWindow.isDestroyed() || hudWindow.isVisible()) return;
-      hudWindow.destroy();
+      const current = managedWindow(kind);
+      if (!current || current.isDestroyed() || current.isVisible()) return;
+      current.destroy();
     }, HIDDEN_WINDOW_DESTROY_MS);
   }
 
@@ -606,6 +615,7 @@ module.exports = function initSessionHud(ctx) {
   // non-focusable, always-on-top panel) — only the preload/page and the
   // snapshot channel differ.
   function ensureQuotaRing() {
+    cancelHiddenDestroy("ring");
     if (ringWindow && !ringWindow.isDestroyed()) return ringWindow;
     if (!ctx.win || ctx.win.isDestroyed()) return null;
 
@@ -649,6 +659,7 @@ module.exports = function initSessionHud(ctx) {
       syncSessionHud();
     });
     ringWindow.on("closed", () => {
+      cancelHiddenDestroy("ring");
       ringWindow = null;
       ringDidFinishLoad = false;
     });
@@ -658,10 +669,12 @@ module.exports = function initSessionHud(ctx) {
 
   function hideQuotaRing() {
     if (ringWindow && !ringWindow.isDestroyed()) ringWindow.hide();
+    scheduleHiddenDestroy("ring");
   }
 
   function showQuotaRing(win) {
     if (!win || win.isDestroyed() || !ringDidFinishLoad) return;
+    cancelHiddenDestroy("ring");
     if (!win.isVisible()) {
       win.showInactive();
       keepOutOfTaskbar(win);
@@ -687,7 +700,7 @@ module.exports = function initSessionHud(ctx) {
   }
 
   function ensureSessionHud() {
-    cancelHiddenDestroy();
+    cancelHiddenDestroy("hud");
     if (hudWindow && !hudWindow.isDestroyed()) return hudWindow;
     if (!ctx.win || ctx.win.isDestroyed()) return null;
 
@@ -741,7 +754,7 @@ module.exports = function initSessionHud(ctx) {
       syncSessionHud();
     });
     hudWindow.on("closed", () => {
-      cancelHiddenDestroy();
+      cancelHiddenDestroy("hud");
       hudWindow = null;
       didFinishLoad = false;
       hudFlippedAbove = false;
@@ -755,7 +768,7 @@ module.exports = function initSessionHud(ctx) {
     hudFlippedAbove = false;
     if (hudWindow && !hudWindow.isDestroyed()) hudWindow.hide();
     notifyReservedOffsetIfChanged();
-    scheduleHiddenDestroy();
+    scheduleHiddenDestroy("hud");
   }
 
   function computeBounds(snapshot, scale = getTextScale()) {
@@ -787,7 +800,7 @@ module.exports = function initSessionHud(ctx) {
 
   function showSessionHud(win) {
     if (!win || win.isDestroyed() || !didFinishLoad) return;
-    cancelHiddenDestroy();
+    cancelHiddenDestroy("hud");
     if (!win.isVisible()) {
       win.showInactive();
       keepOutOfTaskbar(win);
@@ -899,6 +912,7 @@ module.exports = function initSessionHud(ctx) {
     getHudReservedOffset,
     cleanup,
     getWindow: () => hudWindow,
+    getQuotaRingWindow: () => ringWindow,
     // v5 three-state API
     revealFromPet,
     handlePinnedChanged,

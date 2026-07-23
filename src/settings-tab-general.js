@@ -561,13 +561,6 @@
           accent: snapshot.sessionHudShowContextUsage !== false,
         });
         items.push({
-          text: t("sessionHudSummaryQuota").replace(
-            "{state}",
-            snapshot.sessionHudShowQuota !== false ? onLabel : offLabel
-          ),
-          accent: snapshot.sessionHudShowQuota !== false,
-        });
-        items.push({
           text: t("sessionHudSummaryCleanup").replace(
             "{state}",
             snapshot.sessionHudCleanupDetached === true ? onLabel : offLabel

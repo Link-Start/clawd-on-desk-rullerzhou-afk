@@ -1269,6 +1269,7 @@ let broadcastSessionHudSnapshot = () => {};
 let sendSessionHudI18n = () => {};
 let getSessionHudReservedOffset = () => 0;
 let getSessionHudWindow = () => null;
+let getQuotaRingWindow = () => null;
 const themeFadeSequencer = createThemeFadeSequencer({
   getRenderWindow: () => win,
   getHitWindow: () => hitWin,
@@ -1340,6 +1341,7 @@ const topmostRuntime = createTopmostRuntime({
   getPendingPermissions: () => pendingPermissions,
   getUpdateBubbleWindow: () => _updateBubble.getBubbleWindow(),
   getSessionHudWindow: () => getSessionHudWindow(),
+  getQuotaRingWindow: () => getQuotaRingWindow(),
   getContextMenuOwner: () => contextMenuOwner,
   getNearestWorkArea,
   getPetWindowBounds,
@@ -1973,6 +1975,7 @@ broadcastSessionHudSnapshot = _sessionHud.broadcastSessionSnapshot;
 sendSessionHudI18n = _sessionHud.sendI18n;
 getSessionHudReservedOffset = _sessionHud.getHudReservedOffset;
 getSessionHudWindow = _sessionHud.getWindow;
+getQuotaRingWindow = _sessionHud.getQuotaRingWindow;
 
 agentRuntime = createAgentRuntimeMain({
   getServer: () => _server,

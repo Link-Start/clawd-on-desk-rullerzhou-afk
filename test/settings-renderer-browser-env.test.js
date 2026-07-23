@@ -4022,13 +4022,12 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(contextUsage.tabIndex, 0);
     assert.strictEqual(cleanup.classList.contains("disabled"), false);
     assert.strictEqual(cleanup.tabIndex, 0);
-    assert.strictEqual(summary.children.length, 5);
+    assert.strictEqual(summary.children.length, 4);
     assert.strictEqual(summary.classList.contains("compact"), false);
     assert.strictEqual(summary.children[0].textContent, "Labels: on");
     assert.strictEqual(summary.children[1].textContent, "Time: on");
     assert.strictEqual(summary.children[2].textContent, "Context: on");
-    assert.strictEqual(summary.children[3].textContent, "Quota: on");
-    assert.strictEqual(summary.children[4].textContent, "Auto-clear: on");
+    assert.strictEqual(summary.children[3].textContent, "Auto-clear: on");
 
     assert.ok(
       elapsed.eventListeners.click && elapsed.eventListeners.click.length > 0,
@@ -4038,6 +4037,38 @@ describe("settings renderer browser environment", () => {
     await Promise.resolve();
     await Promise.resolve();
     assert.deepStrictEqual(updateCalls, [{ key: "sessionHudShowElapsed", value: false }]);
+  });
+
+  it("keeps the quota ring as an independent sibling of the Session HUD", async () => {
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({
+        sessionHudEnabled: false,
+        sessionHudShowQuota: true,
+        quotaMergeSources: false,
+      }),
+      settingsAPI: {
+        getQuotaSourceCount: async () => 2,
+      },
+    });
+    harness.renderContent();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const ringEnabled = harness.getSwitch("sessionHudShowQuota");
+    const mergeSources = harness.getSwitch("quotaMergeSources");
+    const ringOptions = harness.content.querySelector(".quota-ring-option-list");
+    const hudOptions = harness.content.querySelector(".session-hud-option-list");
+    const summary = harness.core.state.mountedControls.sessionHudSummary.element;
+
+    assert.ok(ringEnabled);
+    assert.ok(mergeSources);
+    assert.ok(ringOptions);
+    assert.ok(hudOptions);
+    assert.notStrictEqual(ringOptions, hudOptions);
+    assert.strictEqual(ringEnabled.classList.contains("disabled"), false);
+    assert.strictEqual(mergeSources.classList.contains("disabled"), false);
+    assert.strictEqual(harness.getSwitchMeta("quotaMergeSources").row.style.display, "");
+    assert.strictEqual(summary.children.length, 1);
+    assert.strictEqual(summary.children[0].textContent, "HUD: off");
   });
 
   it("groups sound and volume into one collapsible control with in-place summary updates", () => {

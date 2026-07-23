@@ -44,16 +44,32 @@ describe("quota ring — coin counting", () => {
     assert.strictEqual(countQuotaCoins(snapshot, true), 1);
   });
 
-  it("returns 0 when quota is disabled, empty, or only carries non-drawable buckets", () => {
+  it("returns 0 when quota is disabled or empty", () => {
     const drawable = { accountQuota: [{ claudeQuota: { group: { claudeWeekly: bucket(10) }, updatedAt: 1 } }] };
     assert.strictEqual(countQuotaCoins(drawable, false), 0);
     assert.strictEqual(countQuotaCoins({ accountQuota: [] }, true), 0);
     assert.strictEqual(countQuotaCoins({}, true), 0);
-    // Antigravity source that only reports third-party buckets the ring can't draw.
+  });
+
+  it("counts Antigravity third-party-only quota without creating another agent coin", () => {
     const thirdPartyOnly = {
       accountQuota: [{ antigravityQuota: { group: { thirdPartyWeekly: bucket(52) }, updatedAt: 1 } }],
     };
-    assert.strictEqual(countQuotaCoins(thirdPartyOnly, true), 0);
+    assert.strictEqual(countQuotaCoins(thirdPartyOnly, true), 1);
+    const allAntigravity = {
+      accountQuota: [{
+        antigravityQuota: {
+          group: {
+            geminiFiveHour: bucket(10),
+            geminiWeekly: bucket(20),
+            thirdPartyFiveHour: bucket(30),
+            thirdPartyWeekly: bucket(40),
+          },
+          updatedAt: 1,
+        },
+      }],
+    };
+    assert.strictEqual(countQuotaCoins(allAntigravity, true), 1);
   });
 });
 

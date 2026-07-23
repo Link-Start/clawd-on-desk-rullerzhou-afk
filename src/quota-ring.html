@@ -54,10 +54,12 @@ body { padding: 6px 6px 8px; }
 .cluster.side-right .coin-row { flex-direction: row-reverse; }
 
 .readout {
-  width: 34px;
+  width: 44px;
   display: flex;
   flex-direction: column;
-  line-height: 1.06;
+  /* Three lines (percent, window, optional source) must stay inside the 26px
+     coin row; geometry uses that exact row height for window sizing. */
+  line-height: 1;
 }
 .cluster.side-left .readout { align-items: flex-end; text-align: right; }
 .cluster.side-right .readout { align-items: flex-start; text-align: left; }
@@ -71,6 +73,15 @@ body { padding: 6px 6px 8px; }
 .readout .win {
   font-size: 8.5px;
   color: var(--ink-soft);
+  text-shadow: var(--halo);
+  white-space: nowrap;
+}
+.readout .source {
+  max-width: 44px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 6.5px;
+  color: var(--ink-faint);
   text-shadow: var(--halo);
   white-space: nowrap;
 }

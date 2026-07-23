@@ -374,7 +374,7 @@ describe("session HUD layout", () => {
     assert.strictEqual(countQuotaCoins(snapshot, false), 0, "hudShowQuota off hides the ring");
   });
 
-  it("does not count Antigravity third-party-only buckets the ring cannot draw", () => {
+  it("counts Antigravity third-party-only buckets for ring eligibility", () => {
     const snapshot = {
       sessions: [],
       accountQuota: [{
@@ -385,8 +385,8 @@ describe("session HUD layout", () => {
         },
       }],
     };
-    assert.strictEqual(countQuotaCoins(snapshot, true), 0);
-    assert.strictEqual(evaluateBaseEligible({ snapshot, showQuota: true }), false);
+    assert.strictEqual(countQuotaCoins(snapshot, true), 1);
+    assert.strictEqual(evaluateBaseEligible({ snapshot, showQuota: true }), true);
   });
 
   it("the quota ring is base-eligible independently of the Session HUD master", () => {
@@ -625,26 +625,38 @@ describe("session HUD v5 three-state runtime contracts (source-level)", () => {
       "session-hud must not send hudAutoHide in snapshot");
   });
 
-  it("destroys hidden HUD windows (low power idle mode) to release renderer memory", () => {
+  it("destroys hidden HUD and quota-ring windows independently in low power idle mode", () => {
     assert.ok(
       /const\s+HIDDEN_WINDOW_DESTROY_MS\s*=\s*30000/.test(src),
       "session-hud should define a hidden-window destroy delay"
     );
     assert.ok(
-      /function scheduleHiddenDestroy\(\)\s*\{[\s\S]*?if\s*\(!ctx\.lowPowerIdleMode\)\s*return;/.test(src),
+      /function scheduleHiddenDestroy\(kind\)\s*\{[\s\S]*?if\s*\(!ctx\.lowPowerIdleMode\)\s*return;/.test(src),
       "hidden-window destroy must be gated behind low power idle mode"
     );
     assert.ok(
-      /function scheduleHiddenDestroy\(\)\s*\{[\s\S]*?hudWindow\.destroy\(\)/.test(src),
-      "hidden HUD cleanup must eventually destroy the BrowserWindow"
+      /const hiddenDestroyTimers = \{ hud: null, ring: null \}/.test(src),
+      "HUD and ring must not cancel each other's hidden cleanup"
     );
     assert.ok(
-      /function hideSessionHud\(\)\s*\{[\s\S]*?scheduleHiddenDestroy\(\)/.test(src),
+      /function scheduleHiddenDestroy\(kind\)\s*\{[\s\S]*?current\.destroy\(\)/.test(src),
+      "hidden cleanup must eventually destroy the selected BrowserWindow"
+    );
+    assert.ok(
+      /function hideSessionHud\(\)\s*\{[\s\S]*?scheduleHiddenDestroy\("hud"\)/.test(src),
       "hiding the HUD should schedule hidden-window cleanup"
     );
     assert.ok(
-      /function showSessionHud\(win\)\s*\{[\s\S]*?cancelHiddenDestroy\(\)/.test(src),
+      /function hideQuotaRing\(\)\s*\{[\s\S]*?scheduleHiddenDestroy\("ring"\)/.test(src),
+      "hiding a ring-only UI should schedule its own renderer cleanup"
+    );
+    assert.ok(
+      /function showSessionHud\(win\)\s*\{[\s\S]*?cancelHiddenDestroy\("hud"\)/.test(src),
       "showing the HUD should cancel hidden-window cleanup"
+    );
+    assert.ok(
+      /function showQuotaRing\(win\)\s*\{[\s\S]*?cancelHiddenDestroy\("ring"\)/.test(src),
+      "showing the ring should cancel only the ring cleanup"
     );
   });
 });

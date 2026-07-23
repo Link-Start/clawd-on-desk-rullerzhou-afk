@@ -62,6 +62,7 @@ function createTopmostRuntime(options = {}) {
   const getPendingPermissions = options.getPendingPermissions || (() => []);
   const getUpdateBubbleWindow = options.getUpdateBubbleWindow || (() => null);
   const getSessionHudWindow = options.getSessionHudWindow || (() => null);
+  const getQuotaRingWindow = options.getQuotaRingWindow || (() => null);
   const getContextMenuOwner = options.getContextMenuOwner || (() => null);
   const getNearestWorkArea = options.getNearestWorkArea || (() => null);
   const getPetWindowBounds = options.getPetWindowBounds || (() => null);
@@ -248,6 +249,7 @@ function createTopmostRuntime(options = {}) {
     }
     apply(getUpdateBubbleWindow());
     apply(getSessionHudWindow());
+    apply(getQuotaRingWindow());
     apply(getContextMenuOwner());
     syncImeEditingPetDodge();
   }
@@ -511,6 +513,11 @@ function createTopmostRuntime(options = {}) {
       const sessionHudWin = getSessionHudWindow();
       if (isLiveWindow(sessionHudWin) && sessionHudWin.isVisible()) {
         reassertWindowAndTaskbar(sessionHudWin);
+      }
+
+      const quotaRingWin = getQuotaRingWindow();
+      if (isLiveWindow(quotaRingWin) && quotaRingWin.isVisible()) {
+        reassertWindowAndTaskbar(quotaRingWin);
       }
 
       const contextMenuOwner = getContextMenuOwner();
