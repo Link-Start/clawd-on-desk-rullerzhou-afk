@@ -159,6 +159,11 @@ module.exports = function initUpdateBubble(ctx) {
   let autoCloseTimer = null;
   let visibleSince = 0;
 
+  function notifyOrbitGeometryChanged() {
+    if (typeof ctx.repositionSessionHud !== "function") return;
+    try { ctx.repositionSessionHud(); } catch {}
+  }
+
   function getTextScale() {
     return clampTextScale(typeof ctx.getTextScale === "function" ? ctx.getTextScale() : 1);
   }
@@ -206,6 +211,7 @@ module.exports = function initUpdateBubble(ctx) {
     bubble.on("closed", () => {
       bubble = null;
       measuredHeight = 0;
+      notifyOrbitGeometryChanged();
       if (resolveAction) {
         const fallback = activePayload && activePayload.defaultAction != null ? activePayload.defaultAction : null;
         const resolver = resolveAction;
@@ -356,6 +362,7 @@ module.exports = function initUpdateBubble(ctx) {
       if (win && !win.isDestroyed()) {
         win.webContents.send("update-bubble-show", payload);
         syncVisibility();
+        notifyOrbitGeometryChanged();
         scheduleAutoClose(payload);
       }
     };
@@ -383,7 +390,10 @@ module.exports = function initUpdateBubble(ctx) {
     visibleSince = 0;
     if (hideTimer) clearTimeout(hideTimer);
     hideTimer = setTimeout(() => {
-      if (bubble && !bubble.isDestroyed()) bubble.hide();
+      if (bubble && !bubble.isDestroyed()) {
+        bubble.hide();
+        notifyOrbitGeometryChanged();
+      }
     }, 250);
   }
 
@@ -415,6 +425,7 @@ module.exports = function initUpdateBubble(ctx) {
     if (typeof height === "number" && height > 0) {
       measuredHeight = Math.ceil(height);
       repositionUpdateBubble();
+      notifyOrbitGeometryChanged();
     }
   }
 

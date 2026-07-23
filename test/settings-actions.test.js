@@ -100,11 +100,12 @@ describe("updateRegistry pure-data validators", () => {
   it("function-form boolean fields reject non-booleans", () => {
     const deps = { snapshot: baseSnapshot };
     for (const key of [
-      "sessionHudEnabled", "sessionHudShowElapsed", "sessionHudShowContextUsage", "sessionHudCleanupDetached",
+      "sessionHudEnabled", "sessionHudShowElapsed", "sessionHudShowContextUsage", "sessionHudShowQuota", "sessionHudCleanupDetached",
       "sessionHudShowStateLabels", "sessionHudPinned",
       "miniMode", "openAtLoginHydrated", "soundMuted", "bubbleFollowPet",
       "hideBubbles", "permissionBubblesEnabled", "lowPowerIdleMode",
       "allowEdgePinning", "disableMiniMode", "keepSizeAcrossDisplays", "codexHookHealthNotifyEnabled",
+      "quotaMergeSources",
     ]) {
       assert.strictEqual(updateRegistry[key](true, deps).status, "ok", `${key}(true)`);
       assert.strictEqual(updateRegistry[key](false, deps).status, "ok", `${key}(false)`);

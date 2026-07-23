@@ -181,6 +181,33 @@ describe("quota ring — bounds placement", () => {
     );
     assert.strictEqual(overlapW * overlapH, 0);
   });
+
+  it("moves a four-coin Orbit clear of fixed permission and update bubbles", () => {
+    // Real default-theme geometry from the review repro: right-bottom Clawd,
+    // bubbleFollowPet=false, one permission bubble plus one update bubble.
+    const pet = { left: 1182.955, top: 738.26, right: 1247.045, bottom: 783.5 };
+    const avoids = [
+      { x: 1065, y: 788, width: 296, height: 30 }, // Session HUD
+      { x: 1092, y: 692, width: 340, height: 200 }, // permission
+      { x: 1092, y: 742, width: 340, height: 150 }, // update
+    ];
+    const r = computeQuotaRingBounds({
+      hitRect: pet,
+      workArea,
+      coinCount: 4,
+      scale: 1,
+      avoidRects: avoids,
+    });
+
+    assert.deepStrictEqual(r.contentBounds, { x: 1087, y: 540, width: 88, height: 146 });
+    for (const rect of avoids) {
+      assert.strictEqual(
+        ringGeom.overlapArea(r.contentBounds, rect, 6),
+        0,
+        `Orbit overlaps ${JSON.stringify(rect)}`
+      );
+    }
+  });
 });
 
 describe("quota ring — window labels & severity", () => {

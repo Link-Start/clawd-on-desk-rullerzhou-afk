@@ -143,7 +143,17 @@ function postStateBody(body, deps, env) {
   if (!body) return Promise.resolve(false);
   const postState = deps.postState || postStateToRunningServer;
   return new Promise((resolve) => {
-    postState(JSON.stringify(body), { timeoutMs: STATE_POST_TIMEOUT_MS, env }, (posted) => resolve(!!posted));
+    // Status-line quota forwarding is best-effort telemetry, not a blocking
+    // hook. Keep its small timeout even on CLAWD_REMOTE: the shared transport
+    // normally raises every remote request to 5s, which is appropriate for
+    // state/permission hooks but lets a stale reverse tunnel accumulate
+    // long-lived status-line processes. The payload itself is still stamped as
+    // remote by buildStateBody; this override only controls transport timing.
+    postState(
+      JSON.stringify(body),
+      { timeoutMs: STATE_POST_TIMEOUT_MS, env, remote: false },
+      (posted) => resolve(!!posted)
+    );
   });
 }
 
@@ -185,6 +195,13 @@ async function main(deps = {}) {
     }
   }
 
+  // Plain mode owns the visible line, so publish it before touching the
+  // network. Claude reads the child pipe as it runs; a slow or half-open SSH
+  // reverse tunnel must never hold the terminal UI behind quota forwarding.
+  // Chain mode keeps stdout reserved for the user's command and only falls
+  // back below when that command could not spawn at all.
+  if (!chainPromise) writeStdout(`${text}\n`);
+
   let chainResult = null;
   try {
     const remote = !!env.CLAWD_REMOTE;
@@ -206,7 +223,7 @@ async function main(deps = {}) {
   // e.g. the command's binary is gone) rendered nothing, so falling back to
   // our plain line beats a permanently blank status line. A "timeout" chain
   // may have already rendered before hanging - stay silent there.
-  if (!chainPromise || chainResult === "spawn-failed") writeStdout(`${text}\n`);
+  if (chainResult === "spawn-failed") writeStdout(`${text}\n`);
 }
 
 if (require.main === module) {

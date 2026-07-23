@@ -1621,8 +1621,8 @@ function registerClaudeStatusline(options = {}) {
   // ~/.claude/hooks/) target POSIX shells only (deploy aborts on cmd.exe),
   // so the bash-style env prefix is safe - same convention as
   // buildCommandHookSpec's remote hook form. CLAWD_REMOTE=1 is what makes
-  // claude-statusline.js stamp body.host and use the remote POST timeout,
-  // so its quota POSTs ride the reverse tunnel onto the right sessions.
+  // claude-statusline.js stamp body.host so its best-effort quota POSTs ride
+  // the reverse tunnel onto the right sessions.
   // nodeBin needs no remote resolution here: this code already runs under
   // the remote's own node, so resolveNodeBin() IS the remote path.
   const portableCommand = buildPortableStatuslineCommand(nodeBin, scriptPath, { platform });
@@ -1682,6 +1682,20 @@ function unregisterClaudeStatusline(options = {}) {
   return result;
 }
 
+function parseClaudeInstallCliOptions(argv = []) {
+  const args = Array.isArray(argv) ? argv : [];
+  const remote = args.includes("--remote");
+  return {
+    remote,
+    chainExisting: args.includes("--chain-existing"),
+    // Remote deploy is itself an explicit quota-collection action. Locally,
+    // installing/reinstalling command hooks must not silently opt the user into
+    // the visible single-slot statusLine; Settings owns that preference unless
+    // the debug CLI receives an explicit --statusline.
+    installStatusline: remote || args.includes("--statusline"),
+  };
+}
+
 // Export for use by main.js
 module.exports = {
   DEFAULT_PARENT_DIR,
@@ -1719,21 +1733,23 @@ module.exports = {
     reconcileVersionedHooks,
     shouldReconcileVersionedHooks,
     buildCommandHookSpec,
+    parseClaudeInstallCliOptions,
   },
 };
 
-// CLI: run directly with `node hooks/install.js [--remote]`
+// CLI: run directly with `node hooks/install.js [--remote] [--statusline]`
 if (require.main === module) {
   try {
-    const remote = process.argv.includes("--remote");
-    const chainExisting = process.argv.includes("--chain-existing");
+    const { remote, chainExisting, installStatusline } =
+      parseClaudeInstallCliOptions(process.argv.slice(2));
     registerHooks({ remote });
-    // Keep the CLI symmetric with hooks/uninstall.js, which unregisters the
-    // statusline: without this, a manual uninstall + reinstall cycle loses
-    // the statusline until the next app startup sync. Remote installs
-    // register it too (with the CLAWD_REMOTE=1 env prefix) - that is how
-    // remote machines report subscription quota through the SSH tunnel.
-    registerClaudeStatusline({ remote, chainExisting });
+    if (installStatusline) {
+      // Remote installs register the statusline automatically (with the
+      // CLAWD_REMOTE=1 env prefix) so quota can ride the SSH tunnel. Local
+      // debug/reinstall commands require --statusline and otherwise preserve
+      // the default-off collection preference and the user's visible slot.
+      registerClaudeStatusline({ remote, chainExisting });
+    }
   } catch (err) {
     console.error(err.message);
     process.exit(1);

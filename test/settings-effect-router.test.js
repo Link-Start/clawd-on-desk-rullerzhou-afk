@@ -251,6 +251,21 @@ describe("settings-effect-router", () => {
     ]);
 
     calls.length = 0;
+    emit({ sessionHudShowQuota: false });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { sessionHudShowQuota: false }],
+      ["syncSessionHudVisibility"],
+      ["repositionFloatingBubbles"],
+    ]);
+
+    calls.length = 0;
+    emit({ quotaMergeSources: true });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { quotaMergeSources: true }],
+      ["emitSessionSnapshot", { force: true }],
+    ]);
+
+    calls.length = 0;
     emit({ sessionHudCleanupDetached: true });
     assert.deepStrictEqual(calls, [
       ["updateMirrors", { sessionHudCleanupDetached: true }],

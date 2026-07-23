@@ -109,6 +109,31 @@ describe("Claude Code statusline adapter", () => {
     });
   });
 
+  it("writes the visible line before a remote quota POST settles", async () => {
+    const events = [];
+    let finishPost;
+    const run = main({
+      env: { CLAWD_REMOTE: "1" },
+      payload: {
+        session_id: "remote-session",
+        model: { display_name: "Remote Claude" },
+        rate_limits: { seven_day: { used_percentage: 19 } },
+      },
+      writeStdout: (chunk) => { events.push(["stdout", chunk]); return true; },
+      postState: (_body, options, callback) => {
+        events.push(["post", options]);
+        finishPost = callback;
+      },
+    });
+
+    assert.deepStrictEqual(events.map(([kind]) => kind), ["stdout", "post"]);
+    assert.strictEqual(events[0][1], "Remote Claude · 19% weekly\n");
+    assert.strictEqual(events[1][1].remote, false, "statusline POST must skip the shared 5s remote timeout floor");
+    assert.strictEqual(events[1][1].timeoutMs, 150);
+    finishPost(false);
+    await run;
+  });
+
   it("main() posts nothing (but still writes stdout) when rate_limits is absent", async () => {
     const writes = [];
     let postCalled = false;

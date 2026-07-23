@@ -1436,6 +1436,7 @@ const _permCtx = {
   reportShortcutFailure: (actionId, reason) => shortcutRuntime.reportFailure(actionId, reason),
   clearShortcutFailure: (actionId) => shortcutRuntime.clearFailure(actionId),
   repositionUpdateBubble: () => repositionUpdateBubble(),
+  repositionSessionHud: () => repositionSessionHud(),
   getTelegramApprovalClient: () => getTelegramApprovalClient(),
   getRemoteApprovalClients: () => {
     const client = getFeishuApprovalClient();
@@ -1491,6 +1492,7 @@ const _updateBubbleCtx = {
   getTextScale: () => getTextScaleForPetWindows(),
   guardAlwaysOnTop,
   reapplyMacVisibility,
+  repositionSessionHud: () => repositionSessionHud(),
 };
 const _updateBubble = initUpdateBubble(_updateBubbleCtx);
 const {
@@ -1985,6 +1987,8 @@ const _sessionHud = require("./session-hud")({
   getSessionHudAnchorRect,
   getNearestWorkArea,
   getTextScale: () => getTextScaleForPetWindows(),
+  getPermissionBubbleBounds: () => _perm.getVisibleBubbleBounds(),
+  getUpdateBubbleWindow: () => _updateBubble.getBubbleWindow(),
   guardAlwaysOnTop,
   reapplyMacVisibility,
   onReservedOffsetChange: () => repositionFloatingBubbles(),

@@ -360,6 +360,31 @@ module.exports = function initSessionHud(ctx) {
     return clickRevealed === true;
   }
 
+  function collectRingAvoidRects(hudContentBounds) {
+    const rects = [];
+    if (hudContentBounds) rects.push(hudContentBounds);
+
+    if (typeof ctx.getPermissionBubbleBounds === "function") {
+      try {
+        const permissionBounds = ctx.getPermissionBubbleBounds();
+        if (Array.isArray(permissionBounds)) rects.push(...permissionBounds);
+      } catch {}
+    }
+
+    if (typeof ctx.getUpdateBubbleWindow === "function") {
+      try {
+        const updateWindow = ctx.getUpdateBubbleWindow();
+        if (updateWindow
+            && !updateWindow.isDestroyed()
+            && updateWindow.isVisible()
+            && typeof updateWindow.getBounds === "function") {
+          rects.push(updateWindow.getBounds());
+        }
+      } catch {}
+    }
+    return rects;
+  }
+
   function computeExpectedHudContentBounds(snapshot, scale = getTextScale()) {
     if (!ctx.win || ctx.win.isDestroyed()) return null;
     const petBounds = typeof ctx.getPetWindowBounds === "function" ? ctx.getPetWindowBounds() : null;
@@ -401,7 +426,7 @@ module.exports = function initSessionHud(ctx) {
         workArea,
         coinCount,
         scale,
-        avoidRects: contentBounds ? [contentBounds] : [],
+        avoidRects: collectRingAvoidRects(contentBounds),
       })
       : null;
     return { hitRect, contentBounds, ringContentBounds: ring && ring.contentBounds };
@@ -863,7 +888,11 @@ module.exports = function initSessionHud(ctx) {
 
     // ── Quota ring (quota only; attached beside the pet) ──
     const ring = show
-      ? computeRingBounds(snapshot, scale, hudComputed ? [hudComputed.contentBounds] : [])
+      ? computeRingBounds(
+        snapshot,
+        scale,
+        collectRingAvoidRects(hudComputed ? hudComputed.contentBounds : null)
+      )
       : null;
     if (!ring) {
       hideQuotaRing();

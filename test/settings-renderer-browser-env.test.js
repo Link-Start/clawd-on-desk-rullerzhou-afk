@@ -1504,6 +1504,9 @@ describe("settings renderer browser environment", () => {
     assert.ok(fs.readFileSync(PRELOAD_SETTINGS, "utf8").includes(
       'getPetTintOptions: () => ipcRenderer.invoke("settings:get-pet-tint-options")'
     ));
+    assert.ok(fs.readFileSync(PRELOAD_SETTINGS, "utf8").includes(
+      'getQuotaSourceCount: () => ipcRenderer.invoke("settings:get-quota-source-count")'
+    ));
     assert.ok(rendererSource.includes("tab.refreshRuntimeStatus(payload)"));
     assert.ok(coreSource.includes("ClawdSettingsSizeSlider"));
     assert.ok(i18nSource.includes("globalThis"));

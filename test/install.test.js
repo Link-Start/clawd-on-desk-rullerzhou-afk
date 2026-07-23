@@ -30,6 +30,7 @@ const {
   readClaudeVersionFallbackAsync,
   getClaudeVersionAsync,
   isClawdPermissionUrl,
+  parseClaudeInstallCliOptions,
 } = __test;
 
 // registerHooks derives the hook command format from real-environment WSL
@@ -1799,6 +1800,23 @@ describe("Hook installer settings backup", () => {
 });
 
 describe("Claude Code statusline installer", () => {
+  it("keeps local CLI hook reinstalls opted out unless --statusline is explicit", () => {
+    assert.deepStrictEqual(parseClaudeInstallCliOptions([]), {
+      remote: false,
+      chainExisting: false,
+      installStatusline: false,
+    });
+    assert.strictEqual(parseClaudeInstallCliOptions(["--statusline"]).installStatusline, true);
+  });
+
+  it("keeps remote deploy statusline collection enabled without an extra flag", () => {
+    assert.deepStrictEqual(parseClaudeInstallCliOptions(["--remote", "--chain-existing"]), {
+      remote: true,
+      chainExisting: true,
+      installStatusline: true,
+    });
+  });
+
   it("registers the statusline command when settings.json has none", () => {
     const settingsPath = makeTempSettings({});
 
@@ -1824,8 +1842,8 @@ describe("Claude Code statusline installer", () => {
 
   // Remote deploys run install.js --remote ON the remote (POSIX shells only —
   // deploy aborts on cmd.exe), and CLAWD_REMOTE=1 is what makes the
-  // statusline stamp body.host + use the remote POST timeout so quota rides
-  // the reverse tunnel. Same env-prefix convention as remote command hooks.
+  // statusline stamp body.host so quota rides the reverse tunnel. The adapter
+  // itself keeps a short best-effort transport timeout to protect visible UI.
   it("remote: prefixes the command with CLAWD_REMOTE=1 and stays marker-detectable", () => {
     const settingsPath = makeTempSettings({});
 

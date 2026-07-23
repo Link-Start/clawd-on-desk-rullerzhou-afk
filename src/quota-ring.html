@@ -51,12 +51,6 @@ body { padding: 6px 6px 8px; }
   gap: 6px;
   cursor: pointer;
 }
-.coin-row:focus-visible,
-.overflow:focus-visible {
-  outline: 2px solid rgba(255, 255, 255, 0.9);
-  outline-offset: 2px;
-  border-radius: 6px;
-}
 .cluster.side-right .coin-row { flex-direction: row-reverse; }
 
 .readout {
@@ -130,7 +124,7 @@ body { padding: 6px 6px 8px; }
 </style>
 </head>
 <body>
-  <div id="cluster" class="cluster side-left"></div>
+  <div id="cluster" class="cluster side-left" aria-hidden="true"></div>
   <script src="./quota-ring-renderer.js"></script>
 </body>
 </html>

@@ -625,6 +625,18 @@ describe("session HUD v5 three-state runtime contracts (source-level)", () => {
       "session-hud must not send hudAutoHide in snapshot");
   });
 
+  it("feeds visible permission and update bubble bounds into Orbit avoidance", () => {
+    const collectFn = src.match(/function collectRingAvoidRects\([\s\S]*?\n  \}/);
+    assert.ok(collectFn, "collectRingAvoidRects function missing");
+    assert.match(collectFn[0], /ctx\.getPermissionBubbleBounds\(\)/);
+    assert.match(collectFn[0], /ctx\.getUpdateBubbleWindow\(\)/);
+    assert.match(
+      src,
+      /computeRingBounds\([\s\S]{0,160}collectRingAvoidRects\(/,
+      "visible Orbit placement must use all floating-surface avoid rects"
+    );
+  });
+
   it("destroys hidden HUD and quota-ring windows independently in low power idle mode", () => {
     assert.ok(
       /const\s+HIDDEN_WINDOW_DESTROY_MS\s*=\s*30000/.test(src),

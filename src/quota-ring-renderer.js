@@ -323,15 +323,10 @@ function buildCoinRow(model, now) {
   const row = document.createElement("div");
   row.className = `coin-row is-${model.state}`;
   row.title = coinTooltip(model, now);
-  row.setAttribute("role", "button");
-  row.setAttribute("tabindex", "0");
-  row.setAttribute("aria-label", row.title);
+  // The hosting Electron panel is intentionally non-focusable so checking
+  // quota never steals focus from the terminal. Treat the ring as a decorative
+  // pointer convenience; keyboard/screen-reader access remains in Dashboard.
   row.addEventListener("click", () => window.quotaRingAPI.openDashboard());
-  row.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    event.preventDefault();
-    window.quotaRingAPI.openDashboard();
-  });
 
   const readout = document.createElement("div");
   readout.className = "readout";
@@ -366,15 +361,7 @@ function buildOverflow(count) {
   el.className = "overflow";
   el.textContent = `+${count}`;
   el.title = t("quotaRingOverflow").replace("{n}", count);
-  el.setAttribute("role", "button");
-  el.setAttribute("tabindex", "0");
-  el.setAttribute("aria-label", el.title);
   el.addEventListener("click", () => window.quotaRingAPI.openDashboard());
-  el.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    event.preventDefault();
-    window.quotaRingAPI.openDashboard();
-  });
   return el;
 }
 

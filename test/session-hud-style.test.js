@@ -57,6 +57,13 @@ describe("pet-attached quota ring", () => {
     assert.match(quotaRingRenderer, /buildOverflow/);
   });
 
+  it("does not advertise unreachable keyboard controls in the non-focusable ring panel", () => {
+    assert.match(quotaRingHtml, /id="cluster"[^>]*aria-hidden="true"/);
+    assert.doesNotMatch(quotaRingRenderer, /tabindex/);
+    assert.doesNotMatch(quotaRingRenderer, /addEventListener\("keydown"/);
+    assert.doesNotMatch(quotaRingRenderer, /setAttribute\("role", "button"\)/);
+  });
+
   it("honors reduced motion for the near-exhausted pulse", () => {
     assert.match(quotaRingHtml, /prefers-reduced-motion: reduce/);
     assert.match(quotaRingHtml, /coin-pulse/);
