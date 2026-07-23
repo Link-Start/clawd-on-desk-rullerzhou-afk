@@ -590,6 +590,32 @@ describe("createPidResolver() — Windows PowerShell path", { skip: process.plat
     });
   });
 
+  it("preserves private recovery identities through lifecycle metadata", () => {
+    const cfg = getPlatformConfig();
+    const resolve = createPidResolver({ ...LIVE_GATE,
+      platformConfig: cfg,
+      startPid: 400,
+      agentNames: { win: new Set(["claude.exe"]), mac: new Set(["claude"]) },
+    });
+    withMockedExec(() => snapshotJson([
+      { pid: 400, name: "node.exe", ppid: 401, startIdentity: "node" },
+      { pid: 401, name: "claude.exe", ppid: 402, startIdentity: "agent" },
+      { pid: 402, name: "windowsterminal.exe", ppid: 0, startIdentity: "source" },
+    ]), () => {
+      const result = resolve({
+        namespace: "claude-code",
+        sessionId: "recovery-identity-session",
+        cacheCwd: "C:/work/project",
+        lifecycle: "start",
+        cacheable: false,
+      });
+      assert.strictEqual(result.agentProcessStartIdentity, "win32:agent");
+      assert.strictEqual(result.sourceProcessStartIdentity, "win32:source");
+      assert.strictEqual(Object.keys(result).includes("agentProcessStartIdentity"), false);
+      assert.strictEqual(Object.keys(result).includes("sourceProcessStartIdentity"), false);
+    });
+  });
+
   it("detects agentPid via agentCmdlineCheck on node.exe using snapshot CommandLine", () => {
     const cfg = getPlatformConfig();
     const resolve = createPidResolver({ ...LIVE_GATE,

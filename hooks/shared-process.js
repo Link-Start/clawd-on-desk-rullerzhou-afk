@@ -706,7 +706,7 @@ function createPidResolver(options) {
   // (never mutates _cached) so the no-arg shape stays pristine.
   function freshMetadata() {
     const meta = freshResolve();
-    return {
+    const result = {
       ...meta,
       // #681: derived in memory from the LIVE walk. meta.agentCommandLine stays
       // on the fresh shape (the no-arg red line pins those 10 fields, and it
@@ -717,6 +717,15 @@ function createPidResolver(options) {
       // make the offline path indistinguishable from a real walk in logs.
       cacheSource: meta.snapshotOk ? "fresh" : "none",
     };
+    // Object spread deliberately skips the recovery-only non-enumerable
+    // identities attached by computeFreshSnapshot(). Reattach them privately
+    // so the hook can seed the durable lease from this one live snapshot while
+    // keeping the public resolver shape and sanitized v2 cache unchanged.
+    Object.defineProperties(result, {
+      agentProcessStartIdentity: { value: meta.agentProcessStartIdentity, enumerable: false },
+      sourceProcessStartIdentity: { value: meta.sourceProcessStartIdentity, enumerable: false },
+    });
+    return result;
   }
 
   // The sanitized subset persisted to v2. Deliberately built from `meta.headless`
