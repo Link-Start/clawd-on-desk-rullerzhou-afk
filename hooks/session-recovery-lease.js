@@ -45,6 +45,21 @@ function isPositivePid(value) {
   return Number.isInteger(value) && value > 0;
 }
 
+function normalizeWindowsStartTicks(value) {
+  const raw = String(value || "").trim();
+  if (!/^\d+$/.test(raw)) return null;
+  try {
+    const ticks = BigInt(raw);
+    if (ticks <= 0n) return null;
+    // Win32_Process.CreationDate, used by the hook writer, has microsecond
+    // precision. Get-Process.StartTime can retain the final 100ns digit, so
+    // compare both sources at the writer's coarser precision.
+    return (ticks - (ticks % 10n)).toString();
+  } catch {
+    return null;
+  }
+}
+
 function normalizeSessionId(value) {
   if (typeof value !== "string") return null;
   const id = value.trim();
@@ -251,7 +266,7 @@ function getWindowsProcessStartIdentities(pids, options = {}) {
     const identities = new Map();
     for (const row of rows) {
       const pid = Number(row && (row.pid ?? row.Pid));
-      const start = String((row && (row.start ?? row.Start)) || "").trim();
+      const start = normalizeWindowsStartTicks(row && (row.start ?? row.Start));
       if (isPositivePid(pid) && start) identities.set(pid, `win32:${start}`);
     }
     return identities;

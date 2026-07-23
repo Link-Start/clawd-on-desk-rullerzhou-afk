@@ -335,6 +335,34 @@ describe("durable session recovery leases", () => {
     assert.strictEqual(updated.record.sourceProcessStartIdentity, "win32:new");
   });
 
+  it("matches Windows loader identities at the CIM writer's microsecond precision", () => {
+    const writerTicks = "639203668532454670";
+    const loaderTicks = "639203668532454671";
+    writeLeaseRecord("windows-precision", {
+      processStartIdentity: `win32:${writerTicks}`,
+      sourceProcessStartIdentity: `win32:${writerTicks}`,
+    });
+    const common = {
+      recoveryDir,
+      now: 2000,
+      platform: "win32",
+      processKill: () => true,
+      isAgentEnabled: () => true,
+    };
+
+    const loaded = loadActiveRecoveryLeases({
+      ...common,
+      execFileSync: () => JSON.stringify({ pid: process.pid, start: loaderTicks }),
+    });
+    assert.deepStrictEqual(loaded.map((lease) => lease.sessionId), ["windows-precision"]);
+
+    const reused = loadActiveRecoveryLeases({
+      ...common,
+      execFileSync: () => JSON.stringify({ pid: process.pid, start: "639203668532454680" }),
+    });
+    assert.deepStrictEqual(reused, []);
+  });
+
   it("does not let more than 100 invalid active leases hide one valid lease", () => {
     const now = 25 * 60 * 60 * 1000 + 2000;
     for (let index = 0; index < MAX_LEASE_FILES + 1; index++) {
