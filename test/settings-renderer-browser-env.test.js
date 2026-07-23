@@ -678,6 +678,7 @@ function loadThemeTabForTest({
 
   const commands = [];
   const updates = [];
+  let themeListState = Array.isArray(themes) ? themes : [];
   const document = {
     body,
     createElement: (tagName) => new FakeElement(tagName),
@@ -690,8 +691,15 @@ function loadThemeTabForTest({
   const api = {
     command: (name, payload) => {
       commands.push({ name, payload });
+      if (name === "setThemeSelection" && payload && typeof payload.themeId === "string") {
+        themeListState = themeListState.map((theme) => ({
+          ...theme,
+          active: theme.id === payload.themeId,
+        }));
+      }
       return Promise.resolve({ status: "ok" });
     },
+    listThemes: () => Promise.resolve(themeListState),
     update: (key, value) => {
       updates.push({ key, value });
       return Promise.resolve({ status: "ok" });
@@ -742,7 +750,7 @@ function loadThemeTabForTest({
   const core = context.ClawdSettingsCore;
   core.state.snapshot = { lang: "en", petTint: {}, ...(snapshot || {}) };
   core.state.activeTab = "theme";
-  core.runtime.themeList = Array.isArray(themes) ? themes : [];
+  core.runtime.themeList = themeListState;
   core.runtime.petTintOptions = Array.isArray(petTintOptions) ? petTintOptions : [];
   context.ClawdSettingsTabTheme.init(core);
   const renderContent = () => {
@@ -4469,7 +4477,7 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(strings.en.themeRefreshThemes, "Refresh themes");
     assert.strictEqual(strings.en.themeCapabilityFineMotion, "Fine motion");
     assert.strictEqual(strings.en.themeCustomize, "Customize");
-    assert.strictEqual(strings.zh.themeCustomize, "定制");
+    assert.strictEqual(strings.zh.themeCustomize, "装扮");
     assert.strictEqual(strings.zh.themeImportPetZip, "导入 Codex Pet 包（.zip）");
     assert.strictEqual(strings.zh.themeCapabilityFineMotion, "精细动效");
     assert.strictEqual(strings.zh.themeActionGroupCodexPets, "Codex Pets");
@@ -4534,7 +4542,7 @@ describe("settings renderer browser environment", () => {
     assert.deepStrictEqual(commands, []);
   });
 
-  it("offers customization only on the active pet with an explicit capability", () => {
+  it("keeps customization visible on every capable pet while omitting Calico", () => {
     const supported = loadThemeTabForTest({
       themes: [
         {
@@ -4561,8 +4569,13 @@ describe("settings renderer browser environment", () => {
       ],
     });
     const buttons = supported.content.querySelectorAll(".theme-customize-btn");
-    assert.strictEqual(buttons.length, 1);
-    assert.ok(collectText(findAncestorByClass(buttons[0], "theme-card")).includes("Clawd"));
+    assert.strictEqual(buttons.length, 2);
+    assert.deepStrictEqual(
+      buttons.map((button) => collectText(findAncestorByClass(button, "theme-card")))
+        .map((text) => (text.includes("Cloudling") ? "Cloudling" : "Clawd"))
+        .sort(),
+      ["Clawd", "Cloudling"]
+    );
 
     const calicoActive = loadThemeTabForTest({
       themes: [
@@ -4577,6 +4590,46 @@ describe("settings renderer browser environment", () => {
     });
     assert.strictEqual(calicoActive.content.querySelectorAll(".theme-customize-btn").length, 0);
     assert.strictEqual(calicoActive.content.querySelector(".theme-detail-hero"), null);
+  });
+
+  it("selects an inactive capable pet and opens its customization in one click", async () => {
+    const harness = loadThemeTabForTest({
+      themes: [
+        {
+          id: "clawd",
+          name: "Clawd",
+          builtin: true,
+          active: true,
+          capabilities: { petTint: true },
+        },
+        {
+          id: "cloudling",
+          name: "Cloudling",
+          builtin: true,
+          active: false,
+          capabilities: { petTint: true },
+        },
+      ],
+    });
+    const cloudlingButton = harness.content.querySelectorAll(".theme-customize-btn")
+      .find((button) => collectText(findAncestorByClass(button, "theme-card")).includes("Cloudling"));
+    assert.ok(cloudlingButton);
+
+    cloudlingButton.dispatchEvent({ type: "click" });
+    assert.deepStrictEqual(
+      JSON.parse(JSON.stringify(harness.commands)),
+      [{
+        name: "setThemeSelection",
+        payload: { themeId: "cloudling" },
+      }]
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.ok(harness.content.querySelector(".theme-detail-hero"));
+    assert.ok(collectText(harness.content.querySelector(".theme-detail-heading")).includes("Cloudling"));
+    assert.strictEqual(harness.content.querySelector(".theme-grid"), null);
   });
 
   it("opens the active pet detail and saves color independently for that theme", async () => {

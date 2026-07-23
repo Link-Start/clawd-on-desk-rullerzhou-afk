@@ -9,6 +9,8 @@
   let ops = null;
   let readers = null;
   let customizingThemeId = null;
+  let customizationSelectionPendingThemeId = null;
+  let customizationSelectionSeq = 0;
 
   function t(key) {
     return helpers.t(key);
@@ -181,9 +183,43 @@
   }
 
   function openThemeCustomization(theme) {
-    if (!theme || !theme.active || !supportsThemeCustomization(theme)) return;
-    customizingThemeId = theme.id;
+    if (!theme || !supportsThemeCustomization(theme)) return;
+    if (theme.active) {
+      customizingThemeId = theme.id;
+      ops.requestRender({ content: true });
+      return;
+    }
+    if (customizationSelectionPendingThemeId) return;
+
+    const requestSeq = ++customizationSelectionSeq;
+    customizationSelectionPendingThemeId = theme.id;
     ops.requestRender({ content: true });
+    Promise.resolve(window.settingsAPI.command("setThemeSelection", { themeId: theme.id }))
+      .then((result) => {
+        if (requestSeq !== customizationSelectionSeq) return;
+        if (!result || result.status !== "ok") {
+          const message = (result && result.message) || "unknown error";
+          ops.showToast(t("toastSaveFailed") + message, { error: true });
+          return;
+        }
+        return ops.fetchThemes().then(() => {
+          if (requestSeq !== customizationSelectionSeq) return;
+          const selectedTheme = Array.isArray(runtime.themeList)
+            ? runtime.themeList.find((entry) => entry && entry.id === theme.id && entry.active)
+            : null;
+          if (selectedTheme) customizingThemeId = theme.id;
+        });
+      })
+      .catch((err) => {
+        if (requestSeq !== customizationSelectionSeq) return;
+        const message = (err && err.message) || "unknown error";
+        ops.showToast(t("toastSaveFailed") + message, { error: true });
+      })
+      .finally(() => {
+        if (requestSeq !== customizationSelectionSeq) return;
+        customizationSelectionPendingThemeId = null;
+        if (state.activeTab === "theme") ops.requestRender({ content: true });
+      });
   }
 
   function closeThemeCustomization() {
@@ -477,12 +513,14 @@
     indicator.textContent = theme.active ? t("themeActiveIndicator") : "";
     if (!theme.active) indicator.setAttribute("aria-hidden", "true");
     footer.appendChild(indicator);
-    if (theme.active && supportsThemeCustomization(theme)) {
+    if (supportsThemeCustomization(theme)) {
       const btn = document.createElement("button");
       btn.className = "theme-customize-btn";
       btn.type = "button";
       btn.textContent = `${t("themeCustomize")} \u203a`;
       btn.setAttribute("aria-label", `${t("themeCustomize")}: ${localizeField(theme.name) || theme.id}`);
+      btn.disabled = !!customizationSelectionPendingThemeId;
+      if (customizationSelectionPendingThemeId === theme.id) btn.classList.add("pending");
       btn.addEventListener("click", (ev) => {
         ev.stopPropagation();
         openThemeCustomization(theme);
@@ -742,7 +780,9 @@
     core.tabs.theme = {
       render,
       onExit() {
+        customizationSelectionSeq += 1;
         customizingThemeId = null;
+        customizationSelectionPendingThemeId = null;
       },
     };
   }
