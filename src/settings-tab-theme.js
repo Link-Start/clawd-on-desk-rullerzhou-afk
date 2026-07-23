@@ -8,12 +8,27 @@
   let helpers = null;
   let ops = null;
   let readers = null;
+  let customizingThemeId = null;
 
   function t(key) {
     return helpers.t(key);
   }
 
   function render(parent) {
+    const detailTheme = Array.isArray(runtime.themeList)
+      ? runtime.themeList.find((theme) => (
+        theme
+        && theme.id === customizingThemeId
+        && theme.active
+        && supportsThemeCustomization(theme)
+      ))
+      : null;
+    if (detailTheme) {
+      renderThemeDetail(parent, detailTheme);
+      return;
+    }
+    customizingThemeId = null;
+
     const h1 = document.createElement("h1");
     h1.textContent = t("themeTitle");
     parent.appendChild(h1);
@@ -160,6 +175,166 @@
     return badges;
   }
 
+  function supportsThemeCustomization(theme) {
+    const caps = theme && theme.capabilities;
+    return !!(caps && caps.petTint === true);
+  }
+
+  function openThemeCustomization(theme) {
+    if (!theme || !theme.active || !supportsThemeCustomization(theme)) return;
+    customizingThemeId = theme.id;
+    ops.requestRender({ content: true });
+  }
+
+  function closeThemeCustomization() {
+    customizingThemeId = null;
+    ops.requestRender({ content: true });
+  }
+
+  function renderThemeDetail(parent, theme) {
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "theme-detail-back";
+    back.textContent = `\u2039 ${t("themeBackToPets")}`;
+    back.addEventListener("click", closeThemeCustomization);
+    parent.appendChild(back);
+
+    const hero = document.createElement("div");
+    hero.className = "theme-detail-hero";
+    const preview = document.createElement("div");
+    preview.className = "theme-thumb theme-detail-preview";
+    if (theme.previewFileUrl || getCodexPetPreviewAtlasUrl(theme)) {
+      preview.appendChild(buildThemePreviewMedia(theme));
+    } else {
+      const glyph = document.createElement("span");
+      glyph.className = "theme-thumb-empty";
+      glyph.textContent = t("themeThumbMissing");
+      preview.appendChild(glyph);
+    }
+    hero.appendChild(preview);
+
+    const heading = document.createElement("div");
+    heading.className = "theme-detail-heading";
+    const h1 = document.createElement("h1");
+    h1.textContent = localizeField(theme.name) || theme.id;
+    heading.appendChild(h1);
+    const current = document.createElement("div");
+    current.className = "theme-detail-current";
+    current.textContent = t("themeActiveIndicator");
+    heading.appendChild(current);
+    hero.appendChild(heading);
+    parent.appendChild(hero);
+
+    const section = document.createElement("section");
+    section.className = "section theme-detail-section";
+    const title = document.createElement("h2");
+    title.textContent = t("themeAppearanceTitle");
+    section.appendChild(title);
+    section.appendChild(buildThemeTintRow(theme));
+    parent.appendChild(section);
+  }
+
+  function getTintOptions() {
+    return Array.isArray(runtime.petTintOptions)
+      ? runtime.petTintOptions.filter((entry) => (
+        entry
+        && typeof entry.id === "string"
+        && /^[a-z][a-z0-9-]{0,31}$/.test(entry.id)
+        && typeof entry.labelKey === "string"
+        && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(entry.labelKey)
+      ))
+      : [];
+  }
+
+  function getThemeTintId(themeId, options) {
+    const selections = state.snapshot && state.snapshot.petTint;
+    const value = typeof selections === "string"
+      ? selections
+      : (selections && typeof selections === "object" ? selections[themeId] : null);
+    return options.some((entry) => entry.id === value) ? value : "none";
+  }
+
+  function buildThemeTintRow(theme) {
+    const row = document.createElement("div");
+    row.className = "row theme-customization-row";
+
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("rowPetColor");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("themePetColorDesc");
+    text.appendChild(label);
+    text.appendChild(desc);
+
+    const control = document.createElement("div");
+    control.className = "row-control";
+    const select = document.createElement("select");
+    select.className = "pet-tint-select";
+    select.setAttribute("aria-label", t("rowPetColor"));
+    const options = getTintOptions();
+    for (const entry of options) {
+      const option = document.createElement("option");
+      option.value = entry.id;
+      option.textContent = t(entry.labelKey);
+      select.appendChild(option);
+    }
+    if (options.length === 0) {
+      const option = document.createElement("option");
+      option.value = "none";
+      option.textContent = t("tintNone");
+      select.appendChild(option);
+      select.disabled = true;
+    }
+
+    function syncFromSnapshot() {
+      select.value = getThemeTintId(theme.id, options);
+      select.classList.remove("pending");
+      select.disabled = options.length === 0;
+    }
+
+    select.addEventListener("change", () => {
+      if (select.disabled || select.classList.contains("pending")) return;
+      const next = select.value;
+      const committed = getThemeTintId(theme.id, options);
+      if (next === committed) return;
+      const current = state.snapshot && state.snapshot.petTint;
+      const nextMap = current && typeof current === "object" && !Array.isArray(current)
+        ? { ...current }
+        : {};
+      if (next === "none") delete nextMap[theme.id];
+      else nextMap[theme.id] = next;
+      select.classList.add("pending");
+      select.disabled = true;
+      Promise.resolve(window.settingsAPI.update("petTint", nextMap))
+        .then((result) => {
+          if (result && result.status === "ok") return;
+          const message = (result && result.message) || "unknown error";
+          ops.showToast(t("toastSaveFailed") + message, { error: true });
+          syncFromSnapshot();
+        })
+        .catch((err) => {
+          const message = (err && err.message) || "unknown error";
+          ops.showToast(t("toastSaveFailed") + message, { error: true });
+          syncFromSnapshot();
+        })
+        .finally(() => {
+          if (document.body.contains(select)) {
+            select.classList.remove("pending");
+            select.disabled = options.length === 0;
+          }
+        });
+    });
+
+    control.appendChild(select);
+    row.appendChild(text);
+    row.appendChild(control);
+    syncFromSnapshot();
+    return row;
+  }
+
   function buildThemeActions() {
     const row = document.createElement("div");
     row.className = "theme-actions";
@@ -302,6 +477,19 @@
     indicator.textContent = theme.active ? t("themeActiveIndicator") : "";
     if (!theme.active) indicator.setAttribute("aria-hidden", "true");
     footer.appendChild(indicator);
+    if (theme.active && supportsThemeCustomization(theme)) {
+      const btn = document.createElement("button");
+      btn.className = "theme-customize-btn";
+      btn.type = "button";
+      btn.textContent = `${t("themeCustomize")} \u203a`;
+      btn.setAttribute("aria-label", `${t("themeCustomize")}: ${localizeField(theme.name) || theme.id}`);
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        openThemeCustomization(theme);
+      });
+      btn.addEventListener("keydown", stopThemeCardButtonKeydown);
+      footer.appendChild(btn);
+    }
     if (canDelete) {
       const btn = document.createElement("button");
       btn.className = "theme-delete-btn";
@@ -553,6 +741,9 @@
     readers = core.readers;
     core.tabs.theme = {
       render,
+      onExit() {
+        customizingThemeId = null;
+      },
     };
   }
 

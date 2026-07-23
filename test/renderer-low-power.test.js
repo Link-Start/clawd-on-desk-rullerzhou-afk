@@ -898,7 +898,7 @@ describe("renderer pet tint", () => {
       'onPetTintChange: (cb) => ipcRenderer.on("pet-tint-change", (_, payload) => cb(payload))'
     ));
     assert.ok(main.includes(
-      'sendToRenderer("pet-tint-change", resolvePetTintPayload(petTint, getActiveTheme()));'
+      "const tintId = getPetTintIdForTheme(petTint, activeTheme && activeTheme._id);"
     ));
   });
 });

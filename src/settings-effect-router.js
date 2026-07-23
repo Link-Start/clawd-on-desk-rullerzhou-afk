@@ -1,6 +1,9 @@
 "use strict";
 
-const { resolvePetTintPayload } = require("./pet-customization-catalog");
+const {
+  getPetTintIdForTheme,
+  resolvePetTintPayload,
+} = require("./pet-customization-catalog");
 
 const MENU_AFFECTING_KEYS = new Set([
   "lang",
@@ -21,7 +24,6 @@ const MENU_AFFECTING_KEYS = new Set([
   "size",
   "sessionAliases",
   "disableMiniMode",
-  "petTint",
 ]);
 
 function requiredDependency(value, name) {
@@ -106,7 +108,9 @@ function createSettingsEffectRouter(options = {}) {
       sendToRenderer("low-power-idle-mode-change", changes.lowPowerIdleMode);
     }
     if ("petTint" in changes) {
-      sendToRenderer("pet-tint-change", resolvePetTintPayload(changes.petTint, getActiveTheme()));
+      const activeTheme = getActiveTheme();
+      const tintId = getPetTintIdForTheme(changes.petTint, activeTheme && activeTheme._id);
+      sendToRenderer("pet-tint-change", resolvePetTintPayload(tintId, activeTheme));
     }
     if ("keepAwakeWhileWorking" in changes) {
       safeCall(logWarn, "Clawd: reconcilePowerSaveBlocker failed:", reconcilePowerSaveBlocker);

@@ -58,7 +58,6 @@ function buildBaseCtx(overrides = {}) {
     bubbleFollowPet: false,
     hideBubbles: false,
     soundMuted: false,
-    petTint: "none",
     menuOpen: false,
     tray: null,
     contextMenuOwner: null,
@@ -200,62 +199,19 @@ describe("menu grouping invariants", () => {
   });
 });
 
-describe("pet color menu", () => {
-  function findTintMenu(template) {
-    return template.find((item) => item.label === "Pet Color");
-  }
-
-  function assertTintMenu(template, ctx) {
-    const tintMenu = findTintMenu(template);
-    assert.ok(tintMenu, "menu should expose Pet Color");
-    assert.deepStrictEqual(
-      tintMenu.submenu.map((item) => item.label),
-      ["Default", "🌙 Midnight", "🥇 Gold", "🌸 Vaporwave", "🍵 Matcha", "⬜ Monochrome"]
-    );
-    assert.ok(tintMenu.submenu.every((item) => item.type === "radio"));
-    assert.deepStrictEqual(
-      tintMenu.submenu.filter((item) => item.checked).map((item) => item.label),
-      ["🌸 Vaporwave"]
-    );
-    tintMenu.submenu.find((item) => item.label === "🥇 Gold").click();
-    assert.strictEqual(ctx.petTint, "gold");
-  }
-
-  it("uses the same canonical radio choices in tray and context menus", () => {
+describe("pet color menu placement", () => {
+  it("keeps pet colors out of both tray and context quick menus", () => {
     const initMenu = loadMenuWithElectron(fakeElectron());
     let trayTemplate = null;
     const ctx = buildBaseCtx({
-      petTint: "vaporwave",
       tray: { setContextMenu(menuObj) { trayTemplate = menuObj.template; } },
     });
     const menu = initMenu(ctx);
 
     menu.buildTrayMenu();
-    assertTintMenu(trayTemplate, ctx);
-
-    ctx.petTint = "vaporwave";
     menu.buildContextMenu();
-    assertTintMenu(ctx.contextMenu.template, ctx);
-  });
-
-  it("disables pet color controls when the active theme opts out", () => {
-    const initMenu = loadMenuWithElectron(fakeElectron());
-    let trayTemplate = null;
-    const ctx = buildBaseCtx({
-      petTint: "matcha",
-      getActiveThemeCapabilities: () => ({ miniMode: true, petTint: false }),
-      tray: { setContextMenu(menuObj) { trayTemplate = menuObj.template; } },
-    });
-    const menu = initMenu(ctx);
-
-    menu.buildTrayMenu();
-    const tintMenu = findTintMenu(trayTemplate);
-    assert.ok(tintMenu);
-    assert.strictEqual(tintMenu.enabled, false);
-    assert.deepStrictEqual(
-      tintMenu.submenu.filter((item) => item.checked).map((item) => item.label),
-      ["🍵 Matcha"]
-    );
+    assert.ok(!trayTemplate.some((item) => item.label === "Pet Color"));
+    assert.ok(!ctx.contextMenu.template.some((item) => item.label === "Pet Color"));
   });
 });
 

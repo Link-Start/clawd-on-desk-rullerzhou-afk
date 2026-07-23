@@ -8,6 +8,7 @@ const {
   PET_TINT_IDS,
   isPetTintId,
   getPetTint,
+  getPetTintIdForTheme,
   isPetTintSupportedForTheme,
   resolvePetTintPayload,
   listPetTintOptions,
@@ -40,6 +41,20 @@ describe("pet customization catalog", () => {
     assert.strictEqual(getPetTint("custom").id, "none");
     assert.deepStrictEqual(resolvePetTintPayload("custom"), { id: "none", filter: "" });
     assert.deepStrictEqual(resolvePetTintPayload(null), { id: "none", filter: "" });
+  });
+
+  it("resolves independent per-theme choices and accepts the short-lived legacy scalar", () => {
+    const selections = {
+      clawd: "matcha",
+      cloudling: "vaporwave",
+      calico: "custom",
+    };
+    assert.strictEqual(getPetTintIdForTheme(selections, "clawd"), "matcha");
+    assert.strictEqual(getPetTintIdForTheme(selections, "cloudling"), "vaporwave");
+    assert.strictEqual(getPetTintIdForTheme(selections, "calico"), "none");
+    assert.strictEqual(getPetTintIdForTheme(selections, "missing"), "none");
+    assert.strictEqual(getPetTintIdForTheme("gold", "clawd"), "gold");
+    assert.strictEqual(getPetTintIdForTheme(null, "clawd"), "none");
   });
 
   it("opts unsupported themes out without changing the persisted semantic choice", () => {

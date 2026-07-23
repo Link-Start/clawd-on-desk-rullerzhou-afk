@@ -54,6 +54,13 @@ function getPetTint(value) {
   return PET_TINT_BY_ID.get(value) || PET_TINT_BY_ID.get("none");
 }
 
+function getPetTintIdForTheme(selections, themeId) {
+  if (typeof selections === "string") return getPetTint(selections).id;
+  if (!selections || typeof selections !== "object" || Array.isArray(selections)) return "none";
+  if (typeof themeId !== "string" || !themeId) return "none";
+  return getPetTint(selections[themeId]).id;
+}
+
 function isPetTintSupportedForTheme(theme) {
   if (!theme) return true;
   return !!(theme._capabilities && theme._capabilities.petTint === true);
@@ -84,6 +91,7 @@ module.exports = {
   PET_TINT_IDS,
   isPetTintId,
   getPetTint,
+  getPetTintIdForTheme,
   isPetTintSupportedForTheme,
   resolvePetTintPayload,
   listPetTintOptions,

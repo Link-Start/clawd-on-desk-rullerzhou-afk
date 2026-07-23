@@ -7,7 +7,7 @@
 //   discordDefaultAppIdPresent          boolean — a default Discord App ID is
 //                                       hardcoded (maintainer-shipped)
 //   getSnapshot()                       Promise<snapshot>
-//   getPetTintData()                    Promise<{options, supportedThemeIds}>
+//   getPetTintOptions()                 Promise<Array<{id, labelKey}>>
 //   update(key, value)                  Promise<{ status, message? }>
 //   command(action, payload)            Promise<{ status, message? }>
 //   listAgents()                        Promise<Array<{id, name, ...}>>
@@ -93,7 +93,7 @@ contextBridge.exposeInMainWorld("settingsAPI", {
   // shipped), so the presence enable switch can be ready without a user-saved App ID.
   discordDefaultAppIdPresent,
   getSnapshot: () => ipcRenderer.invoke("settings:get-snapshot"),
-  getPetTintData: () => ipcRenderer.invoke("settings:get-pet-tint-data"),
+  getPetTintOptions: () => ipcRenderer.invoke("settings:get-pet-tint-options"),
   getShortcutFailures: () => ipcRenderer.invoke("settings:getShortcutFailures"),
   getAnimationOverridesData: () => ipcRenderer.invoke("settings:get-animation-overrides-data"),
   openThemeAssetsDir: () => ipcRenderer.invoke("settings:open-theme-assets-dir"),

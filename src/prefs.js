@@ -263,12 +263,14 @@ const SCHEMA = {
   },
   // Theme
   theme: { type: "string", default: "clawd" },
-  // Theme-agnostic color filter applied to pet media. "none" preserves the
-  // active theme's native colors and is intentionally the opt-in-safe default.
+  // Per-theme color filter choice, e.g. { clawd: "matcha", cloudling: "mono" }.
+  // Missing entries preserve the theme's native colors. The normalizer also
+  // accepts the short-lived pre-detail-view string shape and seeds supported
+  // built-ins with that value so Draft PR testers do not lose their choice.
   petTint: {
-    type: "string",
-    default: "none",
-    enum: PET_TINT_IDS,
+    type: "object",
+    defaultFactory: () => ({}),
+    normalize: normalizePetTint,
   },
   // Phase 2/3 placeholders — schema reserves the keys so future migrations don't need v2.
   agents: {
@@ -1066,6 +1068,21 @@ function normalizeThemeVariant(value, defaultsValue) {
   return out;
 }
 
+function normalizePetTint(value, defaultsValue) {
+  if (typeof value === "string") {
+    if (!PET_TINT_IDS.includes(value) || value === "none") return {};
+    return { clawd: value, cloudling: value };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return defaultsValue;
+  const out = {};
+  for (const [themeId, tintId] of Object.entries(value)) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(themeId)) continue;
+    if (!PET_TINT_IDS.includes(tintId)) continue;
+    if (tintId !== "none") out[themeId] = tintId;
+  }
+  return out;
+}
+
 function normalizeIdleVisual(value, defaultsValue) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return defaultsValue;
   const out = {};
@@ -1176,6 +1193,7 @@ module.exports = {
   save,
   mapLocaleToLang,
   normalizeThemeOverrides,
+  normalizePetTint,
   normalizeShortcuts,
   normalizeOptionalHttpUrl,
   normalizePathList,

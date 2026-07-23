@@ -4,7 +4,6 @@ const { app, BrowserWindow, screen, Menu, Tray, nativeImage, dialog } = require(
 const path = require("path");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { loadTrayNormalIcon } = require("./tray-flash-icon");
-const { PET_TINT_CATALOG } = require("./pet-customization-catalog");
 
 const isMac = process.platform === "darwin";
 const isWin = process.platform === "win32";
@@ -54,13 +53,6 @@ module.exports = function initMenu(ctx) {
       : null;
     if (caps && typeof caps.miniMode === "boolean") return caps.miniMode;
     return true;
-  }
-
-  function isPetTintSupported() {
-    const caps = typeof ctx.getActiveThemeCapabilities === "function"
-      ? ctx.getActiveThemeCapabilities()
-      : null;
-    return !!(caps && caps.petTint === true);
   }
 
   function buildMiniModeMenuItem() {
@@ -138,20 +130,6 @@ module.exports = function initMenu(ctx) {
     };
   }
 
-  function buildPetTintMenuItem() {
-    const current = ctx.petTint;
-    return {
-      label: t("petColor"),
-      enabled: isPetTintSupported(),
-      submenu: PET_TINT_CATALOG.map((entry) => ({
-        label: t(entry.labelKey),
-        type: "radio",
-        checked: current === entry.id,
-        click: () => { ctx.petTint = entry.id; },
-      })),
-    };
-  }
-
   // ── System tray ──
   function createTray() {
     if (ctx.tray) return;
@@ -215,10 +193,6 @@ module.exports = function initMenu(ctx) {
         checked: !ctx.soundMuted,
         click: (menuItem) => { ctx.soundMuted = !menuItem.checked; },
       },
-    ];
-
-    const appearanceGroup = [
-      buildPetTintMenuItem(),
     ];
 
     // Dashboard + the danger auto-approve toggle (danger last, as in the
@@ -291,7 +265,6 @@ module.exports = function initMenu(ctx) {
     const items = joinGroups([
       stateGroup,
       noiseGroup,
-      appearanceGroup,
       workGroup,
       systemGroup,
       appGroup,
@@ -444,10 +417,6 @@ module.exports = function initMenu(ctx) {
       },
     ];
 
-    const appearanceGroup = [
-      buildPetTintMenuItem(),
-    ];
-
     const workGroup = [
       {
         label: t("openDashboard"),
@@ -517,7 +486,6 @@ module.exports = function initMenu(ctx) {
 
     const template = joinGroups([
       stateGroup,
-      appearanceGroup,
       workGroup,
       displayGroup,
       appGroup,

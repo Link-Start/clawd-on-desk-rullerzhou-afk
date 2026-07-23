@@ -189,20 +189,7 @@ function registerSettingsIpc(options = {}) {
   }
 
   handle("settings:get-snapshot", () => settingsController.getSnapshot());
-  handle("settings:get-pet-tint-data", () => {
-    let supportedThemeIds = [];
-    try {
-      supportedThemeIds = themeLoader.listThemesWithMetadata()
-        .filter((theme) => theme && theme.capabilities && theme.capabilities.petTint === true)
-        .map((theme) => theme.id);
-    } catch (err) {
-      console.warn("Clawd: settings:get-pet-tint-data failed to list themes:", err && err.message);
-    }
-    return {
-      options: listPetTintOptions(),
-      supportedThemeIds,
-    };
-  });
+  handle("settings:get-pet-tint-options", () => listPetTintOptions());
   handle("settings:update", (_event, payload) => {
     if (!payload || typeof payload !== "object") {
       return { status: "error", message: "settings:update payload must be { key, value }" };

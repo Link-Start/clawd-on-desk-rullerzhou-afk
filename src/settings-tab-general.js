@@ -12,7 +12,6 @@
     "soundVolume",
     "lowPowerIdleMode",
     "keepAwakeWhileWorking",
-    "petTint",
     "sessionHudEnabled",
     "sessionHudShowStateLabels",
     "sessionHudShowElapsed",
@@ -98,7 +97,6 @@
     // they sink toward the bottom.
     parent.appendChild(helpers.buildSection(t("sectionAppearance"), [
       buildLanguageRow(),
-      buildPetTintRow(),
       buildSizeSliderRow(),
       buildTextScaleRow(),
     ]));
@@ -425,105 +423,6 @@
       };
     }
     syncDisplay(currentLang);
-    return row;
-  }
-
-  function buildPetTintRow() {
-    const row = document.createElement("div");
-    row.className = "row";
-
-    const text = document.createElement("div");
-    text.className = "row-text";
-    const label = document.createElement("span");
-    label.className = "row-label";
-    label.textContent = t("rowPetColor");
-    const desc = document.createElement("span");
-    desc.className = "row-desc";
-    text.appendChild(label);
-    text.appendChild(desc);
-
-    const control = document.createElement("div");
-    control.className = "row-control";
-    const select = document.createElement("select");
-    select.className = "pet-tint-select";
-    select.setAttribute("aria-label", t("rowPetColor"));
-
-    const options = Array.isArray(runtime.petTintOptions)
-      ? runtime.petTintOptions.filter((entry) => (
-        entry
-        && typeof entry.id === "string"
-        && /^[a-z][a-z0-9-]{0,31}$/.test(entry.id)
-        && typeof entry.labelKey === "string"
-        && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(entry.labelKey)
-      ))
-      : [];
-    for (const entry of options) {
-      const option = document.createElement("option");
-      option.value = entry.id;
-      option.textContent = t(entry.labelKey);
-      select.appendChild(option);
-    }
-    if (options.length === 0) {
-      const option = document.createElement("option");
-      option.value = "none";
-      option.textContent = t("tintNone");
-      select.appendChild(option);
-      select.disabled = true;
-    }
-
-    function isSupportedForCurrentTheme() {
-      const themeId = state.snapshot && state.snapshot.theme;
-      return typeof themeId === "string"
-        && Array.isArray(runtime.petTintSupportedThemeIds)
-        && runtime.petTintSupportedThemeIds.includes(themeId);
-    }
-
-    function syncFromSnapshot() {
-      const value = state.snapshot && state.snapshot.petTint;
-      select.value = options.some((entry) => entry.id === value) ? value : "none";
-      select.classList.remove("pending");
-      const supported = isSupportedForCurrentTheme();
-      desc.textContent = t(supported ? "rowPetColorDesc" : "rowPetColorUnsupported");
-      select.disabled = options.length === 0 || !supported;
-    }
-
-    select.addEventListener("change", () => {
-      if (select.disabled || select.classList.contains("pending")) return;
-      const next = select.value;
-      const committed = (state.snapshot && state.snapshot.petTint) || "none";
-      if (next === committed) return;
-      select.classList.add("pending");
-      select.disabled = true;
-      Promise.resolve(window.settingsAPI.update("petTint", next))
-        .then((result) => {
-          if (result && result.status === "ok") return;
-          const message = (result && result.message) || "unknown error";
-          ops.showToast(t("toastSaveFailed") + message, { error: true });
-          syncFromSnapshot();
-        })
-        .catch((err) => {
-          const message = (err && err.message) || "unknown error";
-          ops.showToast(t("toastSaveFailed") + message, { error: true });
-          syncFromSnapshot();
-        })
-        .finally(() => {
-          if (state.mountedControls.petTint && state.mountedControls.petTint.select === select) {
-            select.classList.remove("pending");
-            select.disabled = options.length === 0 || !isSupportedForCurrentTheme();
-          }
-        });
-    });
-
-    control.appendChild(select);
-    row.appendChild(text);
-    row.appendChild(control);
-    state.mountedControls.petTint = {
-      row,
-      select,
-      syncFromSnapshot,
-      dispose: () => {},
-    };
-    syncFromSnapshot();
     return row;
   }
 
@@ -1790,10 +1689,6 @@
       const tc = state.mountedControls.textScale;
       if (!tc || !document.body.contains(tc.row)) return false;
     }
-    if (keys.includes("petTint")) {
-      const tint = state.mountedControls.petTint;
-      if (!tint || !document.body.contains(tint.row)) return false;
-    }
     if (keys.includes("soundVolume") || keys.includes("soundMuted")) {
       const vc = state.mountedControls.soundVolume;
       if (!vc || !document.body.contains(vc.row)) return false;
@@ -1824,7 +1719,7 @@
     }
     for (const key of keys) {
       if (key === "size" || key === "soundVolume" || key === "textScale"
-        || key === "textScaleByDisplay" || key === "petTint") continue;
+        || key === "textScaleByDisplay") continue;
       if (BUBBLE_POLICY_KEYS.has(key)) {
         const meta = state.mountedControls.bubblePolicyControls.get(key);
         if (!meta || !document.body.contains(meta.row)) return false;
@@ -1843,10 +1738,6 @@
       }
       if (key === "soundVolume") {
         state.mountedControls.soundVolume.syncValueFromSnapshot();
-        continue;
-      }
-      if (key === "petTint") {
-        state.mountedControls.petTint.syncFromSnapshot();
         continue;
       }
       if (BUBBLE_POLICY_KEYS.has(key)) {

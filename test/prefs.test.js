@@ -46,7 +46,7 @@ describe("prefs.getDefaults", () => {
     const d = prefs.getDefaults();
     assert.strictEqual(d.manageClaudeHooksAutomatically, true);
     assert.strictEqual(d.autoStartWithClaude, false);
-    assert.strictEqual(d.petTint, "none");
+    assert.deepStrictEqual(d.petTint, {});
     assert.strictEqual(d.lowPowerIdleMode, false);
     assert.strictEqual(d.allowEdgePinning, false);
     assert.strictEqual(d.disableMiniMode, false);
@@ -209,7 +209,7 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.lang, d.lang);
     assert.strictEqual(v.soundMuted, false);
     assert.strictEqual(v.soundVolume, 1);
-    assert.strictEqual(v.petTint, "none");
+    assert.deepStrictEqual(v.petTint, {});
     assert.strictEqual(v.lowPowerIdleMode, false);
     assert.strictEqual(v.x, 0);
     assert.strictEqual(v.bubbleFollowPet, true);
@@ -346,7 +346,7 @@ describe("prefs.validate", () => {
       size: "P:15",
       miniEdge: "left",
       theme: "calico",
-      petTint: "gold",
+      petTint: { clawd: "gold", cloudling: "matcha" },
     });
     assert.strictEqual(v.lang, "ko");
     assert.strictEqual(v.soundMuted, true);
@@ -369,7 +369,7 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.size, "P:15");
     assert.strictEqual(v.miniEdge, "left");
     assert.strictEqual(v.theme, "calico");
-    assert.strictEqual(v.petTint, "gold");
+    assert.deepStrictEqual(v.petTint, { clawd: "gold", cloudling: "matcha" });
   });
 
   it("accepts soundVolume 0 (silent playback is valid)", () => {
@@ -1357,13 +1357,30 @@ describe("prefs.save", () => {
     assert.strictEqual(snapshot.version, prefs.CURRENT_VERSION);
   });
 
-  it("round-trips a valid pet tint and normalizes an unknown tint before writing", () => {
+  it("round-trips per-theme pet tints and drops invalid entries before writing", () => {
     const p = makeTempPath();
-    prefs.save(p, { ...prefs.getDefaults(), petTint: "vaporwave" });
-    assert.strictEqual(prefs.load(p).snapshot.petTint, "vaporwave");
+    prefs.save(p, {
+      ...prefs.getDefaults(),
+      petTint: { clawd: "vaporwave", cloudling: "matcha" },
+    });
+    assert.deepStrictEqual(
+      prefs.load(p).snapshot.petTint,
+      { clawd: "vaporwave", cloudling: "matcha" }
+    );
 
-    prefs.save(p, { ...prefs.getDefaults(), petTint: "custom" });
-    assert.strictEqual(JSON.parse(fs.readFileSync(p, "utf8")).petTint, "none");
+    prefs.save(p, {
+      ...prefs.getDefaults(),
+      petTint: { clawd: "custom", "../unsafe": "gold", calico: "none" },
+    });
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(p, "utf8")).petTint, {});
+  });
+
+  it("migrates the short-lived global pet tint to supported built-in themes", () => {
+    assert.deepStrictEqual(
+      prefs.validate({ petTint: "gold" }).petTint,
+      { clawd: "gold", cloudling: "gold" }
+    );
+    assert.deepStrictEqual(prefs.validate({ petTint: "none" }).petTint, {});
   });
 
   it("validates before writing — bad fields fall back to defaults on disk", () => {

@@ -77,7 +77,6 @@
       soundSummary: null,
       soundVolume: null,
       textScale: null,
-      petTint: null,
     },
     shortcutRecordingActionId: null,
     shortcutRecordingError: "",
@@ -98,7 +97,6 @@
     codexPetRemovalPendingThemeId: null,
     animationOverridesData: null,
     petTintOptions: [],
-    petTintSupportedThemeIds: [],
     animationOverridesFetchSeq: 0,
     animationPosterRenderPending: false,
     animationPosterRenderFlags: null,
@@ -859,9 +857,6 @@
     if (state.mountedControls.textScale && typeof state.mountedControls.textScale.dispose === "function") {
       state.mountedControls.textScale.dispose();
     }
-    if (state.mountedControls.petTint && typeof state.mountedControls.petTint.dispose === "function") {
-      state.mountedControls.petTint.dispose();
-    }
     state.mountedControls.generalSwitches.clear();
     state.mountedControls.bubblePolicyControls.clear();
     state.mountedControls.sessionCleanupControls.clear();
@@ -879,7 +874,6 @@
     state.mountedControls.soundSummary = null;
     state.mountedControls.soundVolume = null;
     state.mountedControls.textScale = null;
-    state.mountedControls.petTint = null;
   }
 
   function syncMountedSizeControl({ fromBroadcast = false } = {}) {
@@ -1042,9 +1036,6 @@
     }
     return window.settingsAPI.listThemes().then((list) => {
       runtime.themeList = Array.isArray(list) ? list : [];
-      runtime.petTintSupportedThemeIds = runtime.themeList
-        .filter((theme) => theme && theme.capabilities && theme.capabilities.petTint === true)
-        .map((theme) => theme.id);
       return runtime.themeList;
     }).catch((err) => {
       console.warn("settings: listThemes failed", err);

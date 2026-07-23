@@ -81,7 +81,10 @@ const {
 } = require("./settings-size-preview-session");
 const { registerSettingsIpc } = require("./settings-ipc");
 const createSettingsEffectRouter = require("./settings-effect-router");
-const { resolvePetTintPayload } = require("./pet-customization-catalog");
+const {
+  getPetTintIdForTheme,
+  resolvePetTintPayload,
+} = require("./pet-customization-catalog");
 const { registerSessionIpc } = require("./session-ipc");
 const { createSessionFolderOpener } = require("./session-open-folder");
 const { registerPetInteractionIpc } = require("./pet-interaction-ipc");
@@ -1101,7 +1104,9 @@ function syncHitStateAfterLoad() {
 
 function syncRendererStateAfterLoad({ includeStartupRecovery = true } = {}) {
   syncSoundPreloads();
-  sendToRenderer("pet-tint-change", resolvePetTintPayload(petTint, getActiveTheme()));
+  const activeTheme = getActiveTheme();
+  const tintId = getPetTintIdForTheme(petTint, activeTheme && activeTheme._id);
+  sendToRenderer("pet-tint-change", resolvePetTintPayload(tintId, activeTheme));
   sendToRenderer("low-power-idle-mode-change", lowPowerIdleMode);
   if (_mini.getMiniMode()) {
     sendToRenderer("mini-mode-change", true, _mini.getMiniEdge());
@@ -3121,8 +3126,6 @@ const _menuCtx = {
   get soundMuted() { return soundMuted; },
   set soundMuted(v) { _settingsController.applyUpdate("soundMuted", v); },
   get soundVolume() { return soundVolume; },
-  get petTint() { return petTint; },
-  set petTint(v) { _settingsController.applyUpdate("petTint", v); },
   get pendingPermissions() { return pendingPermissions; },
   repositionBubbles: () => repositionFloatingBubbles(),
   get petHidden() { return petWindowRuntime.isPetHidden(); },

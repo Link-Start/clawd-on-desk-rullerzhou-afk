@@ -208,7 +208,7 @@ test("settings IPC registers owned channels and leaves animation override channe
   const { ipcMain, runtime } = createHarness();
 
   assert.ok(ipcMain.handlers.has("settings:get-snapshot"));
-  assert.ok(ipcMain.handlers.has("settings:get-pet-tint-data"));
+  assert.ok(ipcMain.handlers.has("settings:get-pet-tint-options"));
   assert.ok(ipcMain.handlers.has("settings:pick-sound-file"));
   assert.ok(ipcMain.handlers.has("settings:list-themes"));
   assert.ok(ipcMain.handlers.has("settings:detect-agent-installations"));
@@ -286,8 +286,8 @@ test("settings IPC delegates controller and size preview handlers", async () => 
 
   assert.deepStrictEqual(await ipcMain.invoke("settings:get-snapshot"), { lang: "en" });
   assert.deepStrictEqual(
-    await ipcMain.invoke("settings:get-pet-tint-data"),
-    { options: listPetTintOptions(), supportedThemeIds: [] }
+    await ipcMain.invoke("settings:get-pet-tint-options"),
+    listPetTintOptions()
   );
   assert.deepStrictEqual(
     await ipcMain.invoke("settings:update", null),
@@ -331,30 +331,6 @@ test("settings IPC delegates controller and size preview handlers", async () => 
     ["sizePreview", "P:35"],
     ["sizeEnd", "P:35"],
   ]);
-});
-
-test("pet tint data exposes only themes that explicitly opt in", async () => {
-  const { ipcMain, runtime } = createHarness({
-    themeLoader: {
-      getPreviewSoundUrl: () => null,
-      getSoundOverridesDir: () => null,
-      getSoundUrl: () => null,
-      listThemesWithMetadata: () => [
-        { id: "clawd", capabilities: { petTint: true } },
-        { id: "calico", capabilities: { petTint: false } },
-        { id: "legacy", capabilities: {} },
-        { id: "cloudling", capabilities: { petTint: true } },
-      ],
-      getThemeMetadata: (themeId) => ({ name: themeId }),
-      ensureUserThemesDir: () => path.join(os.tmpdir(), "clawd-user-themes"),
-    },
-  });
-
-  assert.deepStrictEqual(await ipcMain.invoke("settings:get-pet-tint-data"), {
-    options: listPetTintOptions(),
-    supportedThemeIds: ["clawd", "cloudling"],
-  });
-  runtime.dispose();
 });
 
 test("settings IPC delegates Codex Pet theme channels and decorates metadata", async () => {

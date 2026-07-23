@@ -67,13 +67,25 @@ describe("updateRegistry pure-data validators", () => {
     assert.strictEqual(updateRegistry.miniEdge("top", deps).status, "error");
   });
 
-  it("petTint accepts only ids from the canonical catalog", () => {
+  it("petTint accepts only safe per-theme catalog selections", () => {
     const deps = { snapshot: baseSnapshot };
-    for (const id of ["none", "midnight", "gold", "vaporwave", "matcha", "mono"]) {
-      assert.strictEqual(updateRegistry.petTint(id, deps).status, "ok", id);
-    }
-    assert.strictEqual(updateRegistry.petTint("custom", deps).status, "error");
-    assert.strictEqual(updateRegistry.petTint("url(file:///secret)", deps).status, "error");
+    assert.strictEqual(updateRegistry.petTint({}, deps).status, "ok");
+    assert.strictEqual(
+      updateRegistry.petTint({ clawd: "gold", cloudling: "matcha" }, deps).status,
+      "ok"
+    );
+    assert.strictEqual(updateRegistry.petTint({ clawd: "none" }, deps).status, "ok");
+    assert.strictEqual(updateRegistry.petTint({ clawd: "custom" }, deps).status, "error");
+    assert.strictEqual(
+      updateRegistry.petTint({ "../unsafe": "gold" }, deps).status,
+      "error"
+    );
+    assert.strictEqual(
+      updateRegistry.petTint({ clawd: "url(file:///secret)" }, deps).status,
+      "error"
+    );
+    assert.strictEqual(updateRegistry.petTint("gold", deps).status, "error");
+    assert.strictEqual(updateRegistry.petTint([], deps).status, "error");
     assert.strictEqual(updateRegistry.petTint(null, deps).status, "error");
   });
 
