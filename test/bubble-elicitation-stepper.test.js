@@ -82,7 +82,7 @@ describe("AskUserQuestion bubble stepper", () => {
     const body = functionBody("renderElicitationTerminalFallback");
     assert.match(body, /btn\.className = "btn-suggestion";/);
     assert.match(body, /btn\.textContent = bubbleText\(currentLang, "goToTerminal"\);/);
-    assert.match(body, /window\.bubbleAPI\.decide\("deny"\);/);
+    assert.match(body, /data && data\.isHermes \? "deny-and-focus" : "deny"/);
   });
 
   it("does not recalculate submit state twice when a non-Other radio hides the Other textarea", () => {
@@ -91,5 +91,33 @@ describe("AskUserQuestion bubble stepper", () => {
     assert.match(body, /const updateOtherTextarea = \(\{ updateSubmitState = true \} = \{\}\) => \{/);
     assert.match(body, /if \(updateSubmitState\) updateElicitationSubmitState\(\);/);
     assert.match(body, /r\.addEventListener\("change", \(\) => updateOtherTextarea\(\{ updateSubmitState: false \}\)\);/);
+  });
+});
+
+describe("Codex request_user_input preview", () => {
+  it("renders a read-only stepped preview and delegates answering to Codex", () => {
+    const cardBody = functionBody("createCodexUserInputQuestionCard");
+    const stepBody = functionBody("renderCodexUserInputStep");
+    assert.match(cardBody, /question\.options/);
+    assert.doesNotMatch(cardBody, /createElement\("input"\)|createElement\("textarea"\)/);
+    assert.match(stepBody, /activeQuestionIndex -= 1/);
+    assert.match(stepBody, /activeQuestionIndex \+= 1/);
+    assert.match(bubbleRenderer, /window\.bubbleAPI\.decide\("codex-user-input-focus"\)/);
+  });
+
+  it("marks every option as visually non-interactive, unlike the real elicitation picker", () => {
+    const cardBody = functionBody("createCodexUserInputQuestionCard");
+    const elicitationBody = functionBody("createElicitationQuestionCard");
+    // Both regular options and the synthesized "Other" row must carry the
+    // readonly modifier — .option-item alone still has a pointer cursor.
+    assert.match(cardBody, /item\.className = "option-item option-item-readonly"/);
+    assert.match(cardBody, /other\.className = "option-item option-item-other option-item-readonly"/);
+    assert.doesNotMatch(elicitationBody, /option-item-readonly/);
+  });
+
+  it("shows a remote handoff instead of claiming it can focus a local terminal", () => {
+    const body = functionBody("renderCodexUserInputStep");
+    assert.match(body, /if \(data\.isRemote\)/);
+    assert.match(body, /returnToRemoteCodex/);
   });
 });

@@ -3,6 +3,10 @@ const assert = require("node:assert");
 
 let initUpdater = require("../src/updater");
 
+it("allows ten minutes for git-source dependency installation", () => {
+  assert.strictEqual(initUpdater.__test.DEPENDENCY_INSTALL_TIMEOUT_MS, 10 * 60 * 1000);
+});
+
 function makeCtx(overrides = {}) {
   return {
     doNotDisturb: false,

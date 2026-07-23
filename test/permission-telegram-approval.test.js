@@ -337,7 +337,7 @@ describe("permission telegram remote approval", () => {
       makePermEntry({ isElicitation: true }),
       makePermEntry({ isCodexNotify: true }),
       makePermEntry({ isKimiNotify: true }),
-      makePermEntry({ isOpencode: true }),
+      makePermEntry({ agentId: "opencode" }),
       makePermEntry({ isAntigravity: true, agentId: "antigravity-cli" }),
       makePermEntry({ toolName: "ExitPlanMode" }),
       makePermEntry({ toolName: "AskUserQuestion" }),

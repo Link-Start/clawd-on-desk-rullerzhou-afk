@@ -9,7 +9,9 @@ function buildSettingsAgentOrderExports() {
     "qwen-code",
     "codewhale",
     "opencode",
+    "mimocode",
     "codebuddy",
+    "workbuddy",
     "qoder",
     "qoderwork",
   ];
@@ -47,6 +49,7 @@ function buildSettingsAgentOrderExports() {
     if (eventSource === "log-poll") return "eventSourceLogPoll";
     if (eventSource === "plugin-event") return "eventSourcePlugin";
     if (eventSource === "extension") return "eventSourceExtension";
+    if (eventSource === "custom-http") return "eventSourceCustomHttp";
     return "eventSourceHook";
   }
 

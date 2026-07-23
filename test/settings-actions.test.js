@@ -279,25 +279,6 @@ describe("updateRegistry pure-data validators", () => {
     }, deps).status, "error");
   });
 
-  it("hardwareBuddy accepts only the normalized product settings shape", () => {
-    assert.strictEqual(updateRegistry.hardwareBuddy({
-      enabled: true,
-      backend: "bleak",
-      address: "00:4B:12:A1:9E:A6",
-      namePrefix: "Claude",
-      permissionsEnabled: false,
-      quickCommandsEnabled: true,
-    }).status, "ok");
-    assert.strictEqual(updateRegistry.hardwareBuddy({ enabled: true }).status, "error");
-    assert.strictEqual(updateRegistry.hardwareBuddy({
-      enabled: true,
-      backend: "serial",
-      address: "",
-      namePrefix: "Claude",
-      permissionsEnabled: false,
-      quickCommandsEnabled: false,
-    }).status, "error");
-  });
 
   it("sessionAliases requires a plain object of valid alias entries", () => {
     const deps = { snapshot: baseSnapshot };
@@ -327,27 +308,29 @@ describe("updateRegistry pure-data validators", () => {
 });
 
 describe("object-form effects (autoStartWithClaude / manageClaudeHooksAutomatically / openAtLogin)", () => {
-  it("autoStartWithClaude effect calls installAutoStart on true", () => {
+  it("autoStartWithClaude effect calls installAutoStart on true", async () => {
+    // installAutoStart/uninstallAutoStart go through the server-owned Claude
+    // hook operation queue (#657) and now return a Promise.
     let installCalls = 0;
     let uninstallCalls = 0;
     const deps = {
       installAutoStart: () => installCalls++,
       uninstallAutoStart: () => uninstallCalls++,
     };
-    const r = updateRegistry.autoStartWithClaude.effect(true, deps);
+    const r = await updateRegistry.autoStartWithClaude.effect(true, deps);
     assert.strictEqual(r.status, "ok");
     assert.strictEqual(installCalls, 1);
     assert.strictEqual(uninstallCalls, 0);
   });
 
-  it("autoStartWithClaude effect calls uninstallAutoStart on false", () => {
+  it("autoStartWithClaude effect calls uninstallAutoStart on false", async () => {
     let installCalls = 0;
     let uninstallCalls = 0;
     const deps = {
       installAutoStart: () => installCalls++,
       uninstallAutoStart: () => uninstallCalls++,
     };
-    const r = updateRegistry.autoStartWithClaude.effect(false, deps);
+    const r = await updateRegistry.autoStartWithClaude.effect(false, deps);
     assert.strictEqual(r.status, "ok");
     assert.strictEqual(installCalls, 0);
     assert.strictEqual(uninstallCalls, 1);
@@ -540,31 +523,6 @@ describe("telegram approval commands", () => {
     assert.deepStrictEqual(empty, { status: "ok", configured: false, masked: "" });
 
     const missing = await commandRegistry["telegramApproval.tokenInfo"](null, {});
-    assert.equal(missing.status, "error");
-  });
-
-  it("telegramApproval.deleteTokenFile proxies the guarded main-process helper", async () => {
-    const calls = [];
-    const result = await commandRegistry["telegramApproval.deleteTokenFile"](null, {
-      deleteTelegramApprovalTokenFile: async () => {
-        calls.push(true);
-        return { status: "ok", deleted: true };
-      },
-    });
-    assert.deepStrictEqual(result, { status: "ok", deleted: true });
-    assert.deepStrictEqual(calls, [true]);
-
-    const guarded = await commandRegistry["telegramApproval.deleteTokenFile"](null, {
-      deleteTelegramApprovalTokenFile: async () => ({
-        status: "error",
-        code: "TOKEN_FILE_IN_USE",
-        message: "Native Telegram currently uses the shared token file.",
-      }),
-    });
-    assert.strictEqual(guarded.status, "error");
-    assert.strictEqual(guarded.code, "TOKEN_FILE_IN_USE");
-
-    const missing = await commandRegistry["telegramApproval.deleteTokenFile"](null, {});
     assert.equal(missing.status, "error");
   });
 
@@ -1621,6 +1579,19 @@ describe("removeTheme command", () => {
     assert.deepStrictEqual(r.commit.themeVariant, {});
   });
 
+  // #509: removeTheme also strips the idleVisual entry
+  it("strips idleVisual entry on success when one exists", async () => {
+    const snapshotWithIdleVisual = {
+      ...baseSnapshot,
+      idleVisual: { cat: "cat-idle-nap.svg", clawd: "clawd-idle-reading.svg" },
+    };
+    const { deps } = makeDeps({ snapshot: snapshotWithIdleVisual });
+    const r = await commandRegistry.removeTheme("cat", deps);
+    assert.strictEqual(r.status, "ok");
+    assert.ok(r.commit, "commit field expected");
+    assert.deepStrictEqual(r.commit.idleVisual, { clawd: "clawd-idle-reading.svg" });
+  });
+
   it("surfaces removeThemeDir throws as error status", async () => {
     const { deps } = makeDeps({
       removeThemeDir: async () => { throw new Error("EBUSY"); },
@@ -1755,6 +1726,118 @@ describe("setThemeSelection command", () => {
     const r = commandRegistry.setThemeSelection({ themeId: "clawd" }, { snapshot: baseSnapshot });
     assert.strictEqual(r.status, "error");
     assert.match(r.message, /activateTheme/);
+  });
+});
+
+// #509: default idle visual picker command.
+describe("setIdleVisual command", () => {
+  const activeTheme = {
+    _id: "clawd",
+    states: { idle: ["clawd-idle-follow.svg"] },
+    idleAnimations: [
+      { file: "clawd-idle-look.svg", duration: 6500 },
+      { file: "clawd-idle-reading.svg", duration: 14000 },
+    ],
+  };
+
+  function makeDeps(overrides = {}) {
+    return {
+      snapshot: { ...prefs.getDefaults(), idleVisual: {} },
+      getActiveTheme: () => activeTheme,
+      ...overrides,
+    };
+  }
+
+  it("rejects missing themeId and malformed file", () => {
+    assert.strictEqual(commandRegistry.setIdleVisual({}, makeDeps()).status, "error");
+    assert.strictEqual(
+      commandRegistry.setIdleVisual({ themeId: "clawd", file: 42 }, makeDeps()).status,
+      "error"
+    );
+    assert.strictEqual(
+      commandRegistry.setIdleVisual({ themeId: "clawd", file: "" }, makeDeps()).status,
+      "error"
+    );
+  });
+
+  it("errors when getActiveTheme dep is missing", () => {
+    const r = commandRegistry.setIdleVisual(
+      { themeId: "clawd", file: "clawd-idle-look.svg" },
+      { snapshot: prefs.getDefaults() }
+    );
+    assert.strictEqual(r.status, "error");
+    assert.match(r.message, /getActiveTheme/);
+  });
+
+  it("rejects a themeId that is not the active theme", () => {
+    const r = commandRegistry.setIdleVisual({ themeId: "calico", file: "x.svg" }, makeDeps());
+    assert.strictEqual(r.status, "error");
+    assert.match(r.message, /not the active theme/);
+  });
+
+  it("rejects files that are not idle visuals of the theme", () => {
+    const r = commandRegistry.setIdleVisual(
+      { themeId: "clawd", file: "clawd-working-typing.svg" },
+      makeDeps()
+    );
+    assert.strictEqual(r.status, "error");
+    assert.match(r.message, /not an idle visual/);
+  });
+
+  it("commits the merged map for a valid pool file, preserving other themes", () => {
+    const deps = makeDeps({
+      snapshot: { ...prefs.getDefaults(), idleVisual: { calico: "calico-idle-stretch.svg" } },
+    });
+    const r = commandRegistry.setIdleVisual({ themeId: "clawd", file: "clawd-idle-reading.svg" }, deps);
+    assert.strictEqual(r.status, "ok");
+    assert.deepStrictEqual(r.commit.idleVisual, {
+      calico: "calico-idle-stretch.svg",
+      clawd: "clawd-idle-reading.svg",
+    });
+  });
+
+  it("null file deletes the entry; noop when already unset", () => {
+    const deps = makeDeps({
+      snapshot: { ...prefs.getDefaults(), idleVisual: { clawd: "clawd-idle-look.svg" } },
+    });
+    const r = commandRegistry.setIdleVisual({ themeId: "clawd", file: null }, deps);
+    assert.strictEqual(r.status, "ok");
+    assert.deepStrictEqual(r.commit.idleVisual, {});
+
+    const r2 = commandRegistry.setIdleVisual({ themeId: "clawd", file: null }, makeDeps());
+    assert.strictEqual(r2.status, "ok");
+    assert.strictEqual(r2.noop, true);
+    assert.strictEqual(r2.commit, undefined);
+  });
+
+  it("selecting the theme default stores nothing (absence = default)", () => {
+    const deps = makeDeps({
+      snapshot: { ...prefs.getDefaults(), idleVisual: { clawd: "clawd-idle-look.svg" } },
+    });
+    const r = commandRegistry.setIdleVisual({ themeId: "clawd", file: "clawd-idle-follow.svg" }, deps);
+    assert.strictEqual(r.status, "ok");
+    assert.deepStrictEqual(r.commit.idleVisual, {});
+
+    const r2 = commandRegistry.setIdleVisual(
+      { themeId: "clawd", file: "clawd-idle-follow.svg" },
+      makeDeps()
+    );
+    assert.strictEqual(r2.status, "ok");
+    assert.strictEqual(r2.noop, true);
+  });
+
+  it("noop when re-selecting the current choice", () => {
+    const deps = makeDeps({
+      snapshot: { ...prefs.getDefaults(), idleVisual: { clawd: "clawd-idle-look.svg" } },
+    });
+    const r = commandRegistry.setIdleVisual({ themeId: "clawd", file: "clawd-idle-look.svg" }, deps);
+    assert.strictEqual(r.status, "ok");
+    assert.strictEqual(r.noop, true);
+  });
+
+  it("updateRegistry accepts idleVisual plain objects only", () => {
+    assert.strictEqual(updateRegistry.idleVisual({ clawd: "x.svg" }).status, "ok");
+    assert.strictEqual(updateRegistry.idleVisual("nope").status, "error");
   });
 });
 

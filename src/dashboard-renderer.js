@@ -1,5 +1,7 @@
 "use strict";
 
+const { canOfferLocalFolder, focusUnavailableReasonKey } = globalThis.ClawdSessionFocusUnavailable;
+
 const AGENT_LABELS = {
   "claude-code": "Claude Code",
   codex: "Codex",
@@ -10,7 +12,9 @@ const AGENT_LABELS = {
   "kiro-cli": "Kiro",
   "kimi-cli": "Kimi",
   opencode: "opencode",
+  mimocode: "MiMo Code",
   codebuddy: "CodeBuddy",
+  workbuddy: "WorkBuddy",
   pi: "Pi",
   openclaw: "OpenClaw",
 };
@@ -18,6 +22,9 @@ const AGENT_LABELS = {
 let snapshot = { sessions: [], groups: [], orderedIds: [] };
 let i18nPayload = { lang: "en", translations: {} };
 let activeEdit = null;
+
+const SESSION_FOLDER_FEEDBACK_MS = 4000;
+const sessionFolderActionState = new Map();
 
 const titleEl = document.getElementById("title");
 const countEl = document.getElementById("count");
@@ -311,12 +318,12 @@ function badgeLabel(badge) {
   return t(key);
 }
 
-function agentLabel(agentId) {
-  return AGENT_LABELS[agentId] || agentId || t("dashboardUnknownAgent");
+function agentLabel(agentId, agentName) {
+  return AGENT_LABELS[agentId] || agentName || agentId || t("dashboardUnknownAgent");
 }
 
-function agentFallback(agentId) {
-  const label = agentLabel(agentId).trim();
+function agentFallback(agentId, agentName) {
+  const label = agentLabel(agentId, agentName).trim();
   return label ? label.slice(0, 2).toUpperCase() : "?";
 }
 
@@ -443,7 +450,7 @@ function appendMeta(main, session, now) {
   badge.appendChild(dot);
   badge.appendChild(document.createTextNode(badgeLabel(session.badge)));
 
-  meta.appendChild(document.createTextNode(agentLabel(session.agentId)));
+  meta.appendChild(document.createTextNode(agentLabel(session.agentId, session.agentName)));
   meta.appendChild(document.createTextNode(" · "));
   meta.appendChild(badge);
   meta.appendChild(document.createTextNode(` · ${formatElapsed(now - session.updatedAt)}`));
@@ -496,12 +503,12 @@ function createIcon(session) {
     img.alt = "";
     img.src = session.iconUrl;
     img.addEventListener("error", () => {
-      const fallback = createText("span", "agent-fallback", agentFallback(session.agentId));
+      const fallback = createText("span", "agent-fallback", agentFallback(session.agentId, session.agentName));
       img.replaceWith(fallback);
     }, { once: true });
     return img;
   }
-  return createText("span", "agent-fallback", agentFallback(session.agentId));
+  return createText("span", "agent-fallback", agentFallback(session.agentId, session.agentName));
 }
 
 function createHideButton(session) {
@@ -529,9 +536,53 @@ function createHideButton(session) {
   return button;
 }
 
+function focusUnavailableText(session) {
+  return t(focusUnavailableReasonKey(session));
+}
+
+function openFolderFailureText(result) {
+  if (result && result.status === "error" && result.message) {
+    return t("sessionOpenFolderFailed").replace("{reason}", result.message);
+  }
+  return t("sessionOpenFolderUnavailable");
+}
+
+function pruneSessionFolderActionState(sessions, now) {
+  const currentIds = new Set(sessions.map((session) => session && session.id).filter(Boolean));
+  for (const [sessionId, state] of sessionFolderActionState) {
+    if (!currentIds.has(sessionId)
+        || (!state.pending && (!state.feedbackText || state.feedbackUntil <= now))) {
+      sessionFolderActionState.delete(sessionId);
+    }
+  }
+}
+
+function beginSessionFolderAction(sessionId) {
+  const current = sessionFolderActionState.get(sessionId);
+  if (current && current.pending) return false;
+  sessionFolderActionState.set(sessionId, {
+    pending: true,
+    feedbackText: "",
+    feedbackUntil: 0,
+  });
+  return true;
+}
+
+function finishSessionFolderAction(sessionId, feedbackText = "") {
+  if (!feedbackText) {
+    sessionFolderActionState.delete(sessionId);
+    return;
+  }
+  sessionFolderActionState.set(sessionId, {
+    pending: false,
+    feedbackText,
+    feedbackUntil: Date.now() + SESSION_FOLDER_FEEDBACK_MS,
+  });
+}
+
 function createCard(session, now) {
   const card = document.createElement("article");
-  card.className = "card";
+  card.className = session.canFocus === true ? "card" : "card card-unfocusable";
 
   if (session.id) {
     const idTail = String(session.id).slice(-3);
@@ -559,6 +610,9 @@ function createCard(session, now) {
     ? t("dashboardOpenCodexSession")
     : t("dashboardJumpTerminal");
   button.disabled = session.canFocus !== true;
+  if (button.disabled) {
+    button.title = focusUnavailableText(session);
+  }
   button.addEventListener("click", async () => {
     window.dashboardAPI.focusSession(session.id);
     // Best-effort ack alongside focus. Most remote-Codex sessions have
@@ -571,6 +625,52 @@ function createCard(session, now) {
     }
   });
   actions.appendChild(button);
+
+  if (session.canFocus !== true) {
+    const reason = focusUnavailableText(session);
+    actions.appendChild(createText("span", "focus-unavailable-reason", reason));
+    const folderState = sessionFolderActionState.get(session.id) || null;
+    const feedback = createText(
+      "span",
+      "session-action-feedback",
+      folderState && folderState.feedbackUntil > now ? folderState.feedbackText : ""
+    );
+    feedback.setAttribute("aria-live", "polite");
+    actions.appendChild(feedback);
+
+    if (canOfferLocalFolder(session)) {
+      const openFolder = document.createElement("button");
+      openFolder.type = "button";
+      openFolder.className = "open-folder-button";
+      openFolder.textContent = t("dashboardOpenFolder");
+      openFolder.disabled = !!(folderState && folderState.pending);
+      openFolder.addEventListener("click", async () => {
+        if (!beginSessionFolderAction(session.id)) return;
+        openFolder.disabled = true;
+        feedback.textContent = "";
+        render();
+        try {
+          const result = await window.dashboardAPI.openSessionFolder(session.id);
+          if (!result || result.status !== "ok") {
+            const message = openFolderFailureText(result);
+            finishSessionFolderAction(session.id, message);
+            feedback.textContent = message;
+          } else {
+            finishSessionFolderAction(session.id);
+          }
+        } catch (err) {
+          const message = t("sessionOpenFolderFailed")
+            .replace("{reason}", err && err.message ? err.message : String(err));
+          finishSessionFolderAction(session.id, message);
+          feedback.textContent = message;
+          console.warn("open session folder threw:", err);
+        }
+        openFolder.disabled = false;
+        render();
+      });
+      actions.appendChild(openFolder);
+    }
+  }
 
   if (session.requiresCompletionAck === true) {
     actions.appendChild(createMarkReadButton(session));
@@ -626,6 +726,8 @@ function render(options = {}) {
   if (activeEdit && !options.force) return;
   const sessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
   const count = sessions.length;
+  const now = Date.now();
+  pruneSessionFolderActionState(sessions, now);
   titleEl.textContent = t("dashboardWindowTitle");
   countEl.textContent = t("dashboardCount").replace("{n}", count);
   document.title = t("dashboardWindowTitle");
@@ -636,7 +738,6 @@ function render(options = {}) {
     return;
   }
 
-  const now = Date.now();
   const byId = new Map(sessions.map((session) => [session.id, session]));
   const fragment = document.createDocumentFragment();
 

@@ -13,12 +13,14 @@ const kimiCli = require("./kimi-cli");
 const qwenCode = require("./qwen-code");
 const codewhale = require("./codewhale");
 const opencode = require("./opencode");
+const mimocode = require("./mimocode");
 const pi = require("./pi");
 const openclaw = require("./openclaw");
 const hermes = require("./hermes");
 const qoder = require("./qoder");
 const reasonix = require("./reasonix");
 const qoderwork = require("./qoderwork");
+const workbuddy = require("./workbuddy");
 
 const AGENTS = [
   claudeCode,
@@ -33,12 +35,14 @@ const AGENTS = [
   qwenCode,
   codewhale,
   opencode,
+  mimocode,
   pi,
   openclaw,
   hermes,
   qoder,
   reasonix,
   qoderwork,
+  workbuddy,
 ];
 const AGENT_MAP = new Map(AGENTS.map((a) => [a.id, a]));
 

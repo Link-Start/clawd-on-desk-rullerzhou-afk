@@ -8,6 +8,7 @@ const assert = require("node:assert");
 const path = require("path");
 
 const {
+  getAgentInstallArgs,
   getAgentInstallScriptName,
   resolveHooksDir,
 } = require("../src/wsl-deploy");
@@ -46,6 +47,19 @@ describe("wsl-deploy", () => {
       assert.strictEqual(getAgentInstallScriptName("hermes"), null);
       assert.strictEqual(getAgentInstallScriptName("opencode"), null);
       assert.strictEqual(getAgentInstallScriptName("openclaw"), null);
+    });
+
+    it("excludes workbuddy (no standalone Linux/WSL runtime)", () => {
+      // WorkBuddy ships only as a macOS/Windows Electron desktop app, so there
+      // is no in-WSL settings.json to deploy hooks into. See AGENT_INSTALL_SCRIPT.
+      assert.strictEqual(getAgentInstallScriptName("workbuddy"), null);
+    });
+  });
+
+  describe("getAgentInstallArgs", () => {
+    it("explicitly preserves CodeBuddy's existing permission target", () => {
+      assert.strictEqual(getAgentInstallArgs("codebuddy"), "--permission-url preserve");
+      assert.strictEqual(getAgentInstallArgs("codex"), "");
     });
   });
 

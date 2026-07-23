@@ -437,7 +437,7 @@ def _query_windows_process_snapshot() -> Dict[int, Dict[str, Any]]:
         "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | "
         "ConvertTo-Json -Compress"
     )
-    result = _run_process_command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], timeout=3.0)
+    result = _run_process_command(["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script], timeout=3.0)
     if not result or result.returncode != 0 or not result.stdout.strip():
         return {}
     try:
@@ -461,7 +461,7 @@ def _query_windows_process_info(pid: int, snapshot: Optional[Dict[int, Dict[str,
         f"$p=Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' -ErrorAction SilentlyContinue; "
         "if ($p) { $p | Select-Object ProcessId,Name,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress }"
     )
-    result = _run_process_command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], timeout=3.0)
+    result = _run_process_command(["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script], timeout=3.0)
     if result and result.returncode == 0 and result.stdout.strip():
         try:
             row = json.loads(result.stdout)
@@ -487,7 +487,7 @@ def _query_windows_process_info(pid: int, snapshot: Optional[Dict[int, Dict[str,
         "}"
     )
     for shell in ("pwsh.exe", "powershell.exe"):
-        result = _run_process_command([shell, "-NoProfile", "-NonInteractive", "-Command", get_process_script], timeout=2.5)
+        result = _run_process_command([shell, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", get_process_script], timeout=2.5)
         if not result or result.returncode != 0 or not result.stdout.strip():
             continue
         try:
@@ -1134,7 +1134,14 @@ def _handle_permission_request(tool_name: str, **kwargs: Any):
 
     if result is None:
         _handle_hook("pre_tool_call", **kwargs)
-        return None
+        # Permission tools are opt-in gates. A bodyless/no-server result is
+        # not user approval, and Hermes currently has no native approval UI
+        # to hand this request back to. Fail closed without claiming that the
+        # user denied it; they can retry once Clawd can collect a decision.
+        return {
+            "action": "block",
+            "message": "Clawd did not return a permission decision. Retry the tool after approving it in Clawd.",
+        }
 
     decision = result.get("decision", "")
     if decision == "allow":
@@ -1150,7 +1157,10 @@ def _handle_permission_request(tool_name: str, **kwargs: Any):
         return {"action": "block", "message": message}
 
     _handle_hook("pre_tool_call", **kwargs)
-    return None
+    return {
+        "action": "block",
+        "message": "Clawd returned an unrecognized permission decision. Retry the tool after approving it in Clawd.",
+    }
 
 
 def register(ctx) -> None:

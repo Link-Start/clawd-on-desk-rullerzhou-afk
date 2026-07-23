@@ -3,6 +3,7 @@
 const { app, BrowserWindow, screen, Menu, Tray, nativeImage, dialog } = require("electron");
 const path = require("path");
 const { keepOutOfTaskbar } = require("./taskbar");
+const { loadTrayNormalIcon } = require("./tray-flash-icon");
 
 const isMac = process.platform === "darwin";
 const isWin = process.platform === "win32";
@@ -132,13 +133,13 @@ module.exports = function initMenu(ctx) {
   // ── System tray ──
   function createTray() {
     if (ctx.tray) return;
-    let icon;
-    if (isMac) {
-      icon = nativeImage.createFromPath(path.join(__dirname, "../assets/tray-iconTemplate.png"));
-      icon.setTemplateImage(true);
-    } else {
-      icon = nativeImage.createFromPath(path.join(__dirname, "../assets/tray-icon.png")).resize({ width: 32, height: 32 });
-    }
+    // Shared with the completion flash so both frames keep the same size (#722).
+    const icon = loadTrayNormalIcon({
+      nativeImage,
+      platform: process.platform,
+      templatePath: path.join(__dirname, "../assets/tray-iconTemplate.png"),
+      iconPath: path.join(__dirname, "../assets/tray-icon.png"),
+    });
     ctx.tray = new Tray(icon);
     ctx.tray.setToolTip("Clawd Desktop Pet");
     buildTrayMenu();

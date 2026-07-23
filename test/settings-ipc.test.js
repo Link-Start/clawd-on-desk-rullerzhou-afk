@@ -188,11 +188,9 @@ function createHarness(overrides = {}) {
     getSoundMuted: overrides.getSoundMuted || (() => false),
     getSoundVolume: overrides.getSoundVolume || (() => 0.4),
     getAllAgents: overrides.getAllAgents || (() => []),
+    getHookServerPort: overrides.getHookServerPort,
+    getRecentHookEvents: overrides.getRecentHookEvents,
     detectAgentInstallations: overrides.detectAgentInstallations,
-    getHardwareBuddyStatus: overrides.getHardwareBuddyStatus || (() => null),
-    testHardwareBuddyApproval: overrides.testHardwareBuddyApproval,
-    getQuickCommandPresets: overrides.getQuickCommandPresets,
-    sendQuickCommand: overrides.sendQuickCommand,
     checkForUpdates: (manual) => calls.push(["checkForUpdates", manual]),
     showTutorial: overrides.showTutorial || (() => {
       calls.push(["showTutorial"]);
@@ -212,9 +210,6 @@ test("settings IPC registers owned channels and leaves animation override channe
   assert.ok(ipcMain.handlers.has("settings:pick-sound-file"));
   assert.ok(ipcMain.handlers.has("settings:list-themes"));
   assert.ok(ipcMain.handlers.has("settings:detect-agent-installations"));
-  assert.ok(ipcMain.handlers.has("settings:test-hardware-buddy-approval"));
-  assert.ok(ipcMain.handlers.has("settings:get-quick-command-presets"));
-  assert.ok(ipcMain.handlers.has("settings:send-quick-command"));
   assert.ok(ipcMain.handlers.has("settings:show-tutorial"));
   assert.ok(ipcMain.handlers.has("settings:open-user-themes-dir"));
   assert.ok(ipcMain.handlers.has("settings:import-user-theme-zip"));
@@ -308,20 +303,6 @@ test("settings IPC delegates controller and size preview handlers", async () => 
   assert.deepStrictEqual(await ipcMain.invoke("settings:command", { action: "resizePet", payload: "P:30" }), {
     status: "ok",
   });
-  assert.strictEqual(await ipcMain.invoke("settings:get-hardware-buddy-status"), null);
-  assert.deepStrictEqual(await ipcMain.invoke("settings:test-hardware-buddy-approval"), {
-    status: "error",
-    message: "Hardware Buddy test approval is unavailable",
-  });
-  assert.deepStrictEqual(await ipcMain.invoke("settings:get-quick-command-presets"), {
-    enabled: false,
-    presets: [],
-  });
-  assert.deepStrictEqual(await ipcMain.invoke("settings:send-quick-command", { id: "plan_first" }), {
-    status: "error",
-    code: "quick_commands_unavailable",
-    message: "Quick Commands are unavailable",
-  });
   assert.deepStrictEqual(await ipcMain.invoke("settings:begin-size-preview"), {
     status: "ok",
     phase: "begin",
@@ -344,53 +325,6 @@ test("settings IPC delegates controller and size preview handlers", async () => 
     ["sizePreview", "P:35"],
     ["sizeEnd", "P:35"],
   ]);
-});
-
-test("settings IPC delegates Hardware Buddy test approval helper", async () => {
-  const calls = [];
-  const { ipcMain } = createHarness({
-    testHardwareBuddyApproval: () => {
-      calls.push("test");
-      return Promise.resolve({ status: "ok", decision: "deny" });
-    },
-  });
-
-  assert.deepStrictEqual(
-    await ipcMain.invoke("settings:test-hardware-buddy-approval", { ignored: true }),
-    { status: "ok", decision: "deny" }
-  );
-  assert.deepStrictEqual(calls, ["test"]);
-});
-
-test("settings IPC delegates Quick Command helpers", async () => {
-  const calls = [];
-  const { ipcMain } = createHarness({
-    getQuickCommandPresets: () => ({
-      enabled: true,
-      presets: [{ id: "plan_first", label: "先列计划" }],
-    }),
-    sendQuickCommand: (payload) => {
-      calls.push(payload);
-      return { status: "ok", quickCommand: { id: payload.id } };
-    },
-  });
-
-  assert.deepStrictEqual(await ipcMain.invoke("settings:get-quick-command-presets"), {
-    enabled: true,
-    presets: [{ id: "plan_first", label: "先列计划" }],
-  });
-  assert.deepStrictEqual(
-    await ipcMain.invoke("settings:send-quick-command", {
-      id: "plan_first",
-      clientRequestId: "qc-1",
-      userText: "should be stripped",
-      source: "renderer",
-      duration: "next_turn",
-      target: { scope: "active_session", sessionId: "session-1" },
-    }),
-    { status: "ok", quickCommand: { id: "plan_first" } }
-  );
-  assert.deepStrictEqual(calls, [{ id: "plan_first", clientRequestId: "qc-1" }]);
 });
 
 test("settings IPC delegates Codex Pet theme channels and decorates metadata", async () => {
@@ -676,11 +610,55 @@ test("settings IPC serves agent/about/update/external and remove-theme dialog he
       getAllAgents: () => [
         { id: "codex", name: "Codex", eventSource: "hook", capabilities: { permission: true } },
       ],
+      getHookServerPort: () => 23335,
+      getRecentHookEvents: ({ agentId }) => [{
+        timestamp: 12345,
+        agentId,
+        eventType: "PreToolUse",
+        route: "state",
+        outcome: "accepted",
+      }],
+      settingsController: {
+        getSnapshot: () => ({
+          lang: "en",
+          customApplications: [{
+            id: "custom-nova-ai-0123456789ab",
+            name: "Nova AI",
+            sourcePath: "C:\\NovaAI",
+            executablePath: "C:\\NovaAI\\NovaAI.exe",
+            processName: "NovaAI.exe",
+            category: "code",
+          }],
+        }),
+        applyUpdate: () => ({ status: "ok" }),
+        applyCommand: async () => ({ status: "ok" }),
+      },
     });
 
     assert.strictEqual(await ipcMain.invoke("settings:get-preview-sound-url"), "file:///preview.mp3");
     assert.deepStrictEqual(await ipcMain.invoke("settings:list-agents"), [
       { id: "codex", name: "Codex", eventSource: "hook", capabilities: { permission: true } },
+      {
+        id: "custom-nova-ai-0123456789ab",
+        name: "Nova AI",
+        category: "code",
+        eventSource: "custom-http",
+        custom: true,
+        sourcePath: "C:\\NovaAI",
+        executablePath: "C:\\NovaAI\\NovaAI.exe",
+        processName: "NovaAI.exe",
+        stateEndpoint: "http://127.0.0.1:23335/state",
+        lastStateEvent: { timestamp: 12345, eventType: "PreToolUse" },
+        capabilities: {
+          httpHook: true,
+          permissionApproval: false,
+          interactiveBubble: false,
+          notificationHook: true,
+          sessionEnd: true,
+          subagent: false,
+          managedIntegration: false,
+        },
+      },
     ]);
     assert.deepStrictEqual(await ipcMain.invoke("settings:get-about-info"), {
       version: "1.2.3",
@@ -713,6 +691,34 @@ test("settings IPC serves agent/about/update/external and remove-theme dialog he
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("settings IPC picks executable files and installation folders for discovery", async () => {
+  const selections = ["C:\\Tools\\agent.exe", "C:\\Tools\\Agent"];
+  const optionsSeen = [];
+  const { ipcMain } = createHarness({
+    dialog: {
+      showOpenDialog: async (_parent, options) => {
+        optionsSeen.push(options);
+        return { canceled: false, filePaths: [selections[optionsSeen.length - 1]] };
+      },
+      showMessageBox: async () => ({ response: 1 }),
+    },
+  });
+
+  assert.deepStrictEqual(await ipcMain.invoke("settings:pick-agent-discovery-path", { kind: "file" }), {
+    status: "ok",
+    path: selections[0],
+  });
+  assert.deepStrictEqual(await ipcMain.invoke("settings:pick-agent-discovery-path", { kind: "directory" }), {
+    status: "ok",
+    path: selections[1],
+  });
+  assert.deepStrictEqual(optionsSeen.map((options) => options.properties), [["openFile"], ["openDirectory"]]);
+  assert.deepStrictEqual(await ipcMain.invoke("settings:pick-agent-discovery-path", { kind: "anything" }), {
+    status: "error",
+    message: "pickAgentDiscoveryPath.kind must be file or directory",
+  });
 });
 
 test("settings IPC exposes read-only agent installation detection", async () => {

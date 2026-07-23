@@ -15,7 +15,7 @@ const {
   shouldBypassCCSubagentBubble,
   shouldBypassCodexBubble,
   shouldBypassCopilotBubble,
-  shouldBypassOpencodeBubble,
+  shouldBypassFamilyBubble,
 } = require("../src/server-route-permission");
 
 function makeReq(body) {
@@ -57,7 +57,7 @@ function makeCtx(overrides = {}) {
     updateSession: [],
     showPermissionBubble: [],
     sendPermissionResponse: [],
-    replyOpencodePermission: [],
+    replyOpencodeFamilyPermission: [],
     resolved: [],
     maybeStartRemoteApproval: [],
     addPendingPermission: [],
@@ -80,7 +80,7 @@ function makeCtx(overrides = {}) {
       res.writeHead(200);
       res.end(behavior);
     },
-    replyOpencodePermission: (payload) => calls.replyOpencodePermission.push(payload),
+    replyOpencodeFamilyPermission: (payload) => calls.replyOpencodeFamilyPermission.push(payload),
     resolvePermissionEntry: (entry, behavior, message) => calls.resolved.push({ entry, behavior, message }),
     maybeStartRemoteApproval: (entry) => calls.maybeStartRemoteApproval.push(entry),
     addPendingPermission(entry) {
@@ -108,12 +108,14 @@ function callPermissionPost(body, overrides = {}) {
     const recorder = [];
     handlePermissionPost(makeReq(body), res, {
       ctx,
-      createRequestHookRecorder: (data, route) => {
-        recorder.push({ data, route });
+      createRequestHookRecorder: (identity, data, route) => {
+        recorder.push({ identity, data, route });
         return {
           accepted: () => recorder.push({ outcome: "accepted" }),
           droppedByDisabled: () => recorder.push({ outcome: "disabled" }),
           droppedByDnd: () => recorder.push({ outcome: "dnd" }),
+          droppedInvalidAgent: () => recorder.push({ outcome: "invalid-agent" }),
+          droppedUnsupported: () => recorder.push({ outcome: "unsupported" }),
         };
       },
       ...overrides.options,
@@ -137,9 +139,9 @@ describe("server-route-permission helpers", () => {
     assert.strictEqual(shouldBypassCodexBubble({
       isAgentPermissionsEnabled: (agentId) => agentId !== "codex",
     }), true);
-    assert.strictEqual(shouldBypassOpencodeBubble({
+    assert.strictEqual(shouldBypassFamilyBubble({
       isAgentPermissionsEnabled: (agentId) => agentId !== "opencode",
-    }), true);
+    }, "opencode"), true);
     assert.strictEqual(shouldBypassCopilotBubble({ hideBubbles: true }), true);
     assert.strictEqual(shouldBypassCopilotBubble({
       isAgentPermissionsEnabled: (agentId) => agentId !== "copilot-cli",
@@ -298,7 +300,7 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(res.body, "ok");
     assert.deepStrictEqual(res.recorder.map((entry) => entry.outcome).filter(Boolean), ["disabled"]);
     assert.deepStrictEqual(res.ctx.pendingPermissions, []);
-    assert.deepStrictEqual(res.ctx.calls.replyOpencodePermission, []);
+    assert.deepStrictEqual(res.ctx.calls.replyOpencodeFamilyPermission, []);
   });
 
   it("routes opencode permissions by hook_source when agent_id is missing", async () => {
@@ -317,7 +319,7 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(res.ctx.pendingPermissions.length, 1);
     const entry = res.ctx.pendingPermissions[0];
     assert.strictEqual(entry.agentId, "opencode");
-    assert.strictEqual(entry.isOpencode, true);
+    assert.strictEqual(entry.familyRequestId, "req-1");
     assert.deepStrictEqual(res.ctx.calls.updateSession, [[
       "opencode:s1",
       "notification",
@@ -348,7 +350,58 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.recorder.map((entry) => entry.outcome).filter(Boolean), ["accepted"]);
     assert.deepStrictEqual(res.ctx.pendingPermissions, []);
     assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
-    assert.deepStrictEqual(res.ctx.calls.replyOpencodePermission, []);
+    assert.deepStrictEqual(res.ctx.calls.replyOpencodeFamilyPermission, []);
+  });
+
+  it("silently drops opencode permissions during DND — no bubble, no bridge reply", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "opencode",
+      session_id: "opencode:dnd",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      request_id: "req-dnd",
+      bridge_url: "http://127.0.0.1:1234",
+      bridge_token: "token",
+    }), {
+      ctx: { doNotDisturb: true },
+    });
+
+    // Fire-and-forget: 200 ACK satisfies the plugin; skipping the bridge
+    // reply lets the TUI fall back to its own prompt.
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.body, "ok");
+    assert.deepStrictEqual(res.recorder.map((entry) => entry.outcome).filter(Boolean), ["dnd"]);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.ctx.calls.replyOpencodeFamilyPermission, []);
+  });
+
+  it("rescues a failed opencode bubble with an immediate bridge reject", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "opencode",
+      session_id: "opencode:boom",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      request_id: "req-boom",
+      bridge_url: "http://127.0.0.1:1234",
+      bridge_token: "token",
+    }), {
+      ctx: {
+        showPermissionBubble: () => { throw new Error("BrowserWindow boom"); },
+      },
+    });
+
+    assert.strictEqual(res.statusCode, 200);
+    // Ghost entry popped, TUI unblocked via reject — without this the plugin
+    // waits on the bridge until its own multi-minute timeout.
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.strictEqual(res.ctx.calls.replyOpencodeFamilyPermission.length, 1);
+    const reply = res.ctx.calls.replyOpencodeFamilyPermission[0];
+    assert.strictEqual(reply.agentId, "opencode");
+    assert.strictEqual(reply.reply, "reject");
+    assert.strictEqual(reply.requestId, "req-boom");
+    assert.strictEqual(reply.bridgeUrl, "http://127.0.0.1:1234");
+    assert.strictEqual(reply.bridgeToken, "token");
   });
 
   it("destroys the Claude/CodeBuddy connection during DND", async () => {
@@ -535,6 +588,35 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.recorder.map((item) => item.outcome).filter(Boolean), ["accepted"]);
   });
 
+  it("returns no-decision for a currently registered state-only custom AI", async () => {
+    const id = "custom-nova-ai-0123456789ab";
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: id,
+      session_id: "nova:sid",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      tool_use_id: "tool-custom-1",
+    }), { ctx: { getCustomAgentIds: () => [id] } });
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.ctx.pendingPermissions.length, 0);
+    assert.deepStrictEqual(res.recorder.map((item) => item.outcome).filter(Boolean), ["unsupported"]);
+  });
+
+  it("rejects stale custom ids without creating a Claude permission bubble", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "custom-stale-0123456789ab",
+      hook_source: "copilot-hook",
+      session_id: "stale:sid",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    }));
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.ctx.pendingPermissions.length, 0);
+    assert.strictEqual(res.ctx.calls.showPermissionBubble.length, 0);
+    assert.deepStrictEqual(res.recorder.map((item) => item.outcome).filter(Boolean), ["invalid-agent"]);
+  });
+
   it("starts remote approval only after a Claude bubble is shown", async () => {
     const order = [];
     const res = await callPermissionPost(JSON.stringify({
@@ -695,6 +777,30 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(entry.isElicitation, true);
     assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, [entry]);
     assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [entry]);
+  });
+
+  it("stamps elicitation session updates with the resolved agent id", async () => {
+    // The shared CC path also serves codebuddy (and future CC-compatible
+    // agents). The Elicitation session update must carry the resolved agent
+    // id, not a hardcoded claude-code, or the session gets relabeled.
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "codebuddy",
+      session_id: "cb-elicit",
+      tool_name: "AskUserQuestion",
+      tool_input: { questions: [{ question: "Continue?" }] },
+    }));
+
+    assert.strictEqual(res.statusCode, null);
+    assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+    const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.isElicitation, true);
+    assert.strictEqual(entry.agentId, "codebuddy");
+    assert.deepStrictEqual(res.ctx.calls.updateSession, [[
+      "cb-elicit",
+      "notification",
+      "Elicitation",
+      { agentId: "codebuddy" },
+    ]]);
   });
 
   it("keeps local Claude permission pending if remote approval startup throws", async () => {
@@ -1140,7 +1246,7 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [entry]);
   });
 
-  it("recovers via 204 when the Hermes bubble fails to construct", async () => {
+  it("returns 204 so the Hermes plugin blocks and asks the user to retry when the bubble fails", async () => {
     const res = await callPermissionPost(JSON.stringify({
       agent_id: "hermes",
       session_id: "hermes:s1",
@@ -1234,6 +1340,28 @@ describe("server-route-permission POST — CC subagent requests (#451)", () => {
     assert.strictEqual(entry.subagentId, null);
     assert.strictEqual(entry.subagentType, null);
   });
+
+  for (const [label, toolName, toolInput] of [
+    ["permission", "Bash", { command: "npm test" }],
+    ["elicitation", "AskUserQuestion", { questions: [{ question: "Continue?" }] }],
+  ]) {
+    it(`records a disconnected Claude ${label} as no-decision, not a user denial`, async () => {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: "claude-code",
+        session_id: "sid-disconnect",
+        tool_name: toolName,
+        tool_input: toolInput,
+      }));
+
+      assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+      const entry = res.ctx.pendingPermissions[0];
+      res.emit("close");
+      assert.strictEqual(res.ctx.calls.resolved.length, 1);
+      assert.strictEqual(res.ctx.calls.resolved[0].entry, entry);
+      assert.strictEqual(res.ctx.calls.resolved[0].behavior, "no-decision");
+      assert.strictEqual(res.ctx.calls.resolved[0].message, "Client disconnected");
+    });
+  }
 
   it("destroys the connection when the subagent sub-gate is off", async () => {
     const res = await callPermissionPost(subagentBody(), {

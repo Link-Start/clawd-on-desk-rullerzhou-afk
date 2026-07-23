@@ -72,6 +72,49 @@ describe("setTextScaleForDisplay end-to-end commit", () => {
   });
 });
 
+describe("custom application command commits", () => {
+  const application = {
+    id: "custom-nova-ai-0123456789ab",
+    name: "Nova AI",
+    sourcePath: "C:\\Tools\\Nova AI",
+    executablePath: "C:\\Tools\\Nova AI\\Nova AI.exe",
+    processName: "Nova AI.exe",
+    category: "code",
+  };
+
+  it("persists custom discovery paths through the controller registry", async () => {
+    const p = makeTempPath();
+    const ctrl = createSettingsController({ prefsPath: p });
+    const r = await ctrl.applyCommand("setAgentCustomDiscoveryPaths", {
+      agentId: "custom",
+      value: [application.sourcePath],
+    });
+
+    assert.strictEqual(r.status, "ok");
+    assert.deepStrictEqual(ctrl.get("customToolDiscoveryPaths"), [application.sourcePath]);
+    assert.deepStrictEqual(prefs.load(p).snapshot.customToolDiscoveryPaths, [application.sourcePath]);
+  });
+
+  it("persists add and remove custom application commits through the controller registry", async () => {
+    const p = makeTempPath();
+    const ctrl = createSettingsController({
+      prefsPath: p,
+      injectedDeps: { identifyCustomApplication: () => ({ ...application }) },
+    });
+
+    const added = await ctrl.applyCommand("addCustomApplication", { path: application.sourcePath });
+    assert.strictEqual(added.status, "ok");
+    assert.deepStrictEqual(ctrl.get("customApplications"), [application]);
+    assert.strictEqual(ctrl.get("agents")[application.id].integrationInstalled, false);
+    assert.deepStrictEqual(prefs.load(p).snapshot.customApplications, [application]);
+
+    const removed = await ctrl.applyCommand("removeCustomApplication", { id: application.id });
+    assert.strictEqual(removed.status, "ok");
+    assert.deepStrictEqual(ctrl.get("customApplications"), []);
+    assert.strictEqual(ctrl.get("agents")[application.id], undefined);
+  });
+});
+
 describe("applyUpdate sync invariant", () => {
   it("sync action: returns a plain object, NOT a Promise, and the next sync read sees the new value", () => {
     // This is the contract that lets `ctx.lang = "zh"` work in sync menu setters

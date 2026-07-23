@@ -12,13 +12,17 @@ const { getAgent } = require("../../agents/registry");
 const { commandMatchesMarker, findHookCommands } = require("../../hooks/json-utils");
 const { GEMINI_HOOK_EVENTS } = require("../../hooks/gemini-install");
 const { ANTIGRAVITY_HOOK_EVENTS, HOOK_GROUP_ID: ANTIGRAVITY_HOOK_GROUP_ID } = require("../../hooks/antigravity-install");
-const { QWEN_CODE_HOOK_EVENTS } = require("../../hooks/qwen-code-install");
 const {
   hasUserPermissionHookInOtherFiles,
   hasUserPermissionHookInSettingsJson,
   isCopilotPermissionRegistrable,
 } = require("../../hooks/copilot-install");
-const { findKimiHookCommands } = require("../../hooks/kimi-install");
+const {
+  findKimiHookCommands,
+  listClawdKimiHookEvents,
+  normalizePermissionMode: normalizeKimiPermissionMode,
+  KIMI_HOOK_EVENTS,
+} = require("../../hooks/kimi-install");
 const { parseTomlSections: parseCodewhaleTomlSections } = require("../../hooks/codewhale-install");
 const { getAgentDescriptors } = require("./agent-descriptors");
 const { commandContainsFragment, validateHookCommand } = require("./agent-node-bin-parser");
@@ -61,6 +65,25 @@ function readJson(fsImpl, filePath) {
   return JSON.parse(raw);
 }
 
+// JSONC-aware sibling of readJson for descriptors with configJsonc: true
+// (mimocode's ~/.config/mimocode/mimocode.jsonc). Comments and trailing
+// commas are LEGAL there — parsing with bare JSON.parse would flip a healthy
+// config to "config-corrupt". Genuinely broken files still throw, keeping
+// the config-corrupt path meaningful. jsonc-parser is lazy-required so the
+// doctor pays for it only when a JSONC agent is actually inspected.
+function readJsonc(fsImpl, filePath) {
+  let raw = fsImpl.readFileSync(filePath, "utf8");
+  if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+  // eslint-disable-next-line global-require
+  const { parse } = require("jsonc-parser");
+  const errors = [];
+  const tree = parse(raw, errors, { allowTrailingComma: true });
+  if (errors.length) {
+    throw new Error(`invalid JSONC (${errors.length} parse error${errors.length === 1 ? "" : "s"})`);
+  }
+  return tree;
+}
+
 function withAgentBubbleNote(detail, prefs, agentId) {
   // State-only agents (capabilities.permissionApproval === false) never
   // surface a Clawd bubble in the first place, so annotating them as
@@ -90,25 +113,101 @@ function getClaudeHookGuardStatus(options) {
   }
 }
 
+function getClaudeHookHealthStatus(options) {
+  const server = options && options.server;
+  if (!server || typeof server.getClaudeHookHealthStatus !== "function") return null;
+  try {
+    return server.getClaudeHookHealthStatus();
+  } catch {
+    return null;
+  }
+}
+
+// Explains *why* Claude Code's hook config hasn't self-healed, using the
+// periodic health supervisor's runtime status (#657) — the disk inspector
+// above remains the source of truth for whether it's currently broken; this
+// only annotates that verdict. Covers not-connected, broken-path,
+// source-script-missing, and manual-fix-required per the #657 plan §6.9.
 function withClaudeHookGuardNotice(detail, descriptor, options) {
-  if (descriptor.agentId !== "claude-code") return detail;
-  if (!detail || detail.status !== "not-connected") return detail;
+  if (descriptor.agentId !== "claude-code" || !detail) return detail;
+  if (!REPAIRABLE_AGENT_STATUSES.has(detail.status)) return detail;
+
+  const runtimeHealth = getClaudeHookHealthStatus(options);
+
+  // Reconcile can never fix a missing source script, so this must never
+  // offer a configuration Repair — overriding the status keeps it out of
+  // REPAIRABLE_AGENT_STATUSES for the withAgentFixAction() check below.
+  if (runtimeHealth && runtimeHealth.status === "degraded" && runtimeHealth.degradedReason === "source-script-missing") {
+    return {
+      ...detail,
+      status: "source-script-missing",
+      level: "warning",
+      detail: "The current Clawd installation's Claude hook script is missing. Reinstall or re-extract Clawd to restore automatic hook repair.",
+      claudeHookRuntimeStatus: {
+        status: runtimeHealth.status,
+        degradedReason: runtimeHealth.degradedReason,
+        at: runtimeHealth.at || null,
+      },
+    };
+  }
+
   const guard = getClaudeHookGuardStatus(options);
-  if (!guard || guard.type !== "suspicious-shrink") return detail;
-  return {
-    ...detail,
-    detail: "Clawd paused automatic Claude hook repair after settings.json shrank during an external rewrite. Use Fix or restart Clawd to reinstall Clawd hooks.",
-    claudeHookGuard: {
-      type: guard.type,
-      at: guard.at || null,
-      before: guard.before || null,
-      after: guard.after || null,
-    },
-  };
+  if (guard && guard.type === "suspicious-shrink") {
+    return {
+      ...detail,
+      detail: "Clawd paused automatic Claude hook repair after settings.json shrank during an external rewrite. Use Fix or restart Clawd to reinstall Clawd hooks.",
+      claudeHookGuard: {
+        type: guard.type,
+        at: guard.at || null,
+        before: guard.before || null,
+        after: guard.after || null,
+      },
+    };
+  }
+
+  if (runtimeHealth && runtimeHealth.status === "guarded") {
+    return {
+      ...detail,
+      detail: "Clawd paused automatic Claude hook repair because settings.json shrank suspiciously. Use Fix or restart Clawd to reinstall Clawd hooks.",
+      claudeHookRuntimeStatus: {
+        status: runtimeHealth.status,
+        issueSignature: runtimeHealth.issueSignature || null,
+        at: runtimeHealth.at || null,
+      },
+    };
+  }
+
+  if (runtimeHealth && runtimeHealth.status === "manual-fix-required") {
+    return {
+      ...detail,
+      detail: "Clawd's automatic Claude hook repair failed 3 times in a row and stopped retrying. Use Fix to try once more, or check the hook script manually.",
+      claudeHookRuntimeStatus: {
+        status: runtimeHealth.status,
+        issueSignature: runtimeHealth.issueSignature || null,
+        attempt: runtimeHealth.attempt || null,
+        message: runtimeHealth.message || null,
+        at: runtimeHealth.at || null,
+      },
+    };
+  }
+
+  return detail;
 }
 
 function withAgentFixAction(detail, descriptor) {
+  if (
+    descriptor.agentId === "kimi-cli"
+    && detail.status === "needs-review"
+    && detail.supplementary
+    && detail.supplementary.key === "kimi_legacy_mode"
+  ) {
+    // Stale legacy install (missing events / retired env-prefix mode /
+    // missing --permission-mode flag): re-running the integration installer
+    // strips and rewrites every Clawd block in the current canonical form.
+    return { ...detail, fixAction: { type: "agent-integration", agentId: descriptor.agentId } };
+  }
   if (!descriptor.autoInstall || !REPAIRABLE_AGENT_STATUSES.has(detail.status)) return detail;
+  if (detail.supplementary && detail.supplementary.key === "hook_group") return detail;
   if (
     descriptor.agentId === "gemini-cli"
     && detail.supplementary
@@ -337,8 +436,11 @@ function validateGeminiHookEvents(descriptor, settings, options) {
   });
 }
 
-function validateQwenHookEvents(descriptor, settings, options) {
-  const events = Array.isArray(descriptor.hookEvents) ? descriptor.hookEvents : QWEN_CODE_HOOK_EVENTS;
+function validateFileHookEvents(descriptor, settings, options) {
+  const events = descriptor.hookEvents;
+  const agentName = descriptor.agentName || descriptor.agentId;
+  const missingKey = descriptor.agentId === "qwen-code" ? "missingQwenHookEvents" : "missingHookEvents";
+  const brokenKey = descriptor.agentId === "qwen-code" ? "brokenQwenHookEvent" : "brokenHookEvent";
   const missingEvents = [];
   let commandCount = 0;
   let firstOk = null;
@@ -373,9 +475,9 @@ function validateQwenHookEvents(descriptor, settings, options) {
   if (missingEvents.length) {
     return makeDetail(descriptor, "not-connected", {
       level: "warning",
-      detail: `${descriptor.configPath} missing Qwen Code hook event(s): ${missingEvents.join(", ")}`,
+      detail: `${descriptor.configPath} missing ${agentName} hook event(s): ${missingEvents.join(", ")}`,
       commandCount,
-      missingQwenHookEvents: missingEvents,
+      [missingKey]: missingEvents,
     });
   }
 
@@ -383,19 +485,19 @@ function validateQwenHookEvents(descriptor, settings, options) {
     const first = firstFailure.result;
     return makeDetail(descriptor, "broken-path", {
       level: "warning",
-      detail: `Qwen Code hook command failed validation for ${firstFailure.eventName}: ${first.issue || "parse-failed"}`,
+      detail: `${agentName} hook command failed validation for ${firstFailure.eventName}: ${first.issue || "parse-failed"}`,
       commandCount,
       hookCommandIssue: first.issue || "parse-failed",
       nodeBin: first.nodeBin || null,
       scriptPath: first.scriptPath || null,
       commandFragment: first.fragment || String(firstFailure.command || "").slice(0, 128),
-      brokenQwenHookEvent: firstFailure.eventName,
+      [brokenKey]: firstFailure.eventName,
     });
   }
 
   return makeDetail(descriptor, "ok", {
     level: null,
-    detail: `${descriptor.configPath} Qwen Code hooks registered for ${events.length} events, scriptPath verified`,
+    detail: `${descriptor.configPath} ${agentName} hooks registered for ${events.length} events, scriptPath verified`,
     commandCount,
     scriptPath: firstOk && firstOk.scriptPath ? firstOk.scriptPath : null,
   });
@@ -741,6 +843,35 @@ function applyGeminiSupplementary(detail, descriptor, settings) {
   };
 }
 
+function applyDisabledHookGroup(detail, descriptor, settings) {
+  if (!descriptor.hookGroupId) return detail;
+  const hooksConfig = settings && typeof settings === "object" ? settings.hooksConfig : null;
+  if (!hooksConfig || typeof hooksConfig !== "object") return detail;
+
+  let supplementary = null;
+  if (hooksConfig.enabled === false) {
+    supplementary = {
+      key: "hook_group",
+      value: "disabled-global",
+      detail: "hooksConfig.enabled is false",
+    };
+  } else if (Array.isArray(hooksConfig.disabled) && hooksConfig.disabled.includes(descriptor.hookGroupId)) {
+    supplementary = {
+      key: "hook_group",
+      value: `disabled-${descriptor.hookGroupId}`,
+      detail: `hooksConfig.disabled includes "${descriptor.hookGroupId}"`,
+    };
+  }
+  if (!supplementary) return detail;
+  return {
+    ...detail,
+    status: "not-connected",
+    level: "warning",
+    detail: `${descriptor.agentName} hooks are disabled in settings.json; Clawd preserves this user setting and will not receive hook events`,
+    supplementary,
+  };
+}
+
 function getQwenHooksSupplementary(settings) {
   if (settings && typeof settings === "object" && settings.disableAllHooks === true) {
     return {
@@ -810,7 +941,55 @@ function applyAntigravitySupplementary(detail, descriptor, settings) {
   };
 }
 
+// MiMo-style merged config (descriptor.configCandidates, highest-priority
+// first): EVERY existing candidate loads, each parsed as JSONC exactly like
+// the host's own loader, and the "plugin" array is REPLACED by the
+// highest-priority file that declares it. The doctor must validate that
+// EFFECTIVE view — checking one fixed file would bless a masked entry or
+// miss the live one (#607 review). Only opencode-family JSONC members set
+// configCandidates, so this always funnels into checkOpencodeSettings.
+function checkMergedJsoncConfig(descriptor, options) {
+  const existing = [];
+  for (const candidate of descriptor.configCandidates) {
+    if (!fileExists(options.fs, candidate)) continue;
+    let tree;
+    try {
+      tree = readJsonc(options.fs, candidate);
+    } catch (err) {
+      return makeDetail(descriptor, "config-corrupt", {
+        level: "warning",
+        parentDirExists: true,
+        configFileExists: true,
+        configPath: candidate,
+        detail: `${candidate}: ${err && err.message ? err.message : "config parse failed"}`,
+      });
+    }
+    existing.push({ candidate, tree });
+  }
+
+  if (!existing.length) {
+    return makeDetail(descriptor, descriptor.autoInstall ? "not-connected" : "manual-only", {
+      level: descriptor.autoInstall ? "warning" : "info",
+      parentDirExists: true,
+      configFileExists: false,
+      configPath: descriptor.configPath,
+      detail: `${descriptor.configPath} missing`,
+    });
+  }
+
+  const owner = existing.find((entry) => (
+    entry.tree && typeof entry.tree === "object" && !Array.isArray(entry.tree)
+    && Object.prototype.hasOwnProperty.call(entry.tree, "plugin")
+  ));
+  const effective = owner || existing[0];
+  // Point every downstream message at the file whose plugin array is live.
+  return checkOpencodeSettings({ ...descriptor, configPath: effective.candidate }, effective.tree, options);
+}
+
 function checkFileMode(descriptor, options) {
+  if (Array.isArray(descriptor.configCandidates) && descriptor.configCandidates.length) {
+    return checkMergedJsoncConfig(descriptor, options);
+  }
   if (!fileExists(options.fs, descriptor.configPath)) {
     return makeDetail(descriptor, descriptor.autoInstall ? "not-connected" : "manual-only", {
       level: descriptor.autoInstall ? "warning" : "info",
@@ -823,7 +1002,9 @@ function checkFileMode(descriptor, options) {
 
   let settings;
   try {
-    settings = readJson(options.fs, descriptor.configPath);
+    settings = descriptor.configJsonc
+      ? readJsonc(options.fs, descriptor.configPath)
+      : readJson(options.fs, descriptor.configPath);
   } catch (err) {
     return makeDetail(descriptor, "config-corrupt", {
       level: "warning",
@@ -841,8 +1022,8 @@ function checkFileMode(descriptor, options) {
   let detail;
   if (descriptor.agentId === "gemini-cli") {
     detail = validateGeminiHookEvents(descriptor, settings, options);
-  } else if (descriptor.agentId === "qwen-code") {
-    detail = validateQwenHookEvents(descriptor, settings, options);
+  } else if (Array.isArray(descriptor.hookEvents) && descriptor.hookEvents.length) {
+    detail = validateFileHookEvents(descriptor, settings, options);
   } else if (descriptor.agentId === "codex") {
     detail = validateCommandList(
       descriptor,
@@ -863,6 +1044,7 @@ function checkFileMode(descriptor, options) {
     configPath: descriptor.configPath,
   };
   detail = applyCodexSupplementary(detail, descriptor, options, settings);
+  detail = applyDisabledHookGroup(detail, descriptor, settings);
   detail = applyGeminiSupplementary(detail, descriptor, settings);
   return applyQwenSupplementary(detail, descriptor, settings);
 }
@@ -1479,6 +1661,8 @@ function describeOpencodeEntryIssue(reason) {
       return "the plugin index.mjs could not be read";
     case "extra-module-exports":
       return "the module exports more than the default function, so opencode rejects it and loads nothing (#413)";
+    case "family-core-missing":
+      return "a shared opencode-family file the entry imports is missing (packaging problem)";
     default:
       return reason;
   }
@@ -1498,12 +1682,16 @@ function checkOpencodeSettings(descriptor, settings, options) {
 
   const validation = validateOpencodeEntry(entry, { fs: options.fs });
   if (!validation.ok) {
+    // family-core-missing carries WHICH shared file is gone — surface it, or
+    // the user sees "packaging problem" with no way to tell core.mjs from
+    // session-ids.mjs (the modal renders detail verbatim, no i18n layer).
+    const missingSuffix = validation.missing ? ` — missing ${validation.missing}` : "";
     return makeDetail(descriptor, "broken-path", {
       level: "warning",
       parentDirExists: true,
       configFileExists: true,
       configPath: descriptor.configPath,
-      detail: `opencode plugin entry is invalid: ${describeOpencodeEntryIssue(validation.reason)}`,
+      detail: `opencode plugin entry is invalid: ${describeOpencodeEntryIssue(validation.reason)}${missingSuffix}`,
       opencodeEntryIssue: validation.reason,
       opencodeEntry: entry,
     });
@@ -1721,7 +1909,12 @@ function checkAgent(descriptor, options) {
   // Multi-generation agents (#563: kimi legacy + kimi-code) declare ordered
   // configTargets; the first whose directory exists is the one doctor judges.
   const activeTarget = Array.isArray(descriptor.configTargets)
-    ? descriptor.configTargets.find((target) => dirExists(options.fs, target.parentDir))
+    ? descriptor.configTargets.find((target) => {
+      if (descriptor.agentId === "workbuddy" && target.label === "legacy") {
+        return fileExists(options.fs, target.configPath);
+      }
+      return dirExists(options.fs, target.parentDir);
+    })
     : null;
   const effectiveDescriptor = activeTarget
     ? { ...descriptor, parentDir: activeTarget.parentDir, configPath: activeTarget.configPath }
@@ -1768,8 +1961,79 @@ function checkAgent(descriptor, options) {
     });
   }
 
+  if (descriptor.agentId === "kimi-cli") {
+    detail = withKimiLegacyPermissionModeSupplement(detail, descriptor, options);
+  }
   detail = withClaudeHookGuardNotice(detail, descriptor, options);
   return withAgentFixAction(withAgentBubbleNote(detail, prefs, descriptor.agentId), descriptor);
+}
+
+// #563 follow-up: with both Kimi generations installed, the primary check
+// judges the first existing configTarget (kimi-code) and the legacy
+// ~/.kimi/config.toml is never inspected — yet that is the config the Python
+// kimi-cli actually reads. And even when legacy IS the active target, the
+// generic command check only asserts "some command exists and its script
+// resolves". Since the suspect default ships as an argv flag on the hook
+// command (--permission-mode), a stale legacy install — retired env-prefix
+// form (not executed on Windows), missing flag, or missing events — silently
+// means "no cues at all" for legacy sessions. Assert completeness here
+// whenever the legacy directory carries Clawd hooks, whichever target the
+// primary check judged.
+function withKimiLegacyPermissionModeSupplement(detail, descriptor, options) {
+  // Never mask a primary finding — the supplement only tightens an "ok".
+  if (detail.status !== "ok") return detail;
+  const targets = Array.isArray(descriptor.configTargets) ? descriptor.configTargets : [];
+  const legacyTarget = targets.find((target) => target.label === "legacy");
+  if (!legacyTarget || !dirExists(options.fs, legacyTarget.parentDir)) return detail;
+  if (!fileExists(options.fs, legacyTarget.configPath)) return detail;
+  let text;
+  try {
+    text = options.fs.readFileSync(legacyTarget.configPath, "utf8");
+  } catch {
+    // Unreadable legacy config: if legacy is the active target the primary
+    // check already surfaced it; if kimi-code is active, don't turn a read
+    // hiccup into a warning.
+    return detail;
+  }
+  const commands = findKimiHookCommands(text, descriptor.marker);
+  // No Clawd hooks on legacy at all: connection status is the primary
+  // check's business (when legacy is active) or a deliberate non-install.
+  if (!commands.length) return detail;
+
+  const issues = [];
+  const registeredEvents = new Set(listClawdKimiHookEvents(text, descriptor.marker));
+  const missingEvents = KIMI_HOOK_EVENTS.filter((event) => !registeredEvents.has(event));
+  if (missingEvents.length) {
+    issues.push(`missing hook events: ${missingEvents.join(", ")}`);
+  }
+  // The retired env prefix is checked UNCONDITIONALLY: a command carrying
+  // both the prefix and a valid argv flag is still dead on Windows (the
+  // leading `VAR=x` form never executes under a real shell there), yet its
+  // node/script substrings would pass the generic command validation.
+  if (/CLAWD_KIMI_PERMISSION_MODE=/.test(commands.join("\n"))) {
+    issues.push("hook commands carry the retired env-prefix mode form (never executed on Windows)");
+  }
+  const modes = commands.map((command) => {
+    const argvMatch = command.match(/--permission-mode=([A-Za-z]+)/);
+    return argvMatch ? normalizeKimiPermissionMode(argvMatch[1]) : null;
+  });
+  const missingModeCount = modes.filter((mode) => !mode).length;
+  if (missingModeCount > 0) {
+    issues.push(`${missingModeCount} hook command(s) missing the --permission-mode flag`);
+  }
+  const distinctModes = new Set(modes.filter(Boolean));
+  if (distinctModes.size > 1) {
+    issues.push(`inconsistent --permission-mode values: ${[...distinctModes].join(", ")}`);
+  }
+  if (!issues.length) return detail;
+  return {
+    ...detail,
+    status: "needs-review",
+    level: "warning",
+    detail: `${legacyTarget.configPath}: ${issues.join("; ")} — Fix rewrites Clawd's Kimi hooks in the current format`,
+    supplementary: { key: "kimi_legacy_mode", value: "stale" },
+    kimiLegacyConfigPath: legacyTarget.configPath,
+  };
 }
 
 function summarize(details) {

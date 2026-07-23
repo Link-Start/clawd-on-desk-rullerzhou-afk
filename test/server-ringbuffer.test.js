@@ -7,6 +7,7 @@ const { EventEmitter } = require("node:events");
 const initServer = require("../src/server");
 const {
   HOOK_EVENT_RING_SIZE_PER_AGENT,
+  REJECTED_CUSTOM_AGENT_ID,
   createSingleRequestHookEventRecorder,
   recordHookEventInBuffer,
   getRecentHookEventsFromBuffer,
@@ -67,6 +68,10 @@ function callHandler(handler, method, url, body) {
   });
 }
 
+function hookIdentity(agentId) {
+  return { agentId, source: "explicit", defaulted: false };
+}
+
 function makeCtx(overrides = {}) {
   const pendingPermissions = [];
   const sessions = new Map();
@@ -104,7 +109,7 @@ function makeCtx(overrides = {}) {
       res.end(JSON.stringify({ behavior, message }));
     },
     showPermissionBubble: (entry) => shown.push(entry),
-    replyOpencodePermission: () => {},
+    replyOpencodeFamilyPermission: () => {},
     permLog: () => {},
     updateLog: () => {},
     _test: { pendingPermissions, sessions, updateSessionCalls, setStateCalls, shown },
@@ -181,6 +186,50 @@ describe("server hook event ringbuffer", () => {
       eventType: "UserPromptSubmit",
       route: "state",
       outcome: "accepted",
+    }]);
+  });
+
+  it("records registered custom state activity under the custom id", async () => {
+    const id = "custom-nova-ai-0123456789ab";
+    const pushed = [];
+    const { api, handler } = startServer({
+      getCustomAgentIds: () => [id],
+      onHookEventRecorded: (event) => pushed.push(event),
+    });
+
+    const res = await callHandler(handler, "POST", "/state", {
+      agent_id: id,
+      state: "working",
+      event: "PreToolUse",
+      session_id: "nova:sid",
+    });
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.deepStrictEqual(api.getRecentHookEvents({ agentId: id }).map(({ agentId, route, outcome }) => ({
+      agentId,
+      route,
+      outcome,
+    })), [{ agentId: id, route: "state", outcome: "accepted" }]);
+    assert.strictEqual(pushed.length, 1);
+    assert.strictEqual(pushed[0].agentId, id);
+    assert.strictEqual(pushed[0].eventType, "PreToolUse");
+  });
+
+  it("records stale custom state activity under the bounded sentinel", async () => {
+    const { api, handler, ctx } = startServer();
+
+    const res = await callHandler(handler, "POST", "/state", {
+      agent_id: "custom-stale-0123456789ab",
+      state: "working",
+      event: "PreToolUse",
+      session_id: "stale:sid",
+    });
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(ctx._test.updateSessionCalls.length, 0);
+    assert.deepStrictEqual(api.getRecentHookEvents().map(({ agentId, outcome }) => ({ agentId, outcome })), [{
+      agentId: REJECTED_CUSTOM_AGENT_ID,
+      outcome: "dropped-invalid-agent",
     }]);
   });
 
@@ -310,6 +359,25 @@ describe("server hook event ringbuffer", () => {
     res.destroy();
   });
 
+  it("records registered custom permission activity as unsupported", async () => {
+    const id = "custom-nova-ai-0123456789ab";
+    const { api, handler, ctx } = startServer({ getCustomAgentIds: () => [id] });
+
+    const res = await callHandler(handler, "POST", "/permission", {
+      agent_id: id,
+      session_id: "nova:sid",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    });
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(ctx._test.pendingPermissions.length, 0);
+    assert.deepStrictEqual(api.getRecentHookEvents({ agentId: id }).map(({ route, outcome }) => ({ route, outcome })), [{
+      route: "permission",
+      outcome: "dropped-unsupported",
+    }]);
+  });
+
   it("records opencode malformed bridge requests as HTTP activity", async () => {
     const { api, handler } = startServer();
 
@@ -335,7 +403,7 @@ describe("server hook event ringbuffer", () => {
   it("caps each agent ring at 50 events", () => {
     const buffer = new Map();
     for (let i = 0; i < HOOK_EVENT_RING_SIZE_PER_AGENT + 7; i++) {
-      recordHookEventInBuffer(buffer, {
+      recordHookEventInBuffer(buffer, hookIdentity("codex"), {
         agent_id: "codex",
         event: `E${i}`,
       }, "state", "accepted", { now: () => i });
@@ -349,7 +417,7 @@ describe("server hook event ringbuffer", () => {
 
   it("attributes hook events by hook_source when agent_id is missing", () => {
     const buffer = new Map();
-    recordHookEventInBuffer(buffer, {
+    recordHookEventInBuffer(buffer, hookIdentity("opencode"), {
       hook_source: "opencode-plugin",
       event: "PreToolUse",
     }, "state", "accepted", { now: () => 10 });
@@ -362,9 +430,9 @@ describe("server hook event ringbuffer", () => {
 
   it("filters recent hook events by agent and timestamp and returns copies", () => {
     const buffer = new Map();
-    recordHookEventInBuffer(buffer, { agent_id: "codex", event: "Old" }, "state", "accepted", { now: () => 10 });
-    recordHookEventInBuffer(buffer, { agent_id: "codex", event: "New" }, "state", "accepted", { now: () => 20 });
-    recordHookEventInBuffer(buffer, { agent_id: "gemini-cli", event: "Other" }, "state", "accepted", { now: () => 30 });
+    recordHookEventInBuffer(buffer, hookIdentity("codex"), { agent_id: "codex", event: "Old" }, "state", "accepted", { now: () => 10 });
+    recordHookEventInBuffer(buffer, hookIdentity("codex"), { agent_id: "codex", event: "New" }, "state", "accepted", { now: () => 20 });
+    recordHookEventInBuffer(buffer, hookIdentity("gemini-cli"), { agent_id: "gemini-cli", event: "Other" }, "state", "accepted", { now: () => 30 });
 
     const events = getRecentHookEventsFromBuffer(buffer, { agentId: "codex", since: 20 });
 
@@ -380,10 +448,11 @@ describe("server hook event ringbuffer", () => {
   it("single-request recorder keeps the first valid route outcome", () => {
     const calls = [];
     const recorder = createSingleRequestHookEventRecorder(
-      (data, route, outcome) => {
-        calls.push({ data, route, outcome });
+      (identity, data, route, outcome) => {
+        calls.push({ identity, data, route, outcome });
         return { route, outcome };
       },
+      hookIdentity("codex"),
       { agent_id: "codex" },
       "permission"
     );
@@ -393,9 +462,29 @@ describe("server hook event ringbuffer", () => {
     assert.strictEqual(recorder.droppedByDnd(), null);
     assert.strictEqual(recorder.droppedByDisabled("state"), null);
     assert.deepStrictEqual(calls, [{
+      identity: hookIdentity("codex"),
       data: { agent_id: "codex" },
       route: "permission",
       outcome: "accepted",
     }]);
+  });
+
+  it("uses one bounded sentinel ring for rejected custom ids", () => {
+    const buffer = new Map();
+    for (let i = 0; i < HOOK_EVENT_RING_SIZE_PER_AGENT + 7; i++) {
+      const rawAgentId = `custom-${i}-${"x".repeat(100)}`;
+      recordHookEventInBuffer(buffer, {
+        agentId: null,
+        source: "rejected-custom",
+        rejected: true,
+        rawAgentId,
+      }, { agent_id: rawAgentId, event: "PreToolUse" }, "state", "dropped-invalid-agent", { now: () => i });
+    }
+
+    assert.deepStrictEqual([...buffer.keys()], [REJECTED_CUSTOM_AGENT_ID]);
+    assert.strictEqual(buffer.get(REJECTED_CUSTOM_AGENT_ID).length, HOOK_EVENT_RING_SIZE_PER_AGENT);
+    assert.ok(buffer.get(REJECTED_CUSTOM_AGENT_ID).every((event) => (
+      event.agentId === REJECTED_CUSTOM_AGENT_ID && event.rawAgentId.length <= 80
+    )));
   });
 });

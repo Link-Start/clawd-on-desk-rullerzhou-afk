@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const {
+  detectAgentInstallation,
   detectAgentInstallations,
 } = require("../src/agent-installation-detector");
 const { getAgentDescriptor } = require("../src/doctor-detectors/agent-descriptors");
@@ -199,6 +200,103 @@ describe("agent installation detector", () => {
     assert.strictEqual(byId(report, "opencode").detectedInstalled, true);
   });
 
+  it("detects supported agents from custom discovery paths", () => {
+    const homeDir = makeHome();
+    const customConfigDir = path.join(homeDir, "custom-qwen-config");
+    mkdirp(customConfigDir);
+
+    const report = detectAgentInstallations({
+      homeDir,
+      now: 1,
+      snapshot: {
+        agents: {
+          "qwen-code": { customDiscoveryPaths: [customConfigDir] },
+        },
+      },
+    });
+    const qwen = byId(report, "qwen-code");
+
+    assert.strictEqual(qwen.detectedInstalled, true);
+    assert.strictEqual(qwen.confidence, "medium");
+    assert.strictEqual(qwen.reason, "custom-path");
+    assert.match(qwen.detail, /custom-qwen-config/);
+    assert.match(qwen.detail, /User-provided path/);
+  });
+
+  it("reports the shared custom tool discovery slot separately", () => {
+    const homeDir = makeHome();
+    const customExe = path.join(homeDir, "CustomAI.exe");
+    writeText(customExe, "");
+    fs.chmodSync(customExe, 0o755);
+
+    const report = detectAgentInstallations({
+      homeDir,
+      now: 1,
+      snapshot: {
+        customToolDiscoveryPaths: [customExe, path.join(homeDir, "missing")],
+      },
+    });
+
+    assert.strictEqual(report.customTools.length, 2);
+    assert.strictEqual(report.customTools[0].detectedInstalled, true);
+    assert.strictEqual(report.customTools[0].confidence, "high");
+    assert.strictEqual(report.customTools[0].reason, "application-recognized");
+    assert.strictEqual(report.customTools[0].kind, "file");
+    assert.strictEqual(report.customTools[0].application.name, "CustomAI");
+    assert.strictEqual(report.customTools[0].application.added, false);
+    assert.strictEqual(report.customTools[1].detectedInstalled, false);
+  });
+
+  it("reports registered custom executables independently from discovery paths", () => {
+    const homeDir = makeHome();
+    const executablePath = path.join(homeDir, "NovaAI.exe");
+    writeText(executablePath, "");
+    const application = {
+      id: "custom-nova-ai-0123456789ab",
+      executablePath,
+    };
+
+    const present = detectAgentInstallations({
+      homeDir,
+      now: 1,
+      snapshot: { customApplications: [application], customToolDiscoveryPaths: [] },
+    });
+    assert.deepStrictEqual(present.customTools, []);
+    assert.strictEqual(present.customAgents.length, 1);
+    assert.strictEqual(present.customAgents[0].agentId, application.id);
+    assert.strictEqual(present.customAgents[0].detectedInstalled, true);
+
+    fs.rmSync(executablePath);
+    const missing = detectAgentInstallations({
+      homeDir,
+      now: 2,
+      snapshot: { customApplications: [application], customToolDiscoveryPaths: [] },
+    });
+    assert.strictEqual(missing.customAgents[0].detectedInstalled, false);
+  });
+
+  it("does not infer built-in agent installs from generic Windows app-name guesses", () => {
+    const root = makeHome();
+    const localAppData = path.join(root, "LocalAppData");
+    const executable = path.join(localAppData, "Programs", "Nova AI", "Nova AI.exe");
+    writeText(executable, "");
+    const descriptor = {
+      agentId: "nova-ai",
+      agentName: "Nova AI",
+      parentDir: path.join(root, ".nova-ai"),
+      configPath: path.join(root, ".nova-ai", "settings.json"),
+      marker: "clawd",
+    };
+    const result = detectAgentInstallation(descriptor, {
+      homeDir: root,
+      platform: "win32",
+      env: { LOCALAPPDATA: localAppData },
+    });
+    assert.strictEqual(result.detectedInstalled, false);
+    assert.strictEqual(result.confidence, "low");
+    assert.strictEqual(result.reason, "not-found");
+  });
+
   describe("kimi dual-generation detection (#563)", () => {
     it("detects an install when only ~/.kimi-code exists", () => {
       const homeDir = makeHome();
@@ -248,6 +346,49 @@ describe("agent installation detector", () => {
       assert.strictEqual(kimi.clawdIntegration.detected, true);
       assert.strictEqual(kimi.clawdIntegration.reason, "marker-found");
       assert.ok(kimi.clawdIntegration.detail.includes(".kimi-code"));
+    });
+  });
+
+  describe("WorkBuddy dual-generation detection", () => {
+    it("prefers current ~/.workbuddy-ai when current and legacy directories both exist", () => {
+      const homeDir = makeHome();
+      mkdirp(path.join(homeDir, ".workbuddy-ai"));
+      mkdirp(path.join(homeDir, ".workbuddy"));
+
+      const report = detectAgentInstallations({ homeDir, now: 1, env: {} });
+      const workbuddy = byId(report, "workbuddy");
+
+      assert.strictEqual(workbuddy.detectedInstalled, true);
+      assert.strictEqual(workbuddy.confidence, "high");
+      assert.ok(workbuddy.detail.includes(".workbuddy-ai"), workbuddy.detail);
+    });
+
+    it("falls back to legacy ~/.workbuddy and finds its Clawd marker", () => {
+      const homeDir = makeHome();
+      writeJson(path.join(homeDir, ".workbuddy", "settings.json"), {
+        hooks: {
+          Stop: [{ hooks: [{ type: "command", command: '"node" "/app/hooks/workbuddy-hook.js"' }] }],
+        },
+      });
+
+      const report = detectAgentInstallations({ homeDir, now: 1, env: {} });
+      const workbuddy = byId(report, "workbuddy");
+
+      assert.strictEqual(workbuddy.detectedInstalled, true);
+      assert.ok(workbuddy.detail.includes(".workbuddy"), workbuddy.detail);
+      assert.strictEqual(workbuddy.clawdIntegration.detected, true);
+      assert.ok(workbuddy.clawdIntegration.detail.includes(".workbuddy"));
+    });
+
+    it("ignores a bare legacy toolchain directory without settings.json", () => {
+      const homeDir = makeHome();
+      mkdirp(path.join(homeDir, ".workbuddy"));
+
+      const report = detectAgentInstallations({ homeDir, now: 1, env: {} });
+      const workbuddy = byId(report, "workbuddy");
+
+      assert.strictEqual(workbuddy.detectedInstalled, false);
+      assert.strictEqual(workbuddy.clawdIntegration.detected, false);
     });
   });
 });

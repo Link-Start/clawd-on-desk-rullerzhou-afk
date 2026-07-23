@@ -16,12 +16,14 @@ const { unregisterQwenCodeHooks } = require("./qwen-code-install");
 const { unregisterCodewhaleHooks } = require("./codewhale-install");
 const { unregisterCodexCommandHooks } = require("./codex-install-utils");
 const { unregisterOpencodePlugin } = require("./opencode-install");
+const { unregisterMimocodePlugin } = require("./mimocode-install");
 const { unregisterPiExtension } = require("./pi-install");
 const { unregisterOpenClawPlugin } = require("./openclaw-install");
 const { resolveHermesHome, unregisterHermesPlugin } = require("./hermes-install");
 const { unregisterQoderHooks } = require("./qoder-install");
 const { unregisterReasonixHooks } = require("./reasonix-install");
 const { unregisterQoderWorkHooks } = require("./qoderwork-install");
+const { unregisterWorkBuddyHooks } = require("./workbuddy-install");
 
 const CODEX_MARKERS = ["codex-hook.js", "codex-debug-hook.js"];
 
@@ -38,12 +40,14 @@ const MANAGED_AGENT_IDS = Object.freeze([
   "codewhale",
   "codex",
   "opencode",
+  "mimocode",
   "pi",
   "openclaw",
   "hermes",
   "qoder",
   "reasonix",
   "qoderwork",
+  "workbuddy",
 ]);
 
 const AGENT_DISPLAY_NAMES = Object.freeze({
@@ -53,12 +57,14 @@ const AGENT_DISPLAY_NAMES = Object.freeze({
   "cursor-agent": "Cursor Agent",
   "copilot-cli": "GitHub Copilot CLI",
   codebuddy: "CodeBuddy",
+  workbuddy: "WorkBuddy",
   "kiro-cli": "Kiro CLI",
   "kimi-cli": "Kimi Code",
   "qwen-code": "Qwen Code",
   codewhale: "CodeWhale",
   codex: "Codex CLI",
   opencode: "opencode",
+  mimocode: "MiMo Code",
   pi: "Pi",
   openclaw: "OpenClaw",
   hermes: "Hermes Agent",
@@ -180,6 +186,10 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
         ...common,
         configPath: path.join(homeDir, ".config", "opencode", "opencode.json"),
       },
+      mimocode: {
+        ...common,
+        configPath: path.join(homeDir, ".config", "mimocode", "mimocode.jsonc"),
+      },
       pi: {
         ...common,
         parentDir: path.join(homeDir, ".pi", "agent"),
@@ -209,6 +219,13 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
       qoderwork: {
         ...common,
         settingsPath: path.join(homeDir, ".qoderwork", "settings.json"),
+      },
+      workbuddy: {
+        ...common,
+        settingsPaths: [
+          path.join(homeDir, ".workbuddy-ai", "settings.json"),
+          path.join(homeDir, ".workbuddy", "settings.json"),
+        ],
       },
     },
   };
@@ -251,12 +268,14 @@ const AGENT_CLEANERS = Object.freeze({
   codewhale: unregisterCodewhaleHooks,
   codex: unregisterCodexCommandHooks,
   opencode: unregisterOpencodePlugin,
+  mimocode: unregisterMimocodePlugin,
   pi: unregisterPiExtension,
   openclaw: unregisterOpenClawPlugin,
   hermes: unregisterHermesPlugin,
   qoder: unregisterQoderHooks,
   reasonix: unregisterReasonixHooks,
   qoderwork: unregisterQoderWorkHooks,
+  workbuddy: unregisterWorkBuddyHooks,
 });
 
 function removedCountFromResult(result) {
@@ -323,7 +342,34 @@ function cleanupIntegrations(options = {}) {
     };
 
     try {
-      if (!cleanOptions) {
+      // Claude hooks + statusline may already have been unregistered through
+      // the server-owned operation queue (see main.js's cleanupIntegrations
+      // wrapper for #657) before this function runs. When that precomputed
+      // result is provided, record it instead of unregistering Claude a
+      // second time here, outside the queue.
+      if (agentId === "claude-code" && Object.prototype.hasOwnProperty.call(options, "claudeCleanupResult")) {
+        const result = options.claudeCleanupResult;
+        if (result && result.status === "error") {
+          agent.status = "failed";
+          agent.error = result.message || "Claude hook queue cleanup failed";
+          failed++;
+        } else {
+          const removed = removedCountFromResult(result);
+          const changed = changedFromResult(result);
+          agent.removed = removed;
+          agent.changed = changed;
+          agent.backupPaths = backupPathsFromResult(result);
+          agent.result = result;
+          if (changed || removed > 0) {
+            agent.status = "applied";
+            agentsAffected++;
+          } else {
+            agent.status = "skipped";
+            skipped++;
+          }
+          entriesRemoved += removed;
+        }
+      } else if (!cleanOptions) {
         agent.status = "failed";
         agent.error = "Missing cleanup path overrides";
         failed++;

@@ -9,8 +9,8 @@
 // agent-specific: some agents get no-decision/native fallback, opencode gets
 // silent TUI fallback, and Claude/CodeBuddy keep their existing auto-deny.
 //
-// Exclusions: passive codex/kimi notifications and the hardware-buddy self
-// test are not approvals and must NOT be auto-resolved.
+// Exclusions: passive codex/kimi notifications are not approvals and must
+// NOT be auto-resolved.
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
@@ -146,16 +146,6 @@ describe("auto-pilot: showPermissionBubble auto-approve chokepoint", () => {
     // Passive notify entries route to dismissPassiveNotify on resolve, never
     // to an allow. Auto-approve must skip them: with win=null the subsequent
     // bubble build throws, proving the early-return did not consume it.
-    assert.throws(() => perm.showPermissionBubble(permEntry));
-    assert.equal(perm.pendingPermissions.indexOf(permEntry), 0);
-  });
-
-  it("does NOT auto-approve the hardware-buddy self test", () => {
-    const ctx = makeCtx();
-    const perm = initPermission(ctx);
-    const permEntry = makePermEntry({ isHardwareBuddyTest: true });
-    perm.pendingPermissions.push(permEntry);
-
     assert.throws(() => perm.showPermissionBubble(permEntry));
     assert.equal(perm.pendingPermissions.indexOf(permEntry), 0);
   });
@@ -337,10 +327,9 @@ describe("auto-pilot: per-agent allow wire formats", () => {
         const permEntry = makePermEntry({
           res: null,
           agentId: "opencode",
-          isOpencode: true,
-          opencodeRequestId: "per_test_123",
-          opencodeBridgeUrl: `http://127.0.0.1:${port}`,
-          opencodeBridgeToken: "tok_test",
+          familyRequestId: "per_test_123",
+          familyBridgeUrl: `http://127.0.0.1:${port}`,
+          familyBridgeToken: "tok_test",
         });
         perm.pendingPermissions.push(permEntry);
         perm.showPermissionBubble(permEntry);
@@ -348,7 +337,7 @@ describe("auto-pilot: per-agent allow wire formats", () => {
       });
     });
 
-    // Auto-pilot does not set opencodeAlwaysPicked, so the reply is "once"
+    // Auto-pilot does not set familyAlwaysPicked, so the reply is "once"
     // (single-call allow), authenticated with the bridge token.
     assert.equal(received.body.request_id, "per_test_123");
     assert.equal(received.body.reply, "once");

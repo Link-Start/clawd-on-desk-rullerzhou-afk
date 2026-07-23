@@ -24,6 +24,21 @@ describe("doctor hook activity connection test", () => {
     assert.match(result.detail, /codex/);
   });
 
+  it("uses the resolved custom application name in summaries", () => {
+    const result = evaluateConnectionTest({
+      events: [{
+        agentId: "custom-nova-0123456789ab",
+        route: "state",
+        outcome: "accepted",
+      }],
+      resolveAgentDisplayName: () => "Nova AI",
+    });
+
+    assert.strictEqual(result.status, "http-verified");
+    assert.match(result.detail, /Nova AI/);
+    assert.doesNotMatch(result.detail, /custom-nova/);
+  });
+
   it("warns when HTTP works but events are dropped by gates", () => {
     const result = evaluateConnectionTest({
       events: [
@@ -36,6 +51,18 @@ describe("doctor hook activity connection test", () => {
     assert.strictEqual(result.level, "warning");
     assert.match(result.detail, /dropped-by-disabled/);
     assert.match(result.detail, /dropped-by-dnd/);
+  });
+
+  it("treats invalid and unsupported custom activity as dropped, never verified", () => {
+    const result = evaluateConnectionTest({
+      events: [
+        { agentId: "rejected-custom", route: "state", outcome: "dropped-invalid-agent" },
+        { agentId: "custom-nova-0123456789ab", route: "permission", outcome: "dropped-unsupported" },
+      ],
+    });
+
+    assert.strictEqual(result.status, "http-dropped");
+    assert.strictEqual(result.level, "warning");
   });
 
   it("warns when Codex fallback files changed but no HTTP event arrived", () => {

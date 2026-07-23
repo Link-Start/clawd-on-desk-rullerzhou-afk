@@ -1,8 +1,13 @@
 "use strict";
 
 const { getAllAgents } = require("../agents/registry");
+const {
+  isCustomApplicationId,
+  isCustomApplicationNamespace,
+} = require("./custom-applications");
 
 const DEFAULT_HOOK_AGENT_ID = "claude-code";
+const MAX_REJECTED_AGENT_ID_LENGTH = 80;
 
 // Hook scripts / plugins stamp their own registry id into `agent_id`
 // (codebuddy-hook.js, hermes plugin, codex-hook.js, ...). Claude Code ≥ 2.1.x
@@ -19,6 +24,7 @@ const HOOK_SOURCE_AGENT_IDS = new Map([
   ["codex-official", "codex"],
   ["copilot-hook", "copilot-cli"],
   ["opencode-plugin", "opencode"],
+  ["mimocode-plugin", "mimocode"],
   ["openclaw-plugin", "openclaw"],
   ["codewhale-hook", "codewhale"],
   ["pi-extension", "pi"],
@@ -28,10 +34,24 @@ function normalizeHookText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function resolveHookAgentId(data) {
+function resolveHookAgentId(data, options = {}) {
   const explicit = normalizeHookText(data && data.agent_id);
   if (explicit && KNOWN_HOOK_AGENT_IDS.has(explicit)) {
     return { agentId: explicit, source: "explicit", defaulted: false };
+  }
+  const customAgentIds = options.customAgentIds instanceof Set
+    ? options.customAgentIds
+    : new Set(Array.isArray(options.customAgentIds) ? options.customAgentIds : []);
+  if (isCustomApplicationId(explicit) && customAgentIds.has(explicit)) {
+    return { agentId: explicit, source: "custom", defaulted: false };
+  }
+  if (isCustomApplicationNamespace(explicit)) {
+    return {
+      agentId: null,
+      source: "rejected-custom",
+      rejected: true,
+      rawAgentId: explicit.slice(0, MAX_REJECTED_AGENT_ID_LENGTH),
+    };
   }
 
   const hookSource = normalizeHookText(data && data.hook_source);
@@ -57,5 +77,6 @@ module.exports = {
   DEFAULT_HOOK_AGENT_ID,
   HOOK_SOURCE_AGENT_IDS,
   KNOWN_HOOK_AGENT_IDS,
+  MAX_REJECTED_AGENT_ID_LENGTH,
   resolveHookAgentId,
 };
