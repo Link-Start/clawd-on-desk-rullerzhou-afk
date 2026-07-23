@@ -1565,6 +1565,7 @@ function registerClaudeStatusline(options = {}) {
   // POSIX shell, while a local Windows chain would need a cross-shell
   // runner - the exact swamp buildPortableStatuslineCommand crawled out of.
   const chainRequested = options.remote === true && options.chainExisting === true;
+  const chainExplicitlyDisabled = options.remote === true && options.chainExisting === false;
   const sidecarPath = options.chainSidecarPath || statuslineChainSidecarPath(homeDir);
 
   if (existing && !existingIsOurs && !chainRequested) {
@@ -1580,11 +1581,32 @@ function registerClaudeStatusline(options = {}) {
     writeJsonAtomic(sidecarPath, { statusLine: existing });
     chainActive = true;
   } else if (existingIsOurs && existing.command.includes(STATUSLINE_CHAIN_FLAG)) {
-    // Refreshing an already-chained slot (deploy repair / startup sync):
-    // keep chaining, and never rewrite the sidecar - it holds the user's
-    // original, not ours. If the sidecar vanished, degrade to plain mode
-    // rather than chaining into nothing.
-    chainActive = !!readChainSidecarStatusLine(sidecarPath);
+    const chainedOriginal = readChainSidecarStatusLine(sidecarPath);
+    if (chainExplicitlyDisabled && chainedOriginal) {
+      // A profile toggle is an explicit deploy target, not an omitted repair
+      // preference. Turning it off restores the third-party slot and consumes
+      // the sidecar exactly like unregister; otherwise Settings would mark an
+      // off profile deployed while the remote silently kept --chain.
+      settings.statusLine = chainedOriginal;
+      writeJsonAtomic(writePath, settings);
+      try { fs.unlinkSync(sidecarPath); } catch {}
+      if (!options.silent) console.log(`Clawd: restored existing Claude Code statusline at ${settingsPath}`);
+      return {
+        installed: true,
+        changed: true,
+        skippedExisting: true,
+        chained: false,
+        restoredChained: true,
+        settingsPath,
+      };
+    }
+    // An omitted preference is a repair/startup refresh: preserve an existing
+    // chain and never rewrite its sidecar. If the sidecar vanished (or an
+    // explicit disable cannot restore it), degrade to our plain mode.
+    if (chainExplicitlyDisabled) {
+      try { fs.unlinkSync(sidecarPath); } catch {}
+    }
+    chainActive = !chainExplicitlyDisabled && !!chainedOriginal;
   }
 
   const scriptPath = asarUnpackedPath(path.resolve(__dirname, "claude-statusline.js").replace(/\\/g, "/"));

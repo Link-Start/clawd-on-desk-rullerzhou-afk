@@ -37,6 +37,7 @@ const { buildSshArgs, buildScpArgs } = require("./remote-ssh-runtime");
 const {
   resolveRemoteNodeBin,
   buildRemoteHookNodeCommand,
+  buildRemoteNodeEvalCommand,
 } = require("./remote-ssh-node");
 const { decodeShellBytes } = require("./remote-ssh-decode");
 const { detectRemoteShell } = require("./remote-ssh-shell-detect");
@@ -405,15 +406,24 @@ async function uninstallRemoteIntegrations({ profile, runtime = null, deps = {} 
       spawn,
       buildSshArgs,
       runtime,
-      verifyCache: false,
+      verifyCache: true,
     });
     if (!resolved.ok) {
       return { ok: false, stderr: resolved.message || "Remote Node.js not found" };
     }
     remoteNode = resolved.nodeBin;
   }
+  const claudeUninstall = buildRemoteHookNodeCommand(remoteNode, "uninstall.js", []);
+  // Profiles deployed before uninstall.js joined the manifest still have
+  // install.js. Fall back to its exported unregister functions so an app
+  // upgrade can clean those remotes instead of silently stranding hooks.
+  const legacyClaudeUninstall = buildRemoteNodeEvalCommand(remoteNode,
+    'const i=require(process.env.HOME+"/.claude/hooks/install.js");'
+    + 'i.unregisterHooks();'
+    + 'if(typeof i.unregisterClaudeStatusline==="function")i.unregisterClaudeStatusline();');
+  const claudeCleanupStep = `if [ -f "$HOME/.claude/hooks/uninstall.js" ]; then ${claudeUninstall}; else ${legacyClaudeUninstall}; fi`;
   const steps = [
-    buildRemoteHookNodeCommand(remoteNode, "uninstall.js", []),
+    claudeCleanupStep,
     buildRemoteHookNodeCommand(remoteNode, "codex-install.js", ["--uninstall"]),
   ];
   let lastStderr = null;

@@ -162,8 +162,9 @@ function registerRemoteSshIpc(options = {}) {
   // deployed hooks and the registered statusline would otherwise keep firing
   // into a dead forward port forever (and a chained third-party statusline
   // would never be restored). The renderer fires this BEFORE the
-  // remoteSsh.delete settings command; everything here is best-effort — the
-  // host may already be unreachable — so the delete itself never blocks.
+  // remoteSsh.delete settings command. The host may already be unreachable,
+  // so cleanup returns an explicit `uninstalled` result and lets the renderer
+  // ask whether to retain the profile for retry or force-delete it.
   handle("remoteSsh:cleanup", async (_event, payload) => {
     const id = typeof payload === "string" ? payload : (payload && payload.profileId);
     if (typeof id !== "string" || !id) {

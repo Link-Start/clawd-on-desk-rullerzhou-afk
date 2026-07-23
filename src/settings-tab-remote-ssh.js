@@ -313,29 +313,41 @@
     const deleteBtn = document.createElement("button");
     deleteBtn.className = "soft-btn remote-ssh-btn-danger";
     deleteBtn.textContent = t("remoteSshDelete");
-    deleteBtn.addEventListener("click", () => {
+    deleteBtn.addEventListener("click", async () => {
       if (!confirm(t("remoteSshDeleteConfirm").replace("{label}", profile.label))) return;
+      deleteBtn.disabled = true;
+      let cleanupSucceeded = true;
       if (window.remoteSsh) {
-        // Fire-and-forget full cleanup (disconnect + stop monitor + remote
-        // hook/statusline unregister): the IPC handler captures the profile
-        // before the delete below removes it, and everything remote-side is
-        // best-effort, so the delete never waits on an unreachable host.
         if (typeof window.remoteSsh.cleanup === "function") {
-          window.remoteSsh.cleanup(profile.id);
+          try {
+            const cleanup = await window.remoteSsh.cleanup(profile.id);
+            cleanupSucceeded = !!(cleanup && cleanup.status === "ok" && cleanup.uninstalled !== false);
+          } catch {
+            cleanupSucceeded = false;
+          }
         } else {
           window.remoteSsh.disconnect(profile.id);
         }
       }
-      callCommand("remoteSsh.delete", profile.id).then((r) => {
-        if (r && r.status === "ok") {
-          if (view.selectedProfileId === profile.id) view.selectedProfileId = null;
-          // Drop deleted profile's view-state buckets so a future profile
-          // reusing the id doesn't inherit stale logs / deploying flag.
-          view.progressLog.delete(profile.id);
-          view.deployingProfileIds.delete(profile.id);
-          ops.requestRender({ content: true });
+      if (!cleanupSucceeded && !confirm(t("remoteSshDeleteCleanupFailedConfirm"))) {
+        deleteBtn.disabled = false;
+        return;
+      }
+      try {
+        const r = await callCommand("remoteSsh.delete", profile.id);
+        if (!r || r.status !== "ok") {
+          deleteBtn.disabled = false;
+          return;
         }
-      });
+        if (view.selectedProfileId === profile.id) view.selectedProfileId = null;
+        // Drop deleted profile's view-state buckets so a future profile
+        // reusing the id doesn't inherit stale logs / deploying flag.
+        view.progressLog.delete(profile.id);
+        view.deployingProfileIds.delete(profile.id);
+        ops.requestRender({ content: true });
+      } catch {
+        deleteBtn.disabled = false;
+      }
     });
     header.appendChild(deleteBtn);
 

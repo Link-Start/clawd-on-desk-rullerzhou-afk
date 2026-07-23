@@ -312,14 +312,18 @@ function createAccountQuotaStore(options = {}) {
   //
   // options.mergeSources: opt-in for the "same subscription on every
   // machine" setup — collapse all sources into one unlabeled entry, taking
-  // the freshest report per provider (work remotely and the remote's
-  // numbers win; work locally and the local ones do). Deliberately NOT the
+  // the freshest live report independently for each provider window.
+  // Deliberately NOT the
   // default: with different subscriptions per machine a merged view lies,
   // which is why the per-source shape exists in the first place.
   function snapshot(options = {}) {
     const nowMs = now();
     pruneStale(nowMs);
     const out = [];
+    // Keep merge arbitration on the exact observation time while exposing
+    // only the minute-quantized stamp to renderers/signatures. A WeakMap
+    // avoids leaking an internal field into snapshots.
+    const rawLastSeenAt = new WeakMap();
     for (const record of sources.values()) {
       const entry = { host: record.host };
       let hasAny = false;
@@ -328,13 +332,15 @@ function createAccountQuotaStore(options = {}) {
         if (!stored) continue;
         const group = expireBuckets(stored.group, nowMs);
         if (!group) continue;
-        entry[providerKey] = {
+        const provider = {
           group,
           updatedAt: stored.updatedAt,
           // Minute-quantized so an actively-confirming reporter changes the
           // snapshot (and its signature) at most once a minute.
           lastSeenAt: Math.floor(stored.lastSeenAt / SEEN_QUANTUM_MS) * SEEN_QUANTUM_MS,
         };
+        rawLastSeenAt.set(provider, stored.lastSeenAt);
+        entry[providerKey] = provider;
         hasAny = true;
       }
       if (hasAny) out.push(entry);
@@ -349,26 +355,55 @@ function createAccountQuotaStore(options = {}) {
     const merged = { host: null };
     let hasAny = false;
     for (const providerKey of QUOTA_PROVIDER_KEYS) {
-      let best = null;
-      let bestLive = false;
-      for (const entry of out) {
-        const candidate = entry[providerKey];
-        if (!candidate) continue;
-        // Arbitrate by lastSeenAt (an alive reporter confirming unchanged
-        // numbers must keep winning over a machine that changed a value
-        // once, long ago), and prefer candidates that still have a live
-        // bucket — a source whose windows all reset says "nothing", not
-        // "zero", and must not mask a source with real current numbers.
-        const live = Object.values(candidate.group).some((bucket) => bucket.expired !== true);
-        if (!best
-          || (live && !bestLive)
-          || (live === bestLive && Number(candidate.lastSeenAt) > Number(best.lastSeenAt))) {
-          best = candidate;
-          bestLive = live;
+      const providerCandidates = out
+        .map((entry) => entry[providerKey])
+        .filter(Boolean);
+      const hasLiveProvider = providerCandidates.some((candidate) =>
+        Object.values(candidate.group).some((bucket) => bucket.expired !== true));
+      // When at least one reporter still has live data, a reporter whose
+      // entire provider has expired says "nothing" and contributes no stale
+      // sibling fields. Mixed reporters remain eligible so their live bucket
+      // can win independently while their expired sibling loses to live data.
+      const eligibleCandidates = hasLiveProvider
+        ? providerCandidates.filter((candidate) =>
+          Object.values(candidate.group).some((bucket) => bucket.expired !== true))
+        : providerCandidates;
+      const group = {};
+      const selected = [];
+      for (const field of QUOTA_PROVIDER_FIELDS[providerKey]) {
+        let best = null;
+        let bestLive = false;
+        let bestSeenAt = -Infinity;
+        for (const candidate of eligibleCandidates) {
+          const bucket = candidate && candidate.group[field];
+          if (!bucket) continue;
+          // Arbitrate each window independently. A source with a live 5h
+          // bucket but an expired weekly bucket must not mask another
+          // source's still-live weekly observation.
+          const live = bucket.expired !== true;
+          const seenAt = Number(rawLastSeenAt.get(candidate));
+          if (!best
+            || (live && !bestLive)
+            || (live === bestLive && seenAt > bestSeenAt)) {
+            best = { candidate, bucket };
+            bestLive = live;
+            bestSeenAt = seenAt;
+          }
+        }
+        if (best) {
+          group[field] = best.bucket;
+          selected.push(best.candidate);
         }
       }
-      if (best) {
-        merged[providerKey] = best;
+      if (selected.length) {
+        merged[providerKey] = {
+          group,
+          updatedAt: Math.max(...selected.map((candidate) => Number(candidate.updatedAt))),
+          // A merged provider can contain windows from different sources.
+          // Age it by the oldest selected observation so an older sibling
+          // never borrows another bucket's fresh label.
+          lastSeenAt: Math.min(...selected.map((candidate) => Number(candidate.lastSeenAt))),
+        };
         hasAny = true;
       }
     }

@@ -1386,6 +1386,16 @@ describe("settings renderer browser environment", () => {
     }
   });
 
+  it("waits for remote cleanup before deleting a profile and warns on incomplete uninstall", () => {
+    const source = fs.readFileSync(path.join(SRC_DIR, "settings-tab-remote-ssh.js"), "utf8");
+    const cleanupIndex = source.indexOf("await window.remoteSsh.cleanup(profile.id)");
+    const deleteIndex = source.indexOf('await callCommand("remoteSsh.delete", profile.id)');
+    assert.ok(cleanupIndex >= 0, "delete flow must await remote cleanup");
+    assert.ok(deleteIndex > cleanupIndex, "profile removal must happen after cleanup resolves");
+    assert.ok(source.includes('cleanup.uninstalled !== false'));
+    assert.ok(source.includes('remoteSshDeleteCleanupFailedConfirm'));
+  });
+
   it("keeps About contributors visible and includes verified GitHub contributors", () => {
     const aboutSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-about.js"), "utf8");
     const coreSource = fs.readFileSync(SETTINGS_UI_CORE, "utf8");

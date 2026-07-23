@@ -212,15 +212,13 @@ const HUD_QUOTA_PROVIDER_BUCKETS = {
   codexQuota: ["codexFiveHour", "codexWeekly"],
 };
 
-function hasLiveQuotaBucket(providerEntry) {
-  const group = providerEntry && providerEntry.group;
-  if (!group || typeof group !== "object") return false;
-  // Expired buckets still render (as a dimmed reset state), so any bucket
-  // at all means the strip will draw a row for this provider.
-  for (const bucket of Object.values(group)) {
-    if (bucket && typeof bucket === "object") return true;
-  }
-  return false;
+function sourceHasDrawableQuota(source) {
+  if (!source || typeof source !== "object") return false;
+  return Object.entries(HUD_QUOTA_PROVIDER_BUCKETS).some(([providerKey, bucketFields]) => {
+    const entry = source[providerKey];
+    const group = entry && entry.group;
+    return !!(group && bucketFields.some((field) => group[field] && typeof group[field] === "object"));
+  });
 }
 
 function countQuotaSources(snapshot, showQuota) {
@@ -229,8 +227,7 @@ function countQuotaSources(snapshot, showQuota) {
   let count = 0;
   for (const source of sources) {
     if (!source || typeof source !== "object") continue;
-    if ([source.antigravityQuota, source.claudeQuota, source.codexQuota]
-      .some((entry) => hasLiveQuotaBucket(entry))) {
+    if (sourceHasDrawableQuota(source)) {
       count += 1;
     }
   }
@@ -252,9 +249,7 @@ function computeQuotaStripHeight(quotaSourceRows) {
 function computeQuotaStripMinWidth(snapshot, showQuota) {
   if (showQuota === false) return 0;
   const sources = snapshot && Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [];
-  const drawable = sources.filter((source) => source && typeof source === "object"
-    && [source.antigravityQuota, source.claudeQuota, source.codexQuota]
-      .some((entry) => hasLiveQuotaBucket(entry)));
+  const drawable = sources.filter(sourceHasDrawableQuota);
   if (!drawable.length) return 0;
   const multiSource = drawable.length > 1;
   let widest = 0;
@@ -262,7 +257,7 @@ function computeQuotaStripMinWidth(snapshot, showQuota) {
     const pillWidths = [];
     for (const [providerKey, bucketFields] of Object.entries(HUD_QUOTA_PROVIDER_BUCKETS)) {
       const entry = source[providerKey];
-      if (!hasLiveQuotaBucket(entry)) continue;
+      if (!entry || !entry.group) continue;
       const donuts = bucketFields
         .filter((field) => entry.group[field] && typeof entry.group[field] === "object")
         .length;

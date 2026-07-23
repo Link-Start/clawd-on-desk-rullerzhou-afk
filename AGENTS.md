@@ -159,7 +159,7 @@ Copilot CLI 同步走 `<COPILOT_HOME 或 ~/.copilot>/hooks/hooks.json`，marker-
 - CodeBuddy PermissionRequest hook 的所有权只认本机 managed URL 或 marker `clawd-on-desk.permission.v1`；纯 `name:"clawd"` 不能触发改写/删除。裸 CLI 和 WSL 默认 preserve，Settings/startup/repair 必须显式传 local/custom permission target
 - Remote SSH 的远端 Node 探测要求 Node >= 14；`scripts/remote-deploy.sh` 与 `src/remote-ssh-node.js` 的 probe 顺序、候选路径、版本判断和输出字段必须保持行为对齐
 - 注册 Claude Code hook 时只能追加，不能覆盖用户已有 hook 数组
-- 注册 Claude Code statusLine 时只接管空槽或自己的槽（marker `claude-statusline.js`）；远程部署可用 profile 的 `chainStatusline` opt-in 串联既有第三方 statusline（`--chain-existing`），除此之外绝不触碰用户的 statusLine。订阅配额只能走 `metadata_only` POST → `updateSessionMetadata`（盖 `metadataUpdatedAt` 章），不要把 quota 塞进 `updateSession` opts——那样不盖新鲜度章，跨机器 freshest-wins 仲裁会选错
+- 注册 Claude Code statusLine 时只接管空槽或自己的槽（marker `claude-statusline.js`）；远程部署可用 profile 的 `chainStatusline` opt-in 串联既有第三方 statusline（`--chain-existing`），显式关闭时必须从 sidecar 恢复原 statusLine。订阅配额通过 `metadata_only` POST 进入 session-independent `updateAccountQuota` per-source store；不要把 quota 塞进 `updateSession` opts，也不要以 session 存活作为摄入前提
 - Copilot CLI hooks 走按需自动同步：`hooks/copilot-install.js` 在本地启动仅当 Copilot CLI 已安装且已启用时调用；`scripts/remote-deploy.sh --remote` 仍会在远端部署路径里调用。路径解析尊重 `COPILOT_HOME` env（trimmed 非空才生效，否则 fallback 到 `~/.copilot`）；`hooks/copilot-hook.js` 的 session-state resolver 同样走 env
 - 禁用 agent 不应卸载 hooks / plugins / extensions：只停止对应 monitor、清理 session / bubble、让 HTTP hook 入口快速 fallback；重新启用未安装 agent 不触发本机 integration sync。卸载集成必须走 Settings Agent 页的 Uninstall / 对应 uninstall 命令，并同时清掉 `integrationInstalled`
 - Kiro 的 `sessionId="default"` 会复用；session alias key 必须按 cwd scope 区分，同时保留旧 `local|kiro-cli|default` 只读 fallback

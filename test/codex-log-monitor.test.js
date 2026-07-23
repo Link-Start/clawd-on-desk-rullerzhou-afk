@@ -332,6 +332,51 @@ describe("CodexLogMonitor", () => {
     }, 300);
   });
 
+  it("backfill seeds account quota even when a recovered root question suppresses the state snapshot", () => {
+    const testFile = path.join(dateDir, TEST_FILENAME);
+    const timestamp = new Date().toISOString();
+    const resetAt = Math.floor((Date.now() + 60 * 60 * 1000) / 1000);
+    fs.writeFileSync(testFile, [
+      JSON.stringify({ timestamp, type: "session_meta", payload: { cwd: "/projects/pending-quota" } }),
+      JSON.stringify({ timestamp, type: "event_msg", payload: { type: "task_started" } }),
+      JSON.stringify({
+        timestamp,
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: { primary: { used_percent: 12, resets_at: resetAt } },
+        },
+      }),
+      JSON.stringify({
+        timestamp,
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "request_user_input",
+          call_id: "call_pending_quota",
+          arguments: JSON.stringify({ questions: [{ id: "q", header: "Choice", question: "Pick one", options: [] }] }),
+        },
+      }),
+    ].join("\n") + "\n");
+    const oldTime = new Date(Date.now() - 60000);
+    fs.utimesSync(testFile, oldTime, oldTime);
+
+    const states = [];
+    const requests = [];
+    monitor = new CodexLogMonitor(makeConfig(tmpDir), (sid, state, event, extra) => {
+      states.push({ sid, state, event, extra });
+    }, {
+      onUserInputRequest: (...args) => requests.push(args),
+    });
+    monitor._pollFile(testFile, path.basename(testFile));
+
+    assert.strictEqual(requests.length, 1);
+    assert.strictEqual(states.length, 1, "only quota metadata should emit beside the question card");
+    assert.strictEqual(states[0].event, "event_msg:token_count");
+    assert.strictEqual(states[0].state, "idle");
+    assert.strictEqual(states[0].extra.codexQuota.codexFiveHour.usedPercent, 12);
+  });
+
   it("keeps a subagent's normal headless backfill snapshot when it has a pending question within the active window", (_, done) => {
     // Within ACTIVE_SESSION_WINDOW_MS (mtime 3 min old): discovered through
     // the normal slow-write-cadence path, so it runs the full _pollFile

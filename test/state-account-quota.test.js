@@ -255,6 +255,44 @@ describe("account quota store", () => {
     assert.strictEqual(mergedClaude.claudeFiveHour, undefined);
   });
 
+  it("merge arbitration selects each bucket independently across mixed live and expired sources", () => {
+    let nowMs = 60000;
+    const store = createAccountQuotaStore({ persistPath: null, now: () => nowMs });
+    store.update("remote", {
+      codexQuota: {
+        codexFiveHour: { usedPercent: 20, resetAt: 1000000 },
+        codexWeekly: { usedPercent: 70, resetAt: 1000000 },
+      },
+    });
+    nowMs = 120000;
+    store.update(null, {
+      codexQuota: {
+        codexFiveHour: { usedPercent: 25, resetAt: 1000000 },
+        codexWeekly: { usedPercent: 80, resetAt: 150000 },
+      },
+    });
+    nowMs = 180000;
+    store.update(null, { codexQuota: { codexFiveHour: { usedPercent: 30, resetAt: 1000000 } } });
+
+    const provider = store.snapshot({ mergeSources: true })[0].codexQuota;
+    assert.strictEqual(provider.group.codexFiveHour.usedPercent, 30, "fresh local 5h wins");
+    assert.strictEqual(provider.group.codexWeekly.usedPercent, 70, "live remote weekly beats expired local weekly");
+    assert.strictEqual(provider.group.codexWeekly.expired, undefined);
+    assert.strictEqual(provider.lastSeenAt, 60000, "mixed provider is aged by its oldest selected source");
+  });
+
+  it("merge arbitration uses exact observation time inside a minute", () => {
+    let nowMs = 61000;
+    const store = createAccountQuotaStore({ persistPath: null, now: () => nowMs });
+    store.update(null, { claudeQuota: { claudeWeekly: { usedPercent: 10, resetAt: 1000000 } } });
+    nowMs = 119000;
+    store.update("remote", { claudeQuota: { claudeWeekly: { usedPercent: 90, resetAt: 1000000 } } });
+
+    const provider = store.snapshot({ mergeSources: true })[0].claudeQuota;
+    assert.strictEqual(provider.group.claudeWeekly.usedPercent, 90);
+    assert.strictEqual(provider.lastSeenAt, 60000, "renderer-facing freshness stays minute-quantized");
+  });
+
   it("prunes long-expired buckets, unconfirmed providers, and emptied sources", () => {
     const { EXPIRED_BUCKET_DROP_AFTER_MS, PROVIDER_RETENTION_MS } = require("../src/state-account-quota");
     let nowMs = 1000000;

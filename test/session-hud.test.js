@@ -433,6 +433,22 @@ describe("session HUD layout", () => {
     assert.strictEqual(countQuotaSources(snapshot, false), 0, "hudShowQuota off disables the strip");
   });
 
+  it("does not count Antigravity third-party-only buckets that the HUD renderer cannot draw", () => {
+    const snapshot = {
+      sessions: [],
+      accountQuota: [{
+        host: "remote",
+        antigravityQuota: {
+          group: { thirdPartyWeekly: { usedPercent: 52, resetAt: Date.now() + 3600000 } },
+          updatedAt: 1,
+        },
+      }],
+    };
+    assert.strictEqual(countQuotaSources(snapshot, true), 0);
+    assert.strictEqual(computeQuotaStripMinWidth(snapshot, true), 0);
+    assert.strictEqual(evaluateBaseEligible({ snapshot, showQuota: true }), false);
+  });
+
   it("quota alone makes the HUD base-eligible (check-before-work with zero sessions)", () => {
     const quotaOnly = {
       sessions: [],

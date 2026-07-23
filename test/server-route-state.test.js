@@ -205,6 +205,7 @@ describe("server-route-state POST", () => {
           options: [{ label: "Focused", description: "One module" }],
         }],
       },
+      codex_quota: { codexWeekly: { usedPercent: 43 } },
     }));
 
     assert.strictEqual(request.statusCode, 200);
@@ -231,12 +232,18 @@ describe("server-route-state POST", () => {
     assert.strictEqual(request.calls.updateSession[0][1], "notification");
     assert.strictEqual(request.calls.updateSession[0][2], "CodexUserInputRequest");
     assert.strictEqual(request.calls.updateSession[0][3].transientPermissionEvent, true);
+    assert.deepStrictEqual(request.calls.updateAccountQuota, [[
+      "remote-box",
+      { antigravityQuota: null, claudeQuota: null, codexQuota: { codexWeekly: { usedPercent: 43 } } },
+    ]]);
 
     const resolved = await callStatePost(JSON.stringify({
       state: "idle",
       session_id: "codex:remote",
       event: "CodexUserInputResolved",
       agent_id: "codex",
+      host: "remote-box",
+      codex_quota: { codexFiveHour: { usedPercent: 12 } },
       codex_user_input: { phase: "resolved", call_id: "call_remote" },
     }));
     assert.strictEqual(resolved.statusCode, 200);
@@ -244,6 +251,10 @@ describe("server-route-state POST", () => {
       "codex:remote", "call_remote", "codex-user-input-resolved",
     ]]);
     assert.deepStrictEqual(resolved.calls.updateSession, []);
+    assert.deepStrictEqual(resolved.calls.updateAccountQuota, [[
+      "remote-box",
+      { antigravityQuota: null, claudeQuota: null, codexQuota: { codexFiveHour: { usedPercent: 12 } } },
+    ]]);
   });
 
   it("forwards Kimi Code permission context to updateSession (#563)", async () => {

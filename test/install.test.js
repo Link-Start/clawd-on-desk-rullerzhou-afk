@@ -1914,7 +1914,7 @@ describe("Claude Code statusline installer", () => {
     );
   });
 
-  it("remote --chain-existing: re-register keeps the chain and never clobbers the sidecar", () => {
+  it("remote --chain-existing: an omitted repair preference keeps the chain and sidecar", () => {
     const settingsPath = makeTempSettings({ statusLine: NASTY_STATUSLINE });
     const chainSidecarPath = makeChainSidecarPath();
     const opts = {
@@ -1928,8 +1928,8 @@ describe("Claude Code statusline installer", () => {
     };
     registerClaudeStatusline(opts);
 
-    // Deploy repair without the opt-in flag: chain must survive.
-    const again = registerClaudeStatusline({ ...opts, chainExisting: false });
+    const { chainExisting: _omitted, ...repairOpts } = opts;
+    const again = registerClaudeStatusline(repairOpts);
 
     assert.strictEqual(again.changed, false);
     assert.strictEqual(again.chained, true);
@@ -1937,6 +1937,29 @@ describe("Claude Code statusline installer", () => {
       JSON.parse(fs.readFileSync(chainSidecarPath, "utf8")).statusLine,
       NASTY_STATUSLINE
     );
+  });
+
+  it("remote --chain-existing: explicit false restores the original statusline", () => {
+    const settingsPath = makeTempSettings({ statusLine: NASTY_STATUSLINE });
+    const chainSidecarPath = makeChainSidecarPath();
+    const opts = {
+      silent: true,
+      settingsPath,
+      chainSidecarPath,
+      remote: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    };
+    registerClaudeStatusline({ ...opts, chainExisting: true });
+
+    const result = registerClaudeStatusline({ ...opts, chainExisting: false });
+
+    assert.strictEqual(result.changed, true);
+    assert.strictEqual(result.chained, false);
+    assert.strictEqual(result.restoredChained, true);
+    assert.strictEqual(result.skippedExisting, true);
+    assert.deepStrictEqual(readSettings(settingsPath).statusLine, NASTY_STATUSLINE);
+    assert.strictEqual(fs.existsSync(chainSidecarPath), false);
   });
 
   it("remote --chain-existing: unregister restores the original statusLine object and consumes the sidecar", () => {
