@@ -654,6 +654,122 @@ function createKeyboardEventForTest(key) {
   };
 }
 
+function loadRemoteSshTabForTest({
+  snapshot,
+  cleanup = () => Promise.resolve({ status: "ok", uninstalled: true }),
+  command = () => Promise.resolve({ status: "ok" }),
+  confirm = () => true,
+} = {}) {
+  const body = new FakeElement("body");
+  const content = new FakeElement("main");
+  content.id = "content";
+  body.appendChild(content);
+
+  const document = {
+    body,
+    createElement: (tagName) => new FakeElement(tagName),
+    getElementById(id) {
+      if (id === "content") return content;
+      return null;
+    },
+  };
+  const statusListeners = [];
+  const progressListeners = [];
+  const cleanupCalls = [];
+  const commandCalls = [];
+  const remoteSsh = {
+    onStatusChanged(cb) {
+      statusListeners.push(cb);
+      return () => {};
+    },
+    onProgress(cb) {
+      progressListeners.push(cb);
+      return () => {};
+    },
+    cleanup(profileId) {
+      cleanupCalls.push(profileId);
+      return cleanup(profileId);
+    },
+    connect: () => Promise.resolve({ status: "ok" }),
+    disconnect: () => Promise.resolve({ status: "ok" }),
+    authenticate: () => Promise.resolve({ status: "ok" }),
+    openTerminal: () => Promise.resolve({ status: "ok" }),
+    deploy: () => Promise.resolve({ status: "ok" }),
+  };
+  const context = {
+    console,
+    navigator: { platform: "Win32" },
+    localStorage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    document,
+    requestAnimationFrame: (cb) => {
+      cb();
+      return 1;
+    },
+    setTimeout,
+    confirm,
+    window: null,
+    globalThis: null,
+    remoteSsh,
+    settingsAPI: {
+      command(action, payload) {
+        commandCalls.push({ action, payload });
+        return command(action, payload);
+      },
+    },
+    ClawdSettingsSizeSlider: {
+      SIZE_UI_MIN: 1,
+      SIZE_UI_MAX: 100,
+      SIZE_TICK_VALUES: [25, 50, 75, 100],
+      SIZE_SLIDER_THUMB_DIAMETER: 18,
+      prefsSizeToUi: (value) => value,
+      clampSizeUi: (value) => value,
+      sizeUiToPct: (value) => value,
+      getSizeSliderAnchorPx: () => 0,
+      createSizeSliderController: () => ({}),
+    },
+    ClawdSettingsI18n: {
+      STRINGS: loadSettingsI18nForTest(),
+      CONTRIBUTORS: [],
+      MAINTAINERS: [],
+    },
+  };
+  context.window = context;
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(SETTINGS_ANIM_OVERRIDES_MERGE, "utf8"), context);
+  vm.runInContext(fs.readFileSync(SETTINGS_UI_CORE, "utf8"), context);
+  vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-tab-remote-ssh.js"), "utf8"), context);
+
+  const core = context.ClawdSettingsCore;
+  core.state.snapshot = snapshot || { lang: "en", remoteSsh: { profiles: [] } };
+  core.state.activeTab = "remote-ssh";
+  context.ClawdSettingsTabRemoteSsh.init(core);
+
+  function renderContent() {
+    core.ops.clearMountedControls();
+    content.innerHTML = "";
+    core.tabs["remote-ssh"].render(content, core);
+  }
+  core.ops.installRenderHooks({ content: renderContent });
+  renderContent();
+
+  return {
+    content,
+    cleanupCalls,
+    commandCalls,
+    renderContent,
+    emitStatus(payload) {
+      for (const listener of statusListeners) listener(payload);
+    },
+    emitProgress(payload) {
+      for (const listener of progressListeners) listener(payload);
+    },
+  };
+}
+
 function findAncestorByClass(el, className) {
   let current = el;
   while (current) {
@@ -1394,6 +1510,80 @@ describe("settings renderer browser environment", () => {
     assert.ok(deleteIndex > cleanupIndex, "profile removal must happen after cleanup resolves");
     assert.ok(source.includes('cleanup.uninstalled !== false'));
     assert.ok(source.includes('remoteSshDeleteCleanupFailedConfirm'));
+  });
+
+  it("keeps remote profile deletion single-flight across runtime rerenders", async () => {
+    const cleanupDeferred = createDeferred();
+    let confirmCalls = 0;
+    const profile = {
+      id: "remote-1",
+      label: "Build host",
+      host: "builder.example.com",
+      remoteForwardPort: 23333,
+      lastDeployedAt: Date.now(),
+    };
+    const harness = loadRemoteSshTabForTest({
+      snapshot: { lang: "en", remoteSsh: { profiles: [profile] } },
+      cleanup: () => cleanupDeferred.promise,
+      confirm: () => {
+        confirmCalls++;
+        return true;
+      },
+    });
+
+    harness.content.querySelector(".remote-ssh-card").dispatchEvent({ type: "click" });
+    const originalDelete = harness.content.querySelector(".remote-ssh-btn-danger");
+    assert.ok(originalDelete);
+    assert.strictEqual(originalDelete.disabled, false);
+
+    originalDelete.dispatchEvent({ type: "click" });
+    assert.deepStrictEqual(harness.cleanupCalls, [profile.id]);
+    assert.strictEqual(confirmCalls, 1);
+
+    const pendingDelete = harness.content.querySelector(".remote-ssh-btn-danger");
+    assert.notStrictEqual(pendingDelete, originalDelete, "starting cleanup rebuilds the detail view");
+    assert.strictEqual(pendingDelete.disabled, true);
+
+    harness.emitStatus({ profileId: profile.id, status: "idle" });
+    const afterStatusRerender = harness.content.querySelector(".remote-ssh-btn-danger");
+    assert.notStrictEqual(afterStatusRerender, pendingDelete);
+    assert.strictEqual(afterStatusRerender.disabled, true, "runtime status repaint preserves pending state");
+
+    // FakeElement permits dispatching a disabled button, unlike the browser.
+    // The handler guard must still prevent duplicate destructive IPC work.
+    afterStatusRerender.dispatchEvent({ type: "click" });
+    assert.deepStrictEqual(harness.cleanupCalls, [profile.id]);
+    assert.strictEqual(confirmCalls, 1);
+
+    cleanupDeferred.resolve({ status: "ok", uninstalled: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepStrictEqual(harness.commandCalls, [{ action: "remoteSsh.delete", payload: profile.id }]);
+    assert.strictEqual(harness.content.querySelector(".remote-ssh-detail"), null);
+  });
+
+  it("re-enables remote profile deletion when incomplete cleanup is kept for retry", async () => {
+    const confirmations = [true, false];
+    const profile = {
+      id: "remote-retry",
+      label: "Retry host",
+      host: "retry.example.com",
+      remoteForwardPort: 23334,
+      lastDeployedAt: Date.now(),
+    };
+    const harness = loadRemoteSshTabForTest({
+      snapshot: { lang: "en", remoteSsh: { profiles: [profile] } },
+      cleanup: () => Promise.resolve({ status: "ok", uninstalled: false }),
+      confirm: () => confirmations.shift(),
+    });
+
+    harness.content.querySelector(".remote-ssh-card").dispatchEvent({ type: "click" });
+    harness.content.querySelector(".remote-ssh-btn-danger").dispatchEvent({ type: "click" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepStrictEqual(harness.cleanupCalls, [profile.id]);
+    assert.deepStrictEqual(harness.commandCalls, [], "cancelled force-delete keeps the profile");
+    assert.ok(harness.content.querySelector(".remote-ssh-detail"));
+    assert.strictEqual(harness.content.querySelector(".remote-ssh-btn-danger").disabled, false);
   });
 
   it("keeps About contributors visible and includes verified GitHub contributors", () => {

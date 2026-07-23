@@ -22,9 +22,8 @@
   //
   // progressLog is a Map<profileId, Array<event>> so concurrent deploys on
   // multiple profiles each get their own log; the detail panel renders only
-  // the slice belonging to its profile. deployingProfileIds is a Set so the
-  // Deploy button on each card knows independently whether THAT profile is
-  // mid-deploy (one profile finishing must not unblock another's button).
+  // the slice belonging to its profile. The per-profile in-flight Sets keep
+  // destructive/action buttons disabled across status/progress rerenders.
   const view = {
     selectedProfileId: null,
     editing: null,        // profile snapshot for edit form, or null
@@ -32,6 +31,7 @@
     progressLog: new Map(),     // profileId → Array<event>
     listenerInstalled: false,
     deployingProfileIds: new Set(),
+    deletingProfileIds: new Set(),
   };
 
   const PROGRESS_LOG_MAX = 50;
@@ -313,40 +313,40 @@
     const deleteBtn = document.createElement("button");
     deleteBtn.className = "soft-btn remote-ssh-btn-danger";
     deleteBtn.textContent = t("remoteSshDelete");
+    deleteBtn.disabled = view.deletingProfileIds.has(profile.id);
     deleteBtn.addEventListener("click", async () => {
+      if (view.deletingProfileIds.has(profile.id)) return;
       if (!confirm(t("remoteSshDeleteConfirm").replace("{label}", profile.label))) return;
-      deleteBtn.disabled = true;
-      let cleanupSucceeded = true;
-      if (window.remoteSsh) {
-        if (typeof window.remoteSsh.cleanup === "function") {
-          try {
-            const cleanup = await window.remoteSsh.cleanup(profile.id);
-            cleanupSucceeded = !!(cleanup && cleanup.status === "ok" && cleanup.uninstalled !== false);
-          } catch {
-            cleanupSucceeded = false;
-          }
-        } else {
-          window.remoteSsh.disconnect(profile.id);
-        }
-      }
-      if (!cleanupSucceeded && !confirm(t("remoteSshDeleteCleanupFailedConfirm"))) {
-        deleteBtn.disabled = false;
-        return;
-      }
+      view.deletingProfileIds.add(profile.id);
       try {
-        const r = await callCommand("remoteSsh.delete", profile.id);
-        if (!r || r.status !== "ok") {
-          deleteBtn.disabled = false;
-          return;
+        ops.requestRender({ content: true });
+        let cleanupSucceeded = true;
+        if (window.remoteSsh) {
+          if (typeof window.remoteSsh.cleanup === "function") {
+            try {
+              const cleanup = await window.remoteSsh.cleanup(profile.id);
+              cleanupSucceeded = !!(cleanup && cleanup.status === "ok" && cleanup.uninstalled !== false);
+            } catch {
+              cleanupSucceeded = false;
+            }
+          } else {
+            window.remoteSsh.disconnect(profile.id);
+          }
         }
+        if (!cleanupSucceeded && !confirm(t("remoteSshDeleteCleanupFailedConfirm"))) return;
+        const r = await callCommand("remoteSsh.delete", profile.id);
+        if (!r || r.status !== "ok") return;
         if (view.selectedProfileId === profile.id) view.selectedProfileId = null;
         // Drop deleted profile's view-state buckets so a future profile
-        // reusing the id doesn't inherit stale logs / deploying flag.
+        // reusing the id doesn't inherit stale logs / in-flight flags.
         view.progressLog.delete(profile.id);
         view.deployingProfileIds.delete(profile.id);
+      } finally {
+        // The original button may have been detached by a runtime status
+        // update while cleanup awaited SSH. Keep the source of truth in view
+        // state and rebuild so the currently-mounted button reflects it.
+        view.deletingProfileIds.delete(profile.id);
         ops.requestRender({ content: true });
-      } catch {
-        deleteBtn.disabled = false;
       }
     });
     header.appendChild(deleteBtn);
