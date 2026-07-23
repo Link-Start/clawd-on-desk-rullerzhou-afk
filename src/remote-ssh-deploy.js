@@ -60,6 +60,8 @@ const HOOK_FILES = [
   "codex-rate-limits.js",
   "quota-bucket.js",
   "state-payload-size.js",
+  "claude-stop-disposition.js",
+  "session-recovery-lease.js",
   "clawd-hook.js",
   "install.js",
   "uninstall.js",

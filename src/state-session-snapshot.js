@@ -218,7 +218,8 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
   const state = (session && session.state) || "idle";
   const hiddenFromHud = shouldAutoClearDetachedSession(session, badge, options)
     || isSupersededLocalCodexProcessSession(id, session, options.latestLocalCodexProcessIds);
-  const focusTarget = session && !session.headless && state !== "sleeping" && !hiddenFromHud
+  const startupRecovered = !!(session && session.startupRecovered === true);
+  const focusTarget = session && !session.headless && !startupRecovered && state !== "sleeping" && !hiddenFromHud
     ? getSessionFocusTarget({ ...(session || {}), id }, {
       osPlatform: options.focusHostPlatform || options.osPlatform,
     })
@@ -230,6 +231,7 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     agentName: resolveAgentDisplayName(agentId),
     iconUrl: getAgentIconUrl(agentId),
     state,
+    startupRecovered,
     badge,
     hiddenFromHud,
     hasAlias: !!(alias && typeof alias.title === "string" && alias.title),
@@ -412,6 +414,7 @@ function sessionSnapshotSignature(snapshot) {
     sessions: snapshot.sessions.map((entry) => ({
       id: entry.id,
       state: entry.state,
+      startupRecovered: !!entry.startupRecovered,
       badge: entry.badge,
       hasAlias: entry.hasAlias,
       sessionTitle: entry.sessionTitle,

@@ -146,6 +146,8 @@ FILES=(
   "$HOOKS_DIR/codex-rate-limits.js"
   "$HOOKS_DIR/quota-bucket.js"
   "$HOOKS_DIR/state-payload-size.js"
+  "$HOOKS_DIR/claude-stop-disposition.js"
+  "$HOOKS_DIR/session-recovery-lease.js"
   "$HOOKS_DIR/clawd-hook.js"
   "$HOOKS_DIR/install.js"
   "$HOOKS_DIR/uninstall.js"

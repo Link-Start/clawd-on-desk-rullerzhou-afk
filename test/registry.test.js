@@ -181,6 +181,54 @@ describe("Agent Registry", () => {
     assert.ok(agentIds.includes("hermes"));
   });
 
+  it("requires every agent to declare an explicit startup recovery surface", () => {
+    for (const agent of registry.getAllAgents()) {
+      assert.ok(
+        Object.prototype.hasOwnProperty.call(agent, "startupRecoveryProcessNames"),
+        `${agent.id} must explicitly declare startupRecoveryProcessNames`
+      );
+      for (const platform of ["win", "mac", "linux"]) {
+        assert.ok(
+          Array.isArray(agent.startupRecoveryProcessNames[platform]),
+          `${agent.id} must declare startupRecoveryProcessNames.${platform}`
+        );
+      }
+    }
+
+    const startupAgentIds = new Set(
+      registry.getStartupRecoveryProcessNames().map((entry) => entry.agentId)
+    );
+    assert.ok(startupAgentIds.has("mimocode"));
+    assert.ok(startupAgentIds.has("qwen-code"));
+    assert.ok(startupAgentIds.has("reasonix"));
+    assert.ok(!startupAgentIds.has("cursor-agent"));
+    assert.ok(!startupAgentIds.has("qoderwork"));
+    assert.ok(!startupAgentIds.has("workbuddy"));
+  });
+
+  it("keeps ambiguous GUI and POSIX process names out of startup recovery", () => {
+    assert.deepStrictEqual(
+      registry.getAgent("cursor-agent").startupRecoveryProcessNames,
+      { win: [], mac: [], linux: [] }
+    );
+    assert.deepStrictEqual(
+      registry.getAgent("qoderwork").startupRecoveryProcessNames,
+      { win: [], mac: [], linux: [] }
+    );
+    assert.deepStrictEqual(
+      registry.getAgent("workbuddy").startupRecoveryProcessNames,
+      { win: [], mac: [], linux: [] }
+    );
+    assert.deepStrictEqual(
+      registry.getAgent("pi").startupRecoveryProcessNames,
+      { win: ["pi.exe"], mac: [], linux: [] }
+    );
+    assert.deepStrictEqual(
+      registry.getAgent("qoder").startupRecoveryProcessNames.win,
+      ["qodercli.exe", "qoder-cli.exe"]
+    );
+  });
+
   it("should have correct capabilities", () => {
     const cc = registry.getAgent("claude-code");
     assert.strictEqual(cc.capabilities.httpHook, true);

@@ -9,6 +9,7 @@ const { postStateToRunningServer, readHostPrefix, resolveWslDistro } = require("
 const { fitStateBodyToByteBudget } = require("./state-payload-size");
 const { extractClaudeContextUsageFromEntries } = require("./context-usage");
 const { createPidResolver, readStdinJsonDetailed, getPlatformConfig } = require("./shared-process");
+const { updateRecoveryLeaseFromStateBody } = require("./session-recovery-lease");
 // #634: the pid cache + lifecycle orchestration is owned by the shared resolver
 // now (hooks/shared-process.js); this adapter no longer touches pid-cache,
 // processAlive, or isWin directly.
@@ -398,6 +399,18 @@ function applyResolvedFields(body, resolved, event) {
   if (shouldReportForegroundWtHwnd(event) && foregroundWtHwnd) {
     body.wt_hwnd = String(foregroundWtHwnd);
   }
+  if (resolved.agentProcessStartIdentity) {
+    Object.defineProperty(body, "_agentProcessStartIdentity", {
+      value: resolved.agentProcessStartIdentity,
+      enumerable: false,
+    });
+  }
+  if (resolved.sourceProcessStartIdentity) {
+    Object.defineProperty(body, "_sourceProcessStartIdentity", {
+      value: resolved.sourceProcessStartIdentity,
+      enumerable: false,
+    });
+  }
 }
 
 function buildStateBody(event, payload, resolve) {
@@ -454,7 +467,15 @@ function buildStateBody(event, payload, resolve) {
   if (sessionTitle) body.session_title = sessionTitle;
   if (event === "UserPromptSubmit" && !body.session_title) {
     const promptTitle = extractPromptTitle(payload.prompt);
-    if (promptTitle) body.session_title = promptTitle;
+    if (promptTitle) {
+      body.session_title = promptTitle;
+      // The fallback is derived from prompt content. It is useful for the live
+      // snapshot but must never cross the durable recovery privacy boundary.
+      Object.defineProperty(body, "_sessionTitleFromPrompt", {
+        value: true,
+        enumerable: false,
+      });
+    }
   }
 
   // Claude Code synthesizes API errors into a fake assistant message tagged
@@ -558,6 +579,7 @@ function attachStdinDiag(body, stdinRead) {
 function main() {
   const event = process.argv[2];
   if (!EVENT_TO_STATE[event]) process.exit(0);
+  const eventAt = Date.now();
 
   const config = getPlatformConfig();
   const resolve = createPidResolver({
@@ -592,6 +614,11 @@ function main() {
       // the server's /state cap and trigger a headerless 413 (read back as
       // posted=false, dropping the happy completion). hooks/state-payload-size.js.
       const fitted = fitStateBodyToByteBudget(body);
+      // Persist the real session evidence before POST. If Clawd is restarting,
+      // the HTTP request may fail but the next process can still recover the
+      // same session id and last sustained state. This is best-effort and never
+      // changes the hook's stdout or exit contract.
+      updateRecoveryLeaseFromStateBody(body, { eventAt });
       postStateToRunningServer(
         JSON.stringify(fitted.body),
         { timeoutMs: statePostTimeoutMs },

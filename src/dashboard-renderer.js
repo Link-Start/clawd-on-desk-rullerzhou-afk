@@ -457,6 +457,13 @@ function appendMeta(main, session, now) {
   if (session.headless) {
     meta.appendChild(document.createTextNode(` · ${t("dashboardHeadless")}`));
   }
+  if (session.startupRecovered) {
+    meta.appendChild(document.createTextNode(" · "));
+    const recoveryBadge = document.createElement("span");
+    recoveryBadge.className = "recovery-badge";
+    recoveryBadge.textContent = t("sessionRecovered");
+    meta.appendChild(recoveryBadge);
+  }
   // Source badge: show where this session runs (WSL, SSH)
   if (session.sourceType && session.sourceType !== "local") {
     meta.appendChild(document.createTextNode(" · "));

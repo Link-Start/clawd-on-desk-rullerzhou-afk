@@ -171,7 +171,7 @@ if ($fg -ne [IntPtr]::Zero) {
   [void][ClawdWin32]::GetClassName($fg, $sb, $sb.Capacity)
   $fgClass = $sb.ToString()
 }
-$processes = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine)
+$processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Select-Object ProcessId, ParentProcessId, Name, CommandLine, @{Name='StartIdentity';Expression={try { $_.CreationDate.ToUniversalTime().Ticks.ToString() } catch { $null }}})
 [pscustomobject]@{
   processes = $processes
   foreground = [pscustomobject]@{
@@ -216,6 +216,9 @@ function getWindowsProcessSnapshot(execFileSync) {
         name: typeof proc.Name === "string" ? proc.Name.toLowerCase() : "",
         ppid: Number(proc.ParentProcessId) || 0,
         commandLine: typeof proc.CommandLine === "string" ? proc.CommandLine : "",
+        startIdentity: typeof proc.StartIdentity === "string" && proc.StartIdentity
+          ? `win32:${proc.StartIdentity}`
+          : null,
       });
     }
     const foregroundPid = Number(foreground && (foreground.pid ?? foreground.Pid));
@@ -525,11 +528,12 @@ function createPidResolver(options) {
     let terminalPid = null;
     let detectedEditor = null;
     let agentPid = null;
+    let agentProcessStartIdentity = null;
     let agentCommandLine = "";
     const pidChain = [];
 
     for (let i = 0; i < maxDepth; i++) {
-      let name, parentPid, commandLine = "";
+      let name, parentPid, commandLine = "", currentProcessStartIdentity = null;
       try {
         if (isWin) {
           const info = winSnapshot.get(pid);
@@ -537,6 +541,7 @@ function createPidResolver(options) {
           name = info.name;
           parentPid = info.ppid;
           commandLine = info.commandLine;
+          currentProcessStartIdentity = info.startIdentity;
         } else {
           const ppidOut = execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8", timeout: 1000 }).trim();
           const commOut = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf8", timeout: 1000 }).trim();
@@ -557,6 +562,7 @@ function createPidResolver(options) {
       if (!agentPid) {
         if (agentNameSet && agentNameSet.has(name)) {
           agentPid = pid;
+          agentProcessStartIdentity = currentProcessStartIdentity;
           if (isWin) {
             agentCommandLine = commandLine;
           } else {
@@ -571,6 +577,7 @@ function createPidResolver(options) {
               : execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 500 });
             if (agentCmdlineCheck(cmdOut)) {
               agentPid = pid;
+              agentProcessStartIdentity = currentProcessStartIdentity;
               agentCommandLine = cmdOut;
             }
           } catch {}
@@ -668,7 +675,18 @@ function createPidResolver(options) {
     if (isWin && !snapshotOk) return unavailableMetadata(SKIP_REASON_SNAPSHOT_FAILED, true);
     if (isWin && pidChain.length === 0) return unavailableMetadata(SKIP_REASON_SELF_NOT_FOUND, true);
 
-    return { stablePid: terminalPid || lastGoodPid, terminalPid, snapshotOk, agentPid, agentCommandLine, detectedEditor, pidChain, foregroundWtHwnd, tmuxSocket, tmuxClient };
+    const stablePid = terminalPid || lastGoodPid;
+    const sourceProcessStartIdentity = isWin && winSnapshot && winSnapshot.get(stablePid)
+      ? winSnapshot.get(stablePid).startIdentity
+      : null;
+    const result = { stablePid, terminalPid, snapshotOk, agentPid, agentCommandLine, detectedEditor, pidChain, foregroundWtHwnd, tmuxSocket, tmuxClient };
+    // Recovery-only metadata must not expand the resolver's stable public
+    // object shape shared by every hook adapter.
+    Object.defineProperties(result, {
+      agentProcessStartIdentity: { value: agentProcessStartIdentity, enumerable: false },
+      sourceProcessStartIdentity: { value: sourceProcessStartIdentity, enumerable: false },
+    });
+    return result;
   }
 
   // Compatibility no-arg path (SessionStart prewarm + the 12 not-yet-migrated
@@ -688,7 +706,7 @@ function createPidResolver(options) {
   // (never mutates _cached) so the no-arg shape stays pristine.
   function freshMetadata() {
     const meta = freshResolve();
-    return {
+    const result = {
       ...meta,
       // #681: derived in memory from the LIVE walk. meta.agentCommandLine stays
       // on the fresh shape (the no-arg red line pins those 10 fields, and it
@@ -699,6 +717,15 @@ function createPidResolver(options) {
       // make the offline path indistinguishable from a real walk in logs.
       cacheSource: meta.snapshotOk ? "fresh" : "none",
     };
+    // Object spread deliberately skips the recovery-only non-enumerable
+    // identities attached by computeFreshSnapshot(). Reattach them privately
+    // so the hook can seed the durable lease from this one live snapshot while
+    // keeping the public resolver shape and sanitized v2 cache unchanged.
+    Object.defineProperties(result, {
+      agentProcessStartIdentity: { value: meta.agentProcessStartIdentity, enumerable: false },
+      sourceProcessStartIdentity: { value: meta.sourceProcessStartIdentity, enumerable: false },
+    });
+    return result;
   }
 
   // The sanitized subset persisted to v2. Deliberately built from `meta.headless`

@@ -103,6 +103,13 @@ describe("session HUD visual shell", () => {
     assert.doesNotMatch(sessionHudRenderer, /sessionCarrying/);
   });
 
+  it("marks startup-restored live sessions without using a completion chip", () => {
+    assert.match(sessionHudHtml, /\.chip-recovered\s*\{/);
+    assert.match(sessionHudRenderer, /session\.startupRecovered/);
+    assert.match(sessionHudRenderer, /t\("sessionRecovered"\)/);
+    assert.doesNotMatch(sessionHudRenderer, /startupRecovered[\s\S]{0,120}sessionBadgeDone/);
+  });
+
   it("uses a compact HUD-only title without mutating the full session title", () => {
     assert.match(sessionHudRenderer, /HUD_TITLE_MAX_UNITS\s*=\s*15/);
     assert.match(sessionHudRenderer, /function shortenHudTitle\(value\)/);
