@@ -419,6 +419,7 @@ describe("createPidResolver() — Windows PowerShell path", { skip: process.plat
       Name: p.name,
       ParentProcessId: p.ppid,
       CommandLine: typeof p.cmd === "string" ? p.cmd : null,
+      StartIdentity: typeof p.startIdentity === "string" ? p.startIdentity : null,
     })));
   }
 
@@ -561,6 +562,57 @@ describe("createPidResolver() — Windows PowerShell path", { skip: process.plat
       const { agentPid, agentCommandLine } = resolve();
       assert.strictEqual(agentPid, 401);
       assert.ok(agentCommandLine.includes("claude.exe"), "agentCommandLine must come from the snapshot");
+    });
+  });
+
+  it("carries recovery identities privately from the same Windows snapshot", () => {
+    const cfg = getPlatformConfig();
+    const resolve = createPidResolver({ ...LIVE_GATE,
+      platformConfig: cfg,
+      startPid: 400,
+      agentNames: { win: new Set(["claude.exe"]), mac: new Set(["claude"]) },
+    });
+    let spawnCount = 0;
+    withMockedExec(() => {
+      spawnCount++;
+      return snapshotJson([
+        { pid: 400, name: "node.exe", ppid: 401, startIdentity: "node" },
+        { pid: 401, name: "claude.exe", ppid: 402, startIdentity: "agent" },
+        { pid: 402, name: "windowsterminal.exe", ppid: 0, startIdentity: "source" },
+      ]);
+    }, () => {
+      const result = resolve();
+      assert.strictEqual(spawnCount, 1);
+      assert.strictEqual(result.agentProcessStartIdentity, "win32:agent");
+      assert.strictEqual(result.sourceProcessStartIdentity, "win32:source");
+      assert.strictEqual(Object.keys(result).includes("agentProcessStartIdentity"), false);
+      assert.strictEqual(Object.keys(result).includes("sourceProcessStartIdentity"), false);
+    });
+  });
+
+  it("preserves private recovery identities through lifecycle metadata", () => {
+    const cfg = getPlatformConfig();
+    const resolve = createPidResolver({ ...LIVE_GATE,
+      platformConfig: cfg,
+      startPid: 400,
+      agentNames: { win: new Set(["claude.exe"]), mac: new Set(["claude"]) },
+    });
+    withMockedExec(() => snapshotJson([
+      { pid: 400, name: "node.exe", ppid: 401, startIdentity: "node" },
+      { pid: 401, name: "claude.exe", ppid: 402, startIdentity: "agent" },
+      { pid: 402, name: "windowsterminal.exe", ppid: 0, startIdentity: "source" },
+    ]), () => {
+      const result = resolve({
+        namespace: "claude-code",
+        sessionId: "recovery-identity-session",
+        cacheCwd: "C:/work/project",
+        lifecycle: "start",
+        cacheable: false,
+      });
+      assert.strictEqual(result.agentProcessStartIdentity, "win32:agent");
+      assert.strictEqual(result.sourceProcessStartIdentity, "win32:source");
+      assert.strictEqual(Object.keys(result).includes("agentProcessStartIdentity"), false);
+      assert.strictEqual(Object.keys(result).includes("sourceProcessStartIdentity"), false);
     });
   });
 

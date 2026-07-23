@@ -137,6 +137,7 @@ const {
 } = require("./session-focus");
 const { focusCodexThreadTarget } = require("./session-focus-handoff");
 const { isSessionInProgress } = require("./state-session-snapshot");
+const { restoreSessionsFromRecoveryLeases } = require("./session-recovery-loader");
 const { getAllAgents, getAgent } = require("../agents/registry");
 // ── Autoplay policy: allow sound playback without user gesture ──
 // MUST be set before any BrowserWindow is created (before app.whenReady)
@@ -1366,6 +1367,7 @@ const {
 
 // ── Permission bubble — delegated to src/permission.js ──
 const {
+  isAgentIntegrationInstalled: _isAgentIntegrationInstalled,
   isAgentEnabled: _isAgentEnabled,
   isAgentPermissionsEnabled: _isAgentPermissionsEnabled,
   isAgentSubagentPermissionsEnabled: _isAgentSubagentPermissionsEnabled,
@@ -1621,6 +1623,7 @@ const _stateCtx = {
   }),
   getSessionAliases: () => _settingsController.get("sessionAliases"),
   getIdleVisualChoice,
+  isAgentEnabled: (agentId) => _isAgentEnabled({ agents: _settingsController.get("agents") }, agentId),
   hasAnyEnabledAgent: () => {
     // `get("agents")` returns the live reference (no clone) — we're only
     // reading. Missing agents field falls back to "assume enabled" (the
@@ -3727,6 +3730,24 @@ function createWindow() {
   // never block startup.
   startHttpServer().then((port) => {
     if (port == null) return;
+    const restoredSessionIds = restoreSessionsFromRecoveryLeases(_state, {
+      isAgentEnabled: (agentId) => {
+        const snapshot = { agents: _settingsController.get("agents") };
+        return _isAgentEnabled(snapshot, agentId)
+          && _isAgentIntegrationInstalled(snapshot, agentId);
+      },
+    });
+    if (restoredSessionIds.length > 0) {
+      const recoveredSnapshot = _state.buildSessionSnapshot();
+      reconcilePowerSaveBlocker();
+      broadcastDashboardSessionSnapshot(recoveredSnapshot);
+      broadcastSessionHudSnapshot(recoveredSnapshot);
+      if (!doNotDisturb && !_mini.getMiniMode()) {
+        const recoveredState = resolveDisplayState();
+        applyState(recoveredState, getSvgOverride(recoveredState));
+      }
+      sessionLog(`startup recovery restored sessions=${restoredSessionIds.join(",")}`);
+    }
     try { _remoteSshIpc.connectOnLaunchProfiles(); } catch {}
   }).catch(() => {});
   if (_settingsController.get("mobilePreviewEnabled") === true) _lanWss.start();

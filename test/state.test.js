@@ -135,6 +135,78 @@ function rawSession(state, opts = {}) {
 // Group 1: resolveDisplayState() priority
 // ═════════════════════════════════════════════════════════════════════════════
 
+describe("restoreSessionFromLease()", () => {
+  let api;
+
+  afterEach(() => { if (api) api.cleanup(); });
+
+  function lease(overrides = {}) {
+    return {
+      version: 1,
+      agentId: "claude-code",
+      sessionId: "claude-real-session",
+      active: true,
+      state: "working",
+      eventAt: Date.now() - 1000,
+      validUntil: null,
+      pid: process.pid,
+      sourcePid: process.pid,
+      processStartIdentity: null,
+      sourceProcessStartIdentity: null,
+      cwd: "C:/work/project",
+      title: "Recovered task",
+      ...overrides,
+    };
+  }
+
+  it("restores the real session without replaying sounds, events, or broadcasts", () => {
+    const sounds = [];
+    const broadcasts = [];
+    api = require("../src/state")(makeCtx({
+      processKill: () => true,
+      playSound: (name) => sounds.push(name),
+      broadcastSessionSnapshot: (snapshot) => broadcasts.push(snapshot),
+    }));
+    assert.strictEqual(api.restoreSessionFromLease(lease()), true);
+    assert.deepStrictEqual(sounds, []);
+    assert.deepStrictEqual(broadcasts, []);
+    assert.strictEqual(api.sessions.size, 1);
+    const session = api.sessions.get("claude-real-session");
+    assert.strictEqual(session.state, "working");
+    assert.strictEqual(session.startupRecovered, true);
+    assert.deepStrictEqual(session.recentEvents, []);
+    assert.strictEqual(session.requiresCompletionAck, undefined);
+    const entry = api.buildSessionSnapshot().sessions[0];
+    assert.strictEqual(entry.id, "claude-real-session");
+    assert.strictEqual(entry.startupRecovered, true);
+    assert.strictEqual(entry.canFocus, false);
+  });
+
+  it("lets the next real hook update the same id and clear only its marker", () => {
+    api = require("../src/state")(makeCtx({ processKill: () => true }));
+    assert.strictEqual(api.restoreSessionFromLease(lease()), true);
+    assert.strictEqual(api.restoreSessionFromLease(lease({ sessionId: "other-session", state: "thinking" })), true);
+    update(api, {
+      id: "claude-real-session",
+      state: "working",
+      event: "PostToolUse",
+      sourcePid: process.pid,
+      agentPid: process.pid,
+    });
+    assert.strictEqual(api.sessions.size, 2);
+    assert.strictEqual(api.sessions.get("claude-real-session").startupRecovered, undefined);
+    assert.strictEqual(api.sessions.get("other-session").startupRecovered, true);
+  });
+
+  it("never overwrites a session that arrived from a real hook first", () => {
+    api = require("../src/state")(makeCtx({ processKill: () => true }));
+    update(api, { id: "claude-real-session", state: "thinking", event: "UserPromptSubmit" });
+    assert.strictEqual(api.restoreSessionFromLease(lease()), false);
+    assert.strictEqual(api.sessions.get("claude-real-session").state, "thinking");
+    assert.strictEqual(api.sessions.get("claude-real-session").startupRecovered, undefined);
+  });
+});
+
 describe("resolveDisplayState()", () => {
   let api;
   beforeEach(() => { api = require("../src/state")(makeCtx()); });

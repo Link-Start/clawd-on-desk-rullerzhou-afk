@@ -73,6 +73,23 @@ function session(state, overrides = {}) {
   };
 }
 
+describe("startup-recovered session snapshots", () => {
+  it("exposes the marker, disables focus, and includes marker changes in the signature", () => {
+    const recovered = buildSessionSnapshot(new Map([
+      ["real-session", session("working", { sourcePid: 123, startupRecovered: true })],
+    ]), { statePriority: STATE_PRIORITY });
+    const live = buildSessionSnapshot(new Map([
+      ["real-session", session("working", { sourcePid: 123 })],
+    ]), { statePriority: STATE_PRIORITY });
+
+    assert.strictEqual(recovered.sessions[0].startupRecovered, true);
+    assert.strictEqual(recovered.sessions[0].canFocus, false);
+    assert.strictEqual(recovered.sessions[0].focusTarget, null);
+    assert.strictEqual(live.sessions[0].startupRecovered, false);
+    assert.notStrictEqual(sessionSnapshotSignature(recovered), sessionSnapshotSignature(live));
+  });
+});
+
 describe("isSessionInProgress state mapping", () => {
   it("treats persisted running states as in-progress and idle/sleeping/headless as not", () => {
     assert.strictEqual(isSessionInProgress(session("working")), true);
