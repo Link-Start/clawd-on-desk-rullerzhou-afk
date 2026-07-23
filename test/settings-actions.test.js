@@ -100,11 +100,12 @@ describe("updateRegistry pure-data validators", () => {
   it("function-form boolean fields reject non-booleans", () => {
     const deps = { snapshot: baseSnapshot };
     for (const key of [
-      "sessionHudEnabled", "sessionHudShowElapsed", "sessionHudShowContextUsage", "sessionHudCleanupDetached",
+      "sessionHudEnabled", "sessionHudShowElapsed", "sessionHudShowContextUsage", "sessionHudShowQuota", "sessionHudCleanupDetached",
       "sessionHudShowStateLabels", "sessionHudPinned",
       "miniMode", "openAtLoginHydrated", "soundMuted", "bubbleFollowPet",
       "hideBubbles", "permissionBubblesEnabled", "lowPowerIdleMode",
       "allowEdgePinning", "disableMiniMode", "keepSizeAcrossDisplays", "codexHookHealthNotifyEnabled",
+      "quotaMergeSources",
     ]) {
       assert.strictEqual(updateRegistry[key](true, deps).status, "ok", `${key}(true)`);
       assert.strictEqual(updateRegistry[key](false, deps).status, "ok", `${key}(false)`);
@@ -118,6 +119,22 @@ describe("updateRegistry pure-data validators", () => {
     assert.strictEqual(updateRegistry.codexHookHealthLastNotified("needs-review", deps).status, "ok");
     assert.strictEqual(updateRegistry.codexHookHealthLastNotified(null, deps).status, "error");
     assert.strictEqual(updateRegistry.codexHookHealthLastNotified(42, deps).status, "error");
+  });
+
+  it("Claude quota collection validates booleans and delegates the opt-in mutation", async () => {
+    const entry = updateRegistry.claudeQuotaCollectionEnabled;
+    assert.strictEqual(entry.validate(true).status, "ok");
+    assert.strictEqual(entry.validate("yes").status, "error");
+    const calls = [];
+    const enabled = await entry.effect(true, {
+      setClaudeQuotaCollectionEnabled: async (value) => {
+        calls.push(value);
+        return { status: "ok" };
+      },
+    });
+    assert.strictEqual(enabled.status, "ok");
+    assert.deepStrictEqual(calls, [true]);
+    assert.strictEqual(entry.effect(false, {}).status, "error");
   });
 
   it("bubble auto-close seconds require integers in range", () => {

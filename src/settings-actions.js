@@ -137,6 +137,9 @@ const {
   isValidDetectedRemoteNodeSource,
   deployTargetFingerprint,
   deployTargetDrift,
+  normalizeManagedDeployTargets,
+  sanitizeManagedDeployTarget,
+  remoteAccountKey,
 } = require("./remote-ssh-profile");
 const {
   validateTelegramApproval,
@@ -284,6 +287,17 @@ const updateRegistry = {
   sessionHudShowStateLabels: requireBoolean("sessionHudShowStateLabels"),
   sessionHudShowElapsed: requireBoolean("sessionHudShowElapsed"),
   sessionHudShowContextUsage: requireBoolean("sessionHudShowContextUsage"),
+  sessionHudShowQuota: requireBoolean("sessionHudShowQuota"),
+  claudeQuotaCollectionEnabled: {
+    validate: requireBoolean("claudeQuotaCollectionEnabled"),
+    effect(value, deps = {}) {
+      if (typeof deps.setClaudeQuotaCollectionEnabled !== "function") {
+        return { status: "error", message: "Claude quota collection is unavailable" };
+      }
+      return deps.setClaudeQuotaCollectionEnabled(value);
+    },
+  },
+  quotaMergeSources: requireBoolean("quotaMergeSources"),
   sessionHudCleanupDetached: requireBoolean("sessionHudCleanupDetached"),
   sessionHudPinned: requireBoolean("sessionHudPinned"),
   hideBubbles: requireBoolean("hideBubbles"),
@@ -1035,6 +1049,10 @@ function remoteSshAddProfile(payload, deps) {
   if (next.profiles.some((p) => p.id === profile.id)) {
     return { status: "error", message: `remoteSsh.add: profile id "${profile.id}" already exists` };
   }
+  // Ownership metadata is server-issued only after a successful deploy.
+  // Renderer input must never be able to manufacture cleanup authority.
+  delete profile.managedDeployTargets;
+  delete profile.lastDeployedAt;
   next.profiles.push(profile);
   return { status: "ok", commit: { remoteSsh: next } };
 }
@@ -1070,8 +1088,18 @@ function remoteSshUpdateProfile(payload, deps) {
   // false-flag "port drift" when prev had port:22 and the UI saveBtn omitted
   // the default 22 from the payload.
   const drift = deployTargetDrift(deployTargetFingerprint(prev), deployTargetFingerprint(profile));
+  // Deployment stamps and cleanup ownership are server-issued metadata.
+  // Ignore anything supplied by the renderer, then restore only the trusted
+  // values already present in the current settings snapshot.
+  delete profile.lastDeployedAt;
+  delete profile.managedDeployTargets;
+  // Ownership history is independent of whether the current form still
+  // points at the deployed target. Preserve it across A → B edits so delete
+  // later cleans the actual managed account(s), never the current guess.
+  const managedDeployTargets = normalizeManagedDeployTargets(prev.managedDeployTargets);
+  if (managedDeployTargets.length) profile.managedDeployTargets = managedDeployTargets;
   if (drift === null) {
-    if (Number.isFinite(prev.lastDeployedAt) && !Number.isFinite(payload.lastDeployedAt)) {
+    if (Number.isFinite(prev.lastDeployedAt)) {
       profile.lastDeployedAt = prev.lastDeployedAt;
     }
     if (profile.detectedRemoteNodeBin === undefined) {
@@ -1112,6 +1140,24 @@ function remoteSshMarkDeployed(payload, deps) {
     return { status: "ok", noop: true, reason: "profile_deleted" };
   }
   const current = next.profiles[idx];
+  const remoteNode = normalizeRemoteNodeDetection(payload.remoteNode || payload, deployedAt);
+  const targetAtDeployStart = expectedTarget && typeof expectedTarget === "object"
+    ? expectedTarget
+    : current;
+  const ownedTarget = sanitizeManagedDeployTarget({
+    ...deployTargetFingerprint(targetAtDeployStart),
+    ...(remoteNode || {}),
+    deployedAt,
+  });
+  if (!ownedTarget) {
+    return { status: "error", message: "remoteSsh.markDeployed: invalid deployment ownership target" };
+  }
+  const ownedTargets = normalizeManagedDeployTargets([
+    ...(current.managedDeployTargets || []).filter(
+      (target) => remoteAccountKey(target) !== remoteAccountKey(ownedTarget)
+    ),
+    ownedTarget,
+  ]);
   if (expectedTarget && typeof expectedTarget === "object") {
     // Normalize both sides through deployTargetFingerprint so port-22 vs
     // undefined / empty-string vs missing don't false-flag drift. This also
@@ -1122,20 +1168,27 @@ function remoteSshMarkDeployed(payload, deps) {
       deployTargetFingerprint(expectedTarget)
     );
     if (drift) {
+      const updatedProfile = { ...current, managedDeployTargets: ownedTargets };
+      const newProfiles = next.profiles.slice();
+      newProfiles[idx] = updatedProfile;
       return {
         status: "ok",
+        commit: { remoteSsh: { profiles: newProfiles } },
         noop: true,
         reason: "target_drift",
         targetDrift: drift,
-        message: `remoteSsh.markDeployed: profile ${id}.${drift} changed during deploy; not stamping`,
+        message: `remoteSsh.markDeployed: profile ${id}.${drift} changed during deploy; ownership recorded without stamping current target`,
       };
     }
   }
   // Only mutate deployment metadata — every other field stays as-is so
   // concurrent user edits (label / autoStartCodexMonitor / connectOnLaunch)
   // survive.
-  const updatedProfile = { ...current, lastDeployedAt: deployedAt };
-  const remoteNode = normalizeRemoteNodeDetection(payload.remoteNode || payload, deployedAt);
+  const updatedProfile = {
+    ...current,
+    lastDeployedAt: deployedAt,
+    managedDeployTargets: ownedTargets,
+  };
   if (remoteNode) copyRemoteNodeDetection(updatedProfile, remoteNode);
   const newProfiles = next.profiles.slice();
   newProfiles[idx] = updatedProfile;

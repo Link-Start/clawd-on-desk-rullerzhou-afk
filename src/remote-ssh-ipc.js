@@ -14,8 +14,9 @@
 // — same pattern as settings-changed broadcasts.
 
 const childProcess = require("child_process");
-const { deploy, startCodexMonitor, stopCodexMonitor } = require("./remote-ssh-deploy");
+const { deploy, startCodexMonitor, stopCodexMonitor, uninstallRemoteIntegrations } = require("./remote-ssh-deploy");
 const { buildSshArgs } = require("./remote-ssh-runtime");
+const { remoteAccountKey } = require("./remote-ssh-profile");
 const {
   quoteForCmd,
   quoteForPosixShellArg,
@@ -31,6 +32,13 @@ function findProfile(settingsController, profileId) {
   const snap = settingsController.getSnapshot();
   const list = (snap.remoteSsh && Array.isArray(snap.remoteSsh.profiles)) ? snap.remoteSsh.profiles : [];
   return list.find((p) => p.id === profileId) || null;
+}
+
+function listProfiles(settingsController) {
+  const snap = settingsController.getSnapshot();
+  return (snap.remoteSsh && Array.isArray(snap.remoteSsh.profiles))
+    ? snap.remoteSsh.profiles
+    : [];
 }
 
 function broadcast(BrowserWindow, channel, payload) {
@@ -59,6 +67,7 @@ function registerRemoteSshIpc(options = {}) {
   const deployFn = options.deployFn || deploy;
   const startCodexMonitorFn = options.startCodexMonitorFn || startCodexMonitor;
   const stopCodexMonitorFn = options.stopCodexMonitorFn || stopCodexMonitor;
+  const uninstallRemoteIntegrationsFn = options.uninstallRemoteIntegrationsFn || uninstallRemoteIntegrations;
 
   const disposers = [];
 
@@ -155,6 +164,79 @@ function registerRemoteSshIpc(options = {}) {
     }
   });
 
+  // ── Cleanup (profile deletion) ──
+  //
+  // Cleanup is ownership-scoped. Fresh profiles have no right to mutate a
+  // remote account; duplicate profiles share its global hook/statusline
+  // installation; and an A → B edit must clean A, not the current B fields.
+  handle("remoteSsh:cleanup", async (_event, payload) => {
+    const id = typeof payload === "string" ? payload : (payload && payload.profileId);
+    if (typeof id !== "string" || !id) {
+      return { status: "error", message: "remoteSsh:cleanup requires { profileId }" };
+    }
+    const profile = findProfile(settingsController, id);
+    if (!profile) return { status: "error", message: "profile not found" };
+    try {
+      remoteSshRuntime.disconnect(id);
+      const ownedTargets = Array.isArray(profile.managedDeployTargets)
+        ? profile.managedDeployTargets
+        : [];
+      if (!ownedTargets.length) {
+        return { status: "ok", uninstalled: true, skipped: "not-owned" };
+      }
+      const siblingAccounts = new Set(
+        listProfiles(settingsController)
+          .filter((candidate) => candidate.id !== id)
+          .flatMap((candidate) => Array.isArray(candidate.managedDeployTargets)
+            ? candidate.managedDeployTargets
+            : [])
+          .map(remoteAccountKey)
+      );
+      let uninstalled = true;
+      let attempted = 0;
+      let shared = 0;
+      for (const target of ownedTargets) {
+        if (siblingAccounts.has(remoteAccountKey(target))) {
+          shared += 1;
+          continue;
+        }
+        attempted += 1;
+        const cleanupProfile = {
+          ...target,
+          id: profile.id,
+          autoStartCodexMonitor: profile.autoStartCodexMonitor === true,
+        };
+        await stopCodexMonitorFn({
+          profile: cleanupProfile,
+          runtime: remoteSshRuntime,
+          deps: { spawn },
+        }).catch((err) => log("codex monitor stop failed:", err && err.message));
+        const result = await uninstallRemoteIntegrationsFn({
+          profile: cleanupProfile,
+          runtime: remoteSshRuntime,
+          deps: { spawn },
+        }).catch((err) => {
+          log("remote uninstall failed:", err && err.message);
+          return { ok: false };
+        });
+        if (!result || result.ok === false) {
+          uninstalled = false;
+          const stderr = (result && result.stderr || "").toString().trim();
+          log("remote uninstall incomplete for", target.host, stderr.slice(0, 200));
+        }
+      }
+      return {
+        status: "ok",
+        uninstalled,
+        attempted,
+        shared,
+        skipped: attempted === 0 ? "shared-owner" : undefined,
+      };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || "cleanup threw" };
+    }
+  });
+
   // ── Deploy ──
 
   handle("remoteSsh:deploy", async (_event, payload) => {
@@ -176,16 +258,19 @@ function registerRemoteSshIpc(options = {}) {
         // mutates lastDeployedAt.
         //
         // expectedTarget is a fingerprint captured at deploy start. If the
-        // user changed host / port / identityFile / remoteForwardPort /
-        // hostPrefix mid-deploy, the deploy ran against the old target —
-        // markDeployed no-ops in that case so we don't falsely claim the
-        // new (drifted) configuration is "deployed".
+        // user changed a deploy-target field mid-deploy, the deploy ran
+        // against the old target — markDeployed no-ops in that case so we
+        // don't falsely claim the new (drifted) configuration is
+        // "deployed". Must carry EVERY field in DEPLOY_TARGET_FIELDS
+        // (remote-ssh-profile.js), or profiles using the missing field
+        // false-positive as drifted on every deploy.
         const expectedTarget = {
           host: profile.host,
           port: profile.port,
           identityFile: profile.identityFile,
           remoteForwardPort: profile.remoteForwardPort,
           hostPrefix: profile.hostPrefix,
+          chainStatusline: profile.chainStatusline,
         };
         try {
           const stamp = await settingsController.applyCommand("remoteSsh.markDeployed", {

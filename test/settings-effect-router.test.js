@@ -204,6 +204,16 @@ describe("settings-effect-router", () => {
     ]);
   });
 
+  it("re-syncs hidden HUD windows when low-power mode changes", () => {
+    const { calls, emit } = createHarness();
+    emit({ lowPowerIdleMode: true });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { lowPowerIdleMode: true }],
+      ["sendToRenderer", "low-power-idle-mode-change", true],
+      ["syncSessionHudVisibility"],
+    ]);
+  });
+
   it("routes language, session alias, and session HUD effects", () => {
     const { calls, emit } = createHarness();
 
@@ -238,6 +248,21 @@ describe("settings-effect-router", () => {
       ["updateMirrors", { sessionHudShowContextUsage: false }],
       ["syncSessionHudVisibility"],
       ["repositionFloatingBubbles"],
+    ]);
+
+    calls.length = 0;
+    emit({ sessionHudShowQuota: false });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { sessionHudShowQuota: false }],
+      ["syncSessionHudVisibility"],
+      ["repositionFloatingBubbles"],
+    ]);
+
+    calls.length = 0;
+    emit({ quotaMergeSources: true });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { quotaMergeSources: true }],
+      ["emitSessionSnapshot", { force: true }],
     ]);
 
     calls.length = 0;

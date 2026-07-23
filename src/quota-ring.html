@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; img-src 'self' data: file:;">
+<title>Quota Ring</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* The cluster floats directly on the desktop wallpaper (no card). Legibility on
+   any wallpaper comes from per-coin drop shadows and a subtitle-style text halo;
+   severity colors are fixed physical-scene values (dark-desktop baseline) rather
+   than theme tokens, because there is no page surface behind them. */
+:root {
+  --sev-ok: #34d399;
+  --sev-warn: #fbbf24;
+  --sev-hot: #f87171;
+  --sev-reset: #9096a1;
+  --ring-track: rgba(140, 142, 152, 0.38);
+  --ink: #ffffff;
+  --ink-soft: rgba(255, 255, 255, 0.74);
+  --ink-faint: rgba(255, 255, 255, 0.6);
+  --halo: 0 1px 2px rgba(0, 0, 0, 0.85), 0 0 2px rgba(0, 0, 0, 0.7);
+  --coin-shadow: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5)) drop-shadow(0 0 1px rgba(0, 0, 0, 0.4));
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+body { padding: 6px 6px 8px; }
+
+.cluster {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cluster.side-left { align-items: flex-end; }
+.cluster.side-right { align-items: flex-start; }
+
+.coin-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.cluster.side-right .coin-row { flex-direction: row-reverse; }
+
+.readout {
+  width: 44px;
+  display: flex;
+  flex-direction: column;
+  /* Three lines (percent, window, optional source) must stay inside the 26px
+     coin row; geometry uses that exact row height for window sizing. */
+  line-height: 1;
+}
+.cluster.side-left .readout { align-items: flex-end; text-align: right; }
+.cluster.side-right .readout { align-items: flex-start; text-align: left; }
+.readout .pct {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  text-shadow: var(--halo);
+}
+.readout .win {
+  font-size: 8.5px;
+  color: var(--ink-soft);
+  text-shadow: var(--halo);
+  white-space: nowrap;
+}
+.readout .source {
+  max-width: 44px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 6.5px;
+  color: var(--ink-faint);
+  text-shadow: var(--halo);
+  white-space: nowrap;
+}
+.coin-row.is-reset .readout .pct { color: var(--ink-soft); }
+.coin-row.is-stale { opacity: 0.72; }
+
+.coin { width: 26px; height: 26px; flex: 0 0 auto; filter: var(--coin-shadow); }
+.coin .track { stroke: var(--ring-track); }
+.coin .fill.sev-ok { stroke: var(--sev-ok); }
+.coin .fill.sev-warn { stroke: var(--sev-warn); }
+.coin .fill.sev-hot { stroke: var(--sev-hot); }
+.coin .fill.sev-reset { stroke: var(--sev-reset); }
+.coin .plate { fill: rgba(246, 246, 248, 0.92); }
+.coin-row.is-stale .glyph { filter: grayscale(1); opacity: 0.8; }
+.coin-row.is-reset .glyph { opacity: 0.55; }
+
+/* Near-exhausted (hot) coin pulses gently to pull the eye; motion-safe only. */
+@keyframes coin-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.coin .fill.sev-hot.is-near { animation: coin-pulse 2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .coin .fill.sev-hot.is-near { animation: none; }
+}
+
+.overflow {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  background: rgba(20, 22, 28, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--ink);
+  font-size: 9.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  text-shadow: var(--halo);
+}
+.overflow:hover { background: rgba(30, 33, 40, 0.7); }
+</style>
+</head>
+<body>
+  <div id="cluster" class="cluster side-left" aria-hidden="true"></div>
+  <script src="./quota-ring-renderer.js"></script>
+</body>
+</html>

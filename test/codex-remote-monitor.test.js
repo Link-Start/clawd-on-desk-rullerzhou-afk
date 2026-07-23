@@ -176,6 +176,82 @@ describe("Codex remote monitor", () => {
     assert.strictEqual(posted[1].event, "event_msg:task_complete");
     assert.strictEqual(posted[1].headless, true);
   });
+
+  it("builds metadata_only quota bodies on the lifecycle session_id namespace", () => {
+    const body = JSON.parse(__test.buildPostQuotaBody(
+      "codex:s1",
+      {
+        codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+        codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+      },
+      "remote-box"
+    ));
+
+    assert.strictEqual(body.metadata_only, true);
+    assert.strictEqual(body.preserve_state, true);
+    assert.strictEqual(body.state, "idle");
+    assert.strictEqual(body.session_id, "codex:s1");
+    assert.strictEqual(body.agent_id, "codex");
+    assert.strictEqual(body.host, "remote-box");
+    assert.deepStrictEqual(body.codex_quota, {
+      codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+      codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+    });
+    assert.strictEqual(body.event, undefined);
+  });
+
+  it("posts quota for fresh token_count lines and drops stale replays", () => {
+    const entry = {
+      sessionId: "codex:s1",
+      cwd: "/repo",
+      isSubagent: false,
+      lastEventTime: 0,
+      lastState: null,
+    };
+    const stateCalls = [];
+    const quotaCalls = [];
+    const options = {
+      postState: (...args) => stateCalls.push(args),
+      postQuota: (...args) => quotaCalls.push(args),
+    };
+    const rateLimits = {
+      primary: { used_percent: 1.0, window_minutes: 300, resets_at: 1783669570 },
+      secondary: { used_percent: 42.6, window_minutes: 10080, resets_at: 1784256370 },
+    };
+
+    const lineTimestamp = new Date().toISOString();
+    __test.processLine(JSON.stringify({
+      type: "event_msg",
+      timestamp: lineTimestamp,
+      payload: { type: "token_count", rate_limits: rateLimits },
+    }), entry, options);
+    __test.processLine(JSON.stringify({
+      type: "event_msg",
+      // A restart replay: pollFile re-reads recent files from offset 0.
+      timestamp: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+      payload: { type: "token_count", rate_limits: rateLimits },
+    }), entry, options);
+
+    // token_count is telemetry: no lifecycle post either way.
+    assert.strictEqual(stateCalls.length, 0);
+    const capturedAt = Date.parse(lineTimestamp);
+    assert.deepStrictEqual(quotaCalls, [
+      ["codex:s1", {
+        codexFiveHour: {
+          usedPercent: 1,
+          windowMinutes: 300,
+          resetAt: 1783669570000,
+          capturedAt,
+        },
+        codexWeekly: {
+          usedPercent: 43,
+          windowMinutes: 10080,
+          resetAt: 1784256370000,
+          capturedAt,
+        },
+      }],
+    ]);
+  });
 });
 
 describe("Codex remote monitor — stale-cleanup re-read dedup", () => {

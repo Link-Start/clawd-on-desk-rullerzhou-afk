@@ -408,6 +408,20 @@ function buildPermissionFocusEntry(perm) {
   return focusEntry;
 }
 
+function collectVisibleWindowBounds(windows) {
+  const bounds = [];
+  for (const bubble of windows || []) {
+    if (!bubble || bubble.isDestroyed()) continue;
+    if (typeof bubble.isVisible === "function" && !bubble.isVisible()) continue;
+    if (typeof bubble.getBounds !== "function") continue;
+    try {
+      const rect = bubble.getBounds();
+      if (rect && rect.width > 0 && rect.height > 0) bounds.push(rect);
+    } catch {}
+  }
+  return bounds;
+}
+
 module.exports = function initPermission(ctx) {
 
 // Bound to ctx.lang (a live getter), so a runtime language switch is picked up
@@ -416,6 +430,10 @@ const t = createTranslator(() => ctx.lang);
 
 // Each entry: { res, abortHandler, suggestions, sessionId, bubble, hideTimer, toolName, toolInput, resolvedSuggestion, createdAt, measuredHeight }
 const pendingPermissions = [];
+// Keep windows independently of pendingPermissions so Orbit continues avoiding
+// a bubble during its 250ms fade-out after the request has already been removed
+// from the pending list.
+const permissionBubbleWindows = new Set();
 // Pure-metadata tools auto-allowed without showing a bubble (zero side effects)
 const PASSTHROUGH_TOOLS = new Set([
   "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop", "TaskOutput",
@@ -539,6 +557,13 @@ function repositionDependentBubbles() {
   if (typeof ctx.repositionUpdateBubble === "function") {
     try { ctx.repositionUpdateBubble(); } catch {}
   }
+  if (typeof ctx.repositionSessionHud === "function") {
+    try { ctx.repositionSessionHud(); } catch {}
+  }
+}
+
+function getVisibleBubbleBounds() {
+  return collectVisibleWindowBounds(permissionBubbleWindows);
 }
 
 function hotkeyResolve(behavior, message) {
@@ -736,6 +761,7 @@ function showPermissionBubble(permEntry) {
   });
 
   permEntry.bubble = bub;
+  permissionBubbleWindows.add(bub);
   permEntry.bubbleReady = false;
   // macOS: text-input bubbles skip the native stationary treatment (SkyLight
   // private space) that occludes the OS IME candidate window. They stay
@@ -780,6 +806,7 @@ function showPermissionBubble(permEntry) {
   else ctx.reapplyMacVisibility();
 
   bub.on("closed", () => {
+    permissionBubbleWindows.delete(bub);
     const idx = pendingPermissions.indexOf(permEntry);
     if (idx !== -1) {
       // Qwen + Copilot can hand no-decision back to their native flow. Hermes
@@ -789,6 +816,7 @@ function showPermissionBubble(permEntry) {
       const behavior = (permEntry.isQwenCode || permEntry.isCopilotCli || permEntry.isHermes) ? "no-decision" : "deny";
       resolvePermissionEntry(permEntry, behavior, "Bubble window closed by user");
     }
+    repositionDependentBubbles();
   });
 
   // #640: a dead renderer can never send the focusout/window-blur IPC that
@@ -2471,12 +2499,14 @@ function cleanup() {
     if (isPassiveNotifyEntry(perm)) dismissPassiveNotify(perm, "Clawd is quitting");
     else dismissInteractivePermissionWithoutDecision(perm, "Clawd is quitting");
   }
+  permissionBubbleWindows.clear();
 }
 
 return {
   showPermissionBubble, resolvePermissionEntry,
   sendPermissionResponse, repositionBubbles, permLog,
   pendingPermissions, PASSTHROUGH_TOOLS,
+  getVisibleBubbleBounds,
   addPendingPermission, removePendingPermission,
   maybeStartRemoteApproval,
   dismissPermissionForTerminal,
@@ -2515,4 +2545,5 @@ module.exports.__test = {
   sanitizeAntigravityPermissionDecision,
   buildAntigravityPermissionResponseBody,
   buildElicitationUpdatedInput,
+  collectVisibleWindowBounds,
 };

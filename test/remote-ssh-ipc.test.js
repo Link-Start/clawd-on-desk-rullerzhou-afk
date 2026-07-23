@@ -313,6 +313,170 @@ test("remoteSsh:disconnect calls runtime.disconnect with id", async () => {
   ipc.dispose();
 });
 
+// ── Cleanup (profile deletion) ──
+
+test("remoteSsh:cleanup disconnects, stops the monitor and uninstalls remote integrations", async () => {
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const rt = mockRuntime();
+  let disconnectId = null;
+  rt.disconnect = (id) => { disconnectId = id; return { profileId: id, status: "idle" }; };
+  const stopped = [];
+  const uninstalled = [];
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController([{
+      ...baseProfile,
+      managedDeployTargets: [{
+        host: "user@pi",
+        remoteForwardPort: 23333,
+        deployedAt: 12345,
+      }],
+    }]),
+    remoteSshRuntime: rt,
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    stopCodexMonitorFn: async ({ profile }) => { stopped.push(profile.id); return { ok: true }; },
+    uninstallRemoteIntegrationsFn: async ({ profile }) => { uninstalled.push(profile.id); return { ok: true }; },
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "p1");
+
+  assert.equal(r.status, "ok");
+  assert.equal(r.uninstalled, true);
+  assert.equal(disconnectId, "p1");
+  assert.deepEqual(stopped, ["p1"]);
+  assert.deepEqual(uninstalled, ["p1"]);
+  ipc.dispose();
+});
+
+test("remoteSsh:cleanup stays ok when the remote uninstall fails (best-effort)", async () => {
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController([{
+      ...baseProfile,
+      managedDeployTargets: [{
+        host: "user@pi",
+        remoteForwardPort: 23333,
+        deployedAt: 12345,
+      }],
+    }]),
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    stopCodexMonitorFn: async () => ({ ok: true }),
+    uninstallRemoteIntegrationsFn: async () => { throw new Error("host unreachable"); },
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "p1");
+
+  assert.equal(r.status, "ok");
+  assert.equal(r.uninstalled, false);
+  ipc.dispose();
+});
+
+test("remoteSsh:cleanup never mutates a never-deployed remote", async () => {
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  let stopped = 0;
+  let uninstalled = 0;
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController([baseProfile]),
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    stopCodexMonitorFn: async () => { stopped += 1; return { ok: true }; },
+    uninstallRemoteIntegrationsFn: async () => { uninstalled += 1; return { ok: true }; },
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "p1");
+  assert.equal(r.status, "ok");
+  assert.equal(r.skipped, "not-owned");
+  assert.equal(stopped, 0);
+  assert.equal(uninstalled, 0);
+  ipc.dispose();
+});
+
+test("remoteSsh:cleanup preserves a shared remote still owned by another profile", async () => {
+  const target = { host: "user@pi", remoteForwardPort: 23333, deployedAt: 12345 };
+  const sibling = {
+    ...baseProfile,
+    id: "p2",
+    label: "Same Pi",
+    managedDeployTargets: [{ ...target, deployedAt: 23456 }],
+  };
+  let uninstalled = 0;
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController([
+      { ...baseProfile, managedDeployTargets: [target] },
+      sibling,
+    ]),
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    uninstallRemoteIntegrationsFn: async () => { uninstalled += 1; return { ok: true }; },
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "p1");
+  assert.equal(r.status, "ok");
+  assert.equal(r.skipped, "shared-owner");
+  assert.equal(r.shared, 1);
+  assert.equal(uninstalled, 0);
+  ipc.dispose();
+});
+
+test("remoteSsh:cleanup uses the deployed target after the profile was edited", async () => {
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const cleanedHosts = [];
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController([{
+      ...baseProfile,
+      host: "user@new-host",
+      managedDeployTargets: [{
+        host: "user@old-host",
+        remoteForwardPort: 23333,
+        deployedAt: 12345,
+      }],
+    }]),
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    stopCodexMonitorFn: async () => ({ ok: true }),
+    uninstallRemoteIntegrationsFn: async ({ profile }) => {
+      cleanedHosts.push(profile.host);
+      return { ok: true };
+    },
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "p1");
+  assert.equal(r.uninstalled, true);
+  assert.deepEqual(cleanedHosts, ["user@old-host"]);
+  ipc.dispose();
+});
+
+test("remoteSsh:cleanup errors on unknown profile", async () => {
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController(),
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+  });
+  const r = await ipcMain.invoke("remoteSsh:cleanup", "nope");
+  assert.equal(r.status, "error");
+  ipc.dispose();
+});
+
 // ── Deploy stamp ──
 
 test("remoteSsh:deploy stamps via markDeployed (not full update) on success", async () => {
@@ -359,6 +523,45 @@ test("remoteSsh:deploy stamps via markDeployed (not full update) on success", as
   // the lost-update fix.
   assert.equal(args.label, undefined,
     "markDeployed args must not carry full profile fields like label");
+  ipc.dispose();
+});
+
+test("remoteSsh:deploy expectedTarget carries every deploy-target field (chainStatusline false-drift regression)", async () => {
+  // Regression: expectedTarget is a hand-built field list. When
+  // chainStatusline joined DEPLOY_TARGET_FIELDS but not this list, every
+  // deploy of a chain-enabled profile false-positived as target drift
+  // ("deployed with previous settings — redeploy" on each run).
+  const { DEPLOY_TARGET_FIELDS, deployTargetFingerprint, deployTargetDrift } =
+    require("../src/remote-ssh-profile");
+  const profile = { ...baseProfile, chainStatusline: true };
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const settingsController = mockSettingsController([profile]);
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController,
+    remoteSshRuntime: mockRuntime(),
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    deployFn: async () => ({ ok: true }),
+  });
+
+  const r = await ipcMain.invoke("remoteSsh:deploy", "p1");
+
+  assert.equal(r.status, "ok");
+  assert.equal(r.warning, undefined, "unchanged profile must not report drift");
+  const args = settingsController._commandCalls[0].args;
+  for (const f of DEPLOY_TARGET_FIELDS) {
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(args.expectedTarget, f),
+      `expectedTarget missing deploy-target field: ${f}`
+    );
+  }
+  assert.equal(
+    deployTargetDrift(deployTargetFingerprint(args.expectedTarget), deployTargetFingerprint(profile)),
+    null,
+    "expectedTarget must fingerprint identically to the unchanged profile"
+  );
   ipc.dispose();
 });
 
@@ -792,8 +995,8 @@ test("dispose unregisters all handlers and detaches event listeners", () => {
     BrowserWindow,
     spawn: makeSucceedingSpawn().spawn,
   });
-  // Pre-dispose: 7 channels are registered.
-  assert.equal(ipcMain.handlers.size, 7);
+  // Pre-dispose: 8 channels are registered.
+  assert.equal(ipcMain.handlers.size, 8);
   ipc.dispose();
   assert.equal(ipcMain.handlers.size, 0);
   // After dispose, status-changed events should NOT broadcast.

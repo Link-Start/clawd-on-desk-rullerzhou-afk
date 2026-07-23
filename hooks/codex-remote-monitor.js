@@ -23,6 +23,10 @@ const {
   clampAssistantOutputText,
   extractAssistantTextFromRecord,
 } = require("./codex-assistant-output");
+const {
+  resolveCodexRateLimitQuota,
+  isFreshCodexQuotaTimestamp,
+} = require("./codex-rate-limits");
 const { parseCodexUserInputRecord } = require("./codex-user-input");
 
 // ── Inline config from agents/codex.js (zero-dependency requirement) ──
@@ -158,6 +162,32 @@ function postState(sessionId, state, event, cwd, isSubagent, extra = null) {
   );
 }
 
+// Subscription quota is telemetry, not lifecycle: it goes out as a
+// metadata_only POST (same contract as the statusline scripts) so the
+// server can only annotate the session this monitor's lifecycle posts
+// already created — never create/resurrect one, never touch recentEvents
+// or updatedAt. Same session_id namespace ("codex:<uuid>") as the
+// lifecycle posts, or the annotation would silently miss.
+function buildPostQuotaBody(sessionId, codexQuota, host) {
+  return JSON.stringify({
+    state: "idle",
+    preserve_state: true,
+    metadata_only: true,
+    session_id: sessionId,
+    agent_id: "codex",
+    host: host || hostPrefix,
+    codex_quota: codexQuota,
+  });
+}
+
+function postQuota(sessionId, codexQuota) {
+  postStateToRunningServer(
+    buildPostQuotaBody(sessionId, codexQuota, undefined),
+    { timeoutMs: 100, preferredPort, remote: true },
+    () => {} // fire and forget — tunnel may be down
+  );
+}
+
 function processLine(line, entry, options = {}) {
   let obj;
   try {
@@ -228,6 +258,25 @@ function processLine(line, entry, options = {}) {
     const assistantOutput = clampAssistantOutputText(assistantText);
     entry.assistantLastOutput = assistantOutput ? assistantOutput.text : null;
     entry.assistantLastOutputTruncated = !!(assistantOutput && assistantOutput.truncated);
+  }
+
+  // token_count is deliberately NOT in LOG_EVENT_MAP (telemetry, not
+  // lifecycle) — but it is the only carrier of the account's subscription
+  // rate limits. Freshness-gated on the line's own timestamp: pollFile
+  // re-reads recent files from offset 0 after a monitor restart, and a
+  // replayed line's quota posted now would stamp fresh arbitration
+  // metadata (metadataUpdatedAt) on stale data.
+  if (key === "event_msg:token_count") {
+    // capturedAt = the line's own timestamp: lets the desktop's account
+    // store order this report by observation time, not tunnel arrival time.
+    const codexQuota = isFreshCodexQuotaTimestamp(obj.timestamp)
+      ? resolveCodexRateLimitQuota(payload, { capturedAt: Date.parse(obj.timestamp) })
+      : null;
+    if (codexQuota) {
+      const postQuotaFn = typeof options.postQuota === "function" ? options.postQuota : postQuota;
+      postQuotaFn(entry.sessionId, codexQuota);
+    }
+    return;
   }
 
   const state = LOG_EVENT_MAP[key];
@@ -689,6 +738,7 @@ if (require.main === module) main();
 
 module.exports.__test = {
   buildPostStateBody,
+  buildPostQuotaBody,
   processLine,
   pollFile,
   recoverStalePendingUserInputEntry,

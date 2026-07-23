@@ -15,6 +15,7 @@ const { normalizeTranscriptPath } = require("./transcript-path");
 const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
 const { ANTIGRAVITY_QUOTA_FIELDS } = require("../hooks/antigravity-context-usage");
 const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
+const { CODEX_QUOTA_FIELDS } = require("../hooks/codex-rate-limits");
 const { extractPermissionToolInput } = require("../hooks/kimi-hook");
 const { normalizeCodexUserInputWire } = require("../hooks/codex-user-input");
 
@@ -97,6 +98,10 @@ function normalizeAntigravityQuota(value) {
 
 function normalizeClaudeQuota(value) {
   return normalizeQuotaGroup(value, CLAUDE_QUOTA_FIELDS);
+}
+
+function normalizeCodexQuota(value) {
+  return normalizeQuotaGroup(value, CODEX_QUOTA_FIELDS);
 }
 
 function sendStateHealthResponse(res, options) {
@@ -227,6 +232,7 @@ function handleStatePost(req, res, options) {
       const contextUsage = normalizeContextUsage(data.context_usage);
       const antigravityQuota = normalizeAntigravityQuota(data.antigravity_quota);
       const claudeQuota = normalizeClaudeQuota(data.claude_quota);
+      const codexQuota = normalizeCodexQuota(data.codex_quota);
       const assistantLastOutput = normalizeAssistantLastOutput(data.assistant_last_output);
       const assistantLastOutputTruncated = data.assistant_last_output_truncated === true;
       const transcriptPath = normalizeTranscriptPath(data.transcript_path);
@@ -279,6 +285,19 @@ function handleStatePost(req, res, options) {
         res.end();
         return;
       }
+      // Account quota goes to the session-independent per-source store,
+      // regardless of POST shape — it must survive with no live session at
+      // all ("check the remote's quota before starting work"), so it is
+      // never gated on the session lookup that contextUsage annotation
+      // performs. The source is the reporting host (null = this machine).
+      // `host` is client-supplied and cannot be origin-verified (every
+      // remote's reverse tunnel lands on the same local port) — same trust
+      // model as the session cards' host grouping: machines the user
+      // deployed Clawd hooks to. The store shape-sanitizes the label.
+      if (typeof ctx.updateAccountQuota === "function"
+        && (antigravityQuota || claudeQuota || codexQuota)) {
+        ctx.updateAccountQuota(host, { antigravityQuota, claudeQuota, codexQuota });
+      }
       if (agentId === "codex" && codexUserInput) {
         const sid = session_id || "default";
         if (codexUserInput.phase === "resolved") {
@@ -322,12 +341,8 @@ function handleStatePost(req, res, options) {
         // hook events the diagnostics exist to show. 204 either way — the
         // statusline script never reads the response, and "session unknown"
         // is the designed drop, not an error.
-        if (typeof ctx.updateSessionMetadata === "function") {
-          ctx.updateSessionMetadata(session_id || "default", {
-            contextUsage,
-            antigravityQuota,
-            claudeQuota,
-          });
+        if (contextUsage && typeof ctx.updateSessionMetadata === "function") {
+          ctx.updateSessionMetadata(session_id || "default", { contextUsage });
         }
         res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
         res.end();
@@ -495,8 +510,6 @@ function handleStatePost(req, res, options) {
             displayHint: display_svg,
             sessionTitle,
             contextUsage,
-            antigravityQuota,
-            claudeQuota,
             assistantLastOutput,
             assistantLastOutputTruncated,
             toolName,

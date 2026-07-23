@@ -81,6 +81,7 @@ Thinking when you prompt, typing when tools run, grooving or juggling for subage
 - **Multi-session tracking** — sessions across all agents resolve to the highest-priority state
 - **Subagent awareness** — headphones groove for 1 subagent, three-ball juggling for 2+
 - **Sessions dashboard + HUD** — right-click or tray → `Open Dashboard` to inspect live sessions, recent events, aliases, and jump to a terminal; a compact HUD near Clawd keeps current live sessions visible
+- **Subscription quota at a glance** — optional Orbit rings beside the pet and detailed Dashboard bars show the quota windows reported by supported agents. Local Claude collection is off by default and uses Claude Code's [official status-line `rate_limits` payload](https://code.claude.com/docs/en/statusline); it does not make an additional request to Anthropic. See the [data-flow and ownership notes](docs/guides/setup-guide.md#claude-code-subscription-quota-official-status-line-not-scraping).
 - **Terminal focus** — Dashboard/HUD actions jump to a specific session's terminal window; notification/attention states auto-focus the relevant terminal
 - **Process liveness detection** — detects crashed/exited supported agent processes and cleans up orphan sessions
 - **Startup recovery** — if Clawd restarts while any supported agent is still running, it stays awake instead of falling asleep

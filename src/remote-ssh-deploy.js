@@ -37,6 +37,7 @@ const { buildSshArgs, buildScpArgs } = require("./remote-ssh-runtime");
 const {
   resolveRemoteNodeBin,
   buildRemoteHookNodeCommand,
+  buildRemoteNodeEvalCommand,
 } = require("./remote-ssh-node");
 const { decodeShellBytes } = require("./remote-ssh-decode");
 const { detectRemoteShell } = require("./remote-ssh-shell-detect");
@@ -55,12 +56,15 @@ const HOOK_FILES = [
   "context-usage.js",
   "antigravity-context-usage.js",
   "claude-rate-limits.js",
+  "claude-statusline.js",
+  "codex-rate-limits.js",
   "quota-bucket.js",
   "state-payload-size.js",
   "claude-stop-disposition.js",
   "session-recovery-lease.js",
   "clawd-hook.js",
   "install.js",
+  "uninstall.js",
   "codex-hook.js",
   "codex-originator.js",
   "codex-assistant-output.js",
@@ -283,10 +287,16 @@ async function deploy({ profile, runtime, deps = {} }) {
   }
 
   // 5. ~/.claude/hooks/install.js --remote — Claude hook registration.
+  // --chain-existing (profile opt-in) additionally lets the statusline
+  // installer wrap a pre-existing third-party statusline on the remote
+  // instead of skipping it (see install.js registerClaudeStatusline).
   progress("install-claude", "start");
   {
+    const installClaudeArgs = profile.chainStatusline === true
+      ? ["--remote", "--chain-existing"]
+      : ["--remote"];
     const args = buildSshArgs(profile).concat([
-      buildRemoteHookNodeCommand(remoteNode, "install.js", ["--remote"]),
+      buildRemoteHookNodeCommand(remoteNode, "install.js", installClaudeArgs),
     ]);
     const r = await spawnAndWait(spawn, "ssh", args, { timeoutMs: 60000, runtime });
     if (r.code !== 0) {
@@ -381,6 +391,56 @@ async function stopCodexMonitor({ profile, runtime = null, deps = {} }) {
   return { ok: true, stderr: r.stderr };
 }
 
+// Full remote cleanup for profile deletion: unregister the Claude hooks and
+// statusline (restoring a chained third-party statusline from its sidecar)
+// plus the Codex hooks, so nothing on the remote keeps firing into a dead
+// forward port after the profile is gone. Deliberately NOT run on mere
+// disconnect: installed hooks are harmless while the tunnel is down (their
+// POSTs die on an instant local connection refusal) and removing them would
+// force a full redeploy on every reconnect. Best-effort by design — the
+// host may already be unreachable at delete time.
+async function uninstallRemoteIntegrations({ profile, runtime = null, deps = {} }) {
+  const spawn = deps.spawn || childProcess.spawn;
+  let remoteNode = deps.nodeBin;
+  if (!remoteNode) {
+    const resolved = await resolveRemoteNodeBin({
+      profile,
+      spawn,
+      buildSshArgs,
+      runtime,
+      verifyCache: true,
+    });
+    if (!resolved.ok) {
+      return { ok: false, stderr: resolved.message || "Remote Node.js not found" };
+    }
+    remoteNode = resolved.nodeBin;
+  }
+  const claudeUninstall = buildRemoteHookNodeCommand(remoteNode, "uninstall.js", []);
+  // Profiles deployed before uninstall.js joined the manifest still have
+  // install.js. Fall back to its exported unregister functions so an app
+  // upgrade can clean those remotes instead of silently stranding hooks.
+  const legacyClaudeUninstall = buildRemoteNodeEvalCommand(remoteNode,
+    'const i=require(process.env.HOME+"/.claude/hooks/install.js");'
+    + 'i.unregisterHooks();'
+    + 'if(typeof i.unregisterClaudeStatusline==="function")i.unregisterClaudeStatusline();');
+  const claudeCleanupStep = `if [ -f "$HOME/.claude/hooks/uninstall.js" ]; then ${claudeUninstall}; else ${legacyClaudeUninstall}; fi`;
+  const steps = [
+    claudeCleanupStep,
+    buildRemoteHookNodeCommand(remoteNode, "codex-install.js", ["--uninstall"]),
+  ];
+  let lastStderr = null;
+  let ok = true;
+  for (const cmd of steps) {
+    const args = buildSshArgs(profile).concat([cmd]);
+    const r = await spawnAndWait(spawn, "ssh", args, { timeoutMs: 30000, runtime });
+    if (r.code !== 0) {
+      ok = false;
+      lastStderr = r.stderr;
+    }
+  }
+  return { ok, stderr: lastStderr };
+}
+
 // ── Helpers ──
 
 function formatExit(r) {
@@ -400,4 +460,5 @@ module.exports = {
   deploy,
   startCodexMonitor,
   stopCodexMonitor,
+  uninstallRemoteIntegrations,
 };

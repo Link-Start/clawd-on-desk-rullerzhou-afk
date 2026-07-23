@@ -8,9 +8,6 @@ const {
   isSupersededLocalCodexProcessSession,
 } = require("./state-session-dedupe");
 const { readCodexThreadName } = require("../hooks/codex-session-index");
-const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
-const { ANTIGRAVITY_QUOTA_FIELDS } = require("../hooks/antigravity-context-usage");
-const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
 
 // ── Session source derivation ────────────────────────────────────────
 
@@ -262,8 +259,6 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     codexOriginator: (session && session.codexOriginator) || null,
     codexSource: (session && session.codexSource) || null,
     contextUsage: snapshotContextUsage(session),
-    antigravityQuota: normalizeQuotaGroup(session && session.antigravityQuota, ANTIGRAVITY_QUOTA_FIELDS),
-    claudeQuota: normalizeQuotaGroup(session && session.claudeQuota, CLAUDE_QUOTA_FIELDS),
     assistantLastOutput: (session && typeof session.assistantLastOutput === "string")
       ? session.assistantLastOutput
       : null,
@@ -351,6 +346,27 @@ function buildSessionSnapshot(sessions, options = {}) {
     hudLastTitle: hudEntries.length ? hudEntries[0].displayTitle : null,
     lastSessionId: lastSession ? lastSession.id : null,
     lastTitle: lastSession ? lastSession.displayTitle : null,
+    // Session-independent per-source account quota (src/state-account-quota.js).
+    // Injected by the caller so this module stays a pure sessions mapper.
+    // Deep-cloned at this boundary: the snapshot must stay immutable even if
+    // a caller retains and mutates the array it passed in (the store's own
+    // snapshot() already clones, but this API must not depend on that).
+    accountQuota: Array.isArray(options.accountQuota)
+      ? JSON.parse(JSON.stringify(options.accountQuota))
+      : [],
+    // Provider icons for the quota strip (same agent icons the session rows
+    // use, resolved via the injected accessor). Static per run — excluded
+    // from the snapshot signature.
+    quotaAgentIcons: (() => {
+      const iconFor = typeof options.getAgentIconUrl === "function"
+        ? options.getAgentIconUrl
+        : () => null;
+      return {
+        antigravityQuota: iconFor("antigravity-cli"),
+        claudeQuota: iconFor("claude-code"),
+        codexQuota: iconFor("codex"),
+      };
+    })(),
   };
 }
 
@@ -377,6 +393,24 @@ function sessionSnapshotSignature(snapshot) {
     hudLastTitle: snapshot.hudLastTitle,
     lastSessionId: snapshot.lastSessionId,
     lastTitle: snapshot.lastTitle,
+    // Account quota participates as groups + lastSeenAt: updatedAt moves
+    // exactly when its group changes (change-detected in the store) so it
+    // would be redundant, but lastSeenAt is minute-quantized in the store
+    // snapshot and is what keeps freshness labels honest for a reporter
+    // that confirms unchanged numbers — its once-a-minute move must reach
+    // the renderers, so it must move the signature too.
+    accountQuota: (snapshot.accountQuota || []).map((entry) => ({
+      host: entry.host,
+      antigravityQuota: entry.antigravityQuota
+        ? { group: entry.antigravityQuota.group, lastSeenAt: entry.antigravityQuota.lastSeenAt }
+        : null,
+      claudeQuota: entry.claudeQuota
+        ? { group: entry.claudeQuota.group, lastSeenAt: entry.claudeQuota.lastSeenAt }
+        : null,
+      codexQuota: entry.codexQuota
+        ? { group: entry.codexQuota.group, lastSeenAt: entry.codexQuota.lastSeenAt }
+        : null,
+    })),
     sessions: snapshot.sessions.map((entry) => ({
       id: entry.id,
       state: entry.state,
@@ -402,8 +436,6 @@ function sessionSnapshotSignature(snapshot) {
       codexOriginator: entry.codexOriginator,
       codexSource: entry.codexSource,
       contextUsage: entry.contextUsage,
-      antigravityQuota: entry.antigravityQuota,
-      claudeQuota: entry.claudeQuota,
       assistantLastOutput: entry.assistantLastOutput,
       assistantLastOutputTruncated: !!entry.assistantLastOutputTruncated,
       lastEventLabelKey: entry.lastEvent ? entry.lastEvent.labelKey : null,

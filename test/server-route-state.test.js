@@ -45,6 +45,7 @@ function callStatePost(body, overrides = {}) {
     res.resolve = resolve;
     const calls = {
       updateSession: [],
+      updateAccountQuota: [],
       setState: [],
       recorder: [],
       resolved: [],
@@ -64,6 +65,7 @@ function callStatePost(body, overrides = {}) {
       isAgentEnabled: () => true,
       setState: (...args) => calls.setState.push(args),
       updateSession: (...args) => calls.updateSession.push(args),
+      updateAccountQuota: (...args) => calls.updateAccountQuota.push(args),
       resolvePermissionEntry: (perm, behavior, message) => calls.resolved.push({ perm, behavior, message }),
       showCodexUserInputBubble: (input) => { calls.userInputShown.push(input); return true; },
       clearCodexUserInputBubbles: (...args) => calls.userInputCleared.push(args),
@@ -164,8 +166,6 @@ describe("server-route-state POST", () => {
         displayHint: "display.svg",
         sessionTitle: "Work title",
         contextUsage: null,
-        antigravityQuota: null,
-        claudeQuota: null,
         assistantLastOutput: null,
         assistantLastOutputTruncated: false,
         toolName: "Read",
@@ -205,6 +205,7 @@ describe("server-route-state POST", () => {
           options: [{ label: "Focused", description: "One module" }],
         }],
       },
+      codex_quota: { codexWeekly: { usedPercent: 43 } },
     }));
 
     assert.strictEqual(request.statusCode, 200);
@@ -231,12 +232,18 @@ describe("server-route-state POST", () => {
     assert.strictEqual(request.calls.updateSession[0][1], "notification");
     assert.strictEqual(request.calls.updateSession[0][2], "CodexUserInputRequest");
     assert.strictEqual(request.calls.updateSession[0][3].transientPermissionEvent, true);
+    assert.deepStrictEqual(request.calls.updateAccountQuota, [[
+      "remote-box",
+      { antigravityQuota: null, claudeQuota: null, codexQuota: { codexWeekly: { usedPercent: 43 } } },
+    ]]);
 
     const resolved = await callStatePost(JSON.stringify({
       state: "idle",
       session_id: "codex:remote",
       event: "CodexUserInputResolved",
       agent_id: "codex",
+      host: "remote-box",
+      codex_quota: { codexFiveHour: { usedPercent: 12 } },
       codex_user_input: { phase: "resolved", call_id: "call_remote" },
     }));
     assert.strictEqual(resolved.statusCode, 200);
@@ -244,6 +251,10 @@ describe("server-route-state POST", () => {
       "codex:remote", "call_remote", "codex-user-input-resolved",
     ]]);
     assert.deepStrictEqual(resolved.calls.updateSession, []);
+    assert.deepStrictEqual(resolved.calls.updateAccountQuota, [[
+      "remote-box",
+      { antigravityQuota: null, claudeQuota: null, codexQuota: { codexFiveHour: { usedPercent: 12 } } },
+    ]]);
   });
 
   it("forwards Kimi Code permission context to updateSession (#563)", async () => {
@@ -444,7 +455,10 @@ describe("server-route-state POST", () => {
     assert.strictEqual(res.calls.updateSession[0][3].contextUsage, null);
   });
 
-  it("passes valid antigravity_quota to updateSession", async () => {
+  // Account quota is session-independent: any POST carrying it feeds the
+  // per-source store (keyed by the reporting host, null = local), and it
+  // never rides updateSession opts.
+  it("routes valid antigravity_quota to updateAccountQuota, not updateSession", async () => {
     const res = await callStatePost(JSON.stringify({
       state: "idle",
       session_id: "sid",
@@ -455,13 +469,16 @@ describe("server-route-state POST", () => {
     }));
 
     assert.strictEqual(res.statusCode, 200);
-    assert.deepStrictEqual(res.calls.updateSession[0][3].antigravityQuota, {
+    assert.strictEqual(res.calls.updateAccountQuota.length, 1);
+    assert.strictEqual(res.calls.updateAccountQuota[0][0], null);
+    assert.deepStrictEqual(res.calls.updateAccountQuota[0][1].antigravityQuota, {
       geminiFiveHour: { usedPercent: 100 },
       geminiWeekly: { usedPercent: 98, resetAt: 1738831180000 },
     });
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(res.calls.updateSession[0][3], "antigravityQuota"), false);
   });
 
-  it("drops invalid antigravity_quota without rejecting state", async () => {
+  it("does not call updateAccountQuota for invalid antigravity_quota", async () => {
     const res = await callStatePost(JSON.stringify({
       state: "idle",
       session_id: "sid",
@@ -469,13 +486,14 @@ describe("server-route-state POST", () => {
     }));
 
     assert.strictEqual(res.statusCode, 200);
-    assert.strictEqual(res.calls.updateSession[0][3].antigravityQuota, null);
+    assert.strictEqual(res.calls.updateAccountQuota.length, 0);
   });
 
-  it("passes valid claude_quota to updateSession", async () => {
+  it("routes claude_quota to updateAccountQuota keyed by the reporting host", async () => {
     const res = await callStatePost(JSON.stringify({
       state: "idle",
       session_id: "sid",
+      host: "raspberrypi",
       claude_quota: {
         claudeFiveHour: { usedPercent: 24, resetAt: 1738425600000 },
         claudeWeekly: { usedPercent: 41 },
@@ -483,13 +501,15 @@ describe("server-route-state POST", () => {
     }));
 
     assert.strictEqual(res.statusCode, 200);
-    assert.deepStrictEqual(res.calls.updateSession[0][3].claudeQuota, {
+    assert.strictEqual(res.calls.updateAccountQuota.length, 1);
+    assert.strictEqual(res.calls.updateAccountQuota[0][0], "raspberrypi");
+    assert.deepStrictEqual(res.calls.updateAccountQuota[0][1].claudeQuota, {
       claudeFiveHour: { usedPercent: 24, resetAt: 1738425600000 },
       claudeWeekly: { usedPercent: 41 },
     });
   });
 
-  it("drops invalid claude_quota without rejecting state", async () => {
+  it("does not call updateAccountQuota for invalid claude_quota", async () => {
     const res = await callStatePost(JSON.stringify({
       state: "idle",
       session_id: "sid",
@@ -497,13 +517,13 @@ describe("server-route-state POST", () => {
     }));
 
     assert.strictEqual(res.statusCode, 200);
-    assert.strictEqual(res.calls.updateSession[0][3].claudeQuota, null);
+    assert.strictEqual(res.calls.updateAccountQuota.length, 0);
   });
 
   // #590 B2 — metadata_only POSTs (statusline refreshes) bypass the
   // updateSession lifecycle machine entirely and go through
   // updateSessionMetadata, which can only annotate an existing session.
-  it("routes metadata_only POSTs to updateSessionMetadata, never updateSession", async () => {
+  it("routes metadata_only POSTs around updateSession: quota to the store, context to updateSessionMetadata", async () => {
     const metadataCalls = [];
     const res = await callStatePost(JSON.stringify({
       state: "idle",
@@ -511,6 +531,7 @@ describe("server-route-state POST", () => {
       metadata_only: true,
       session_id: "sid",
       agent_id: "claude-code",
+      context_usage: { used: 50000, limit: 200000, percent: 25, source: "claude" },
       claude_quota: { claudeWeekly: { usedPercent: 41, resetAt: 1738831180000 } },
     }), {
       ctx: { updateSessionMetadata: (...args) => metadataCalls.push(args) },
@@ -519,11 +540,46 @@ describe("server-route-state POST", () => {
     assert.strictEqual(res.statusCode, 204);
     assert.strictEqual(res.calls.updateSession.length, 0);
     assert.strictEqual(res.calls.setState.length, 0);
-    assert.strictEqual(metadataCalls.length, 1);
-    assert.strictEqual(metadataCalls[0][0], "sid");
-    assert.deepStrictEqual(metadataCalls[0][1].claudeQuota, {
+    assert.strictEqual(res.calls.updateAccountQuota.length, 1);
+    assert.strictEqual(res.calls.updateAccountQuota[0][0], null);
+    assert.deepStrictEqual(res.calls.updateAccountQuota[0][1].claudeQuota, {
       claudeWeekly: { usedPercent: 41, resetAt: 1738831180000 },
     });
+    assert.strictEqual(metadataCalls.length, 1);
+    assert.strictEqual(metadataCalls[0][0], "sid");
+    assert.deepStrictEqual(metadataCalls[0][1], {
+      contextUsage: { used: 50000, limit: 200000, percent: 25, source: "claude" },
+    });
+  });
+
+  it("routes remote metadata_only codex_quota to the store keyed by host (remote monitor POSTs)", async () => {
+    const metadataCalls = [];
+    const res = await callStatePost(JSON.stringify({
+      state: "idle",
+      preserve_state: true,
+      metadata_only: true,
+      session_id: "codex:abc",
+      agent_id: "codex",
+      host: "raspberrypi",
+      codex_quota: {
+        codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+        codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+      },
+    }), {
+      ctx: { updateSessionMetadata: (...args) => metadataCalls.push(args) },
+    });
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.calls.updateSession.length, 0);
+    assert.strictEqual(res.calls.updateAccountQuota.length, 1);
+    assert.strictEqual(res.calls.updateAccountQuota[0][0], "raspberrypi");
+    assert.deepStrictEqual(res.calls.updateAccountQuota[0][1].codexQuota, {
+      codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+      codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+    });
+    // No context payload → no session annotation call at all ("session
+    // unknown" is not even reached; quota no longer depends on sessions).
+    assert.strictEqual(metadataCalls.length, 0);
   });
 
   it("metadata_only still respects the disabled-agent gate", async () => {
@@ -543,6 +599,7 @@ describe("server-route-state POST", () => {
 
     assert.strictEqual(res.statusCode, 204);
     assert.strictEqual(metadataCalls.length, 0);
+    assert.strictEqual(res.calls.updateAccountQuota.length, 0);
   });
 
   it("metadata_only does not record into the recent-hook-events ring", async () => {

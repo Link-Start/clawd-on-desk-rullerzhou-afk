@@ -106,6 +106,15 @@ function createSettingsEffectRouter(options = {}) {
     }
     if ("lowPowerIdleMode" in changes) {
       sendToRenderer("low-power-idle-mode-change", changes.lowPowerIdleMode);
+      // If the HUD/ring were already hidden when low-power mode was enabled,
+      // no visibility transition would otherwise schedule their delayed
+      // destruction. Re-sync after mirrors update so hidden windows are
+      // reclaimed under the new policy.
+      safeCall(
+        logWarn,
+        "Clawd: low-power Session HUD sync failed:",
+        syncSessionHudVisibility
+      );
     }
     if ("petTint" in changes) {
       const activeTheme = getActiveTheme();
@@ -212,12 +221,22 @@ function createSettingsEffectRouter(options = {}) {
       || "sessionHudShowStateLabels" in changes
       || "sessionHudShowElapsed" in changes
       || "sessionHudShowContextUsage" in changes
+      || "sessionHudShowQuota" in changes
     ) {
       try {
         syncSessionHudVisibility();
         repositionFloatingBubbles();
       } catch (err) {
         warn(logWarn, "Clawd: session HUD setting sync failed:", err);
+      }
+    }
+    if ("quotaMergeSources" in changes) {
+      try {
+        // Snapshot CONTENT changes (merged vs per-source accountQuota), so a
+        // forced re-emit is needed for the Dashboard/HUD to pick it up.
+        emitSessionSnapshot({ force: true });
+      } catch (err) {
+        warn(logWarn, "Clawd: quota merge mode re-emit failed:", err);
       }
     }
     if ("sessionHudCleanupDetached" in changes && changes.sessionHudCleanupDetached === true) {

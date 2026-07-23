@@ -384,6 +384,10 @@ const _settingsController = createSettingsController({
     uninstallAutoStart: _uninstallAutoStartHook,
     resolveTextScaleDisplayKey: () => getSettingsDisplayKey(),
     syncClaudeHooksNow: () => _server.syncClawdHooks({ source: "settings", automatic: false }),
+    setClaudeQuotaCollectionEnabled: (enabled) => _server.setClaudeQuotaCollectionEnabled({
+      enabled,
+      source: "settings-quota-collection",
+    }),
     uninstallClaudeHooksNow: _uninstallClaudeHooksNow,
     startClaudeSettingsWatcher: () => _server.startClaudeSettingsWatcher(),
     stopClaudeSettingsWatcher: () => _server.stopClaudeSettingsWatcher(),
@@ -916,6 +920,9 @@ let sessionHudEnabled = _settingsController.get("sessionHudEnabled");
 let sessionHudShowStateLabels = _settingsController.get("sessionHudShowStateLabels");
 let sessionHudShowElapsed = _settingsController.get("sessionHudShowElapsed");
 let sessionHudShowContextUsage = _settingsController.get("sessionHudShowContextUsage");
+let sessionHudShowQuota = _settingsController.get("sessionHudShowQuota");
+let claudeQuotaCollectionEnabled = _settingsController.get("claudeQuotaCollectionEnabled");
+let quotaMergeSources = _settingsController.get("quotaMergeSources");
 let sessionHudCleanupDetached = _settingsController.get("sessionHudCleanupDetached");
 let sessionHudPinned = _settingsController.get("sessionHudPinned");
 let sessionStaleMs = _settingsController.get("sessionStaleMs");
@@ -1275,6 +1282,7 @@ let broadcastSessionHudSnapshot = () => {};
 let sendSessionHudI18n = () => {};
 let getSessionHudReservedOffset = () => 0;
 let getSessionHudWindow = () => null;
+let getQuotaRingWindow = () => null;
 const themeFadeSequencer = createThemeFadeSequencer({
   getRenderWindow: () => win,
   getHitWindow: () => hitWin,
@@ -1346,6 +1354,7 @@ const topmostRuntime = createTopmostRuntime({
   getPendingPermissions: () => pendingPermissions,
   getUpdateBubbleWindow: () => _updateBubble.getBubbleWindow(),
   getSessionHudWindow: () => getSessionHudWindow(),
+  getQuotaRingWindow: () => getQuotaRingWindow(),
   getContextMenuOwner: () => contextMenuOwner,
   getNearestWorkArea,
   getPetWindowBounds,
@@ -1427,6 +1436,7 @@ const _permCtx = {
   reportShortcutFailure: (actionId, reason) => shortcutRuntime.reportFailure(actionId, reason),
   clearShortcutFailure: (actionId) => shortcutRuntime.clearFailure(actionId),
   repositionUpdateBubble: () => repositionUpdateBubble(),
+  repositionSessionHud: () => repositionSessionHud(),
   getTelegramApprovalClient: () => getTelegramApprovalClient(),
   getRemoteApprovalClients: () => {
     const client = getFeishuApprovalClient();
@@ -1482,6 +1492,7 @@ const _updateBubbleCtx = {
   getTextScale: () => getTextScaleForPetWindows(),
   guardAlwaysOnTop,
   reapplyMacVisibility,
+  repositionSessionHud: () => repositionSessionHud(),
 };
 const _updateBubble = initUpdateBubble(_updateBubbleCtx);
 const {
@@ -1558,6 +1569,9 @@ const _stateCtx = {
   get theme() { return getActiveTheme(); },
   get win() { return win; },
   get hitWin() { return hitWin; },
+  // Last-known account quota survives app restarts (state-account-quota.js).
+  accountQuotaPersistPath: require("./state-account-quota").DEFAULT_PERSIST_PATH,
+  get quotaMergeSources() { return quotaMergeSources; },
   get doNotDisturb() { return doNotDisturb; },
   set doNotDisturb(v) { doNotDisturb = v; },
   get miniMode() { return _mini.getMiniMode(); },
@@ -1961,6 +1975,7 @@ const _sessionHud = require("./session-hud")({
   get sessionHudShowStateLabels() { return sessionHudShowStateLabels; },
   get sessionHudShowElapsed() { return sessionHudShowElapsed; },
   get sessionHudShowContextUsage() { return sessionHudShowContextUsage; },
+  get sessionHudShowQuota() { return sessionHudShowQuota; },
   get sessionHudPinned() { return sessionHudPinned; },
   get lowPowerIdleMode() { return lowPowerIdleMode; },
   getMiniMode: () => _mini.getMiniMode(),
@@ -1972,6 +1987,8 @@ const _sessionHud = require("./session-hud")({
   getSessionHudAnchorRect,
   getNearestWorkArea,
   getTextScale: () => getTextScaleForPetWindows(),
+  getPermissionBubbleBounds: () => _perm.getVisibleBubbleBounds(),
+  getUpdateBubbleWindow: () => _updateBubble.getBubbleWindow(),
   guardAlwaysOnTop,
   reapplyMacVisibility,
   onReservedOffsetChange: () => repositionFloatingBubbles(),
@@ -1982,6 +1999,7 @@ broadcastSessionHudSnapshot = _sessionHud.broadcastSessionSnapshot;
 sendSessionHudI18n = _sessionHud.sendI18n;
 getSessionHudReservedOffset = _sessionHud.getHudReservedOffset;
 getSessionHudWindow = _sessionHud.getWindow;
+getQuotaRingWindow = _sessionHud.getQuotaRingWindow;
 
 agentRuntime = createAgentRuntimeMain({
   getServer: () => _server,
@@ -1999,6 +2017,7 @@ agentRuntime = createAgentRuntimeMain({
 const _serverCtx = {
   get manageClaudeHooksAutomatically() { return manageClaudeHooksAutomatically; },
   get autoStartWithClaude() { return autoStartWithClaude; },
+  get claudeQuotaCollectionEnabled() { return claudeQuotaCollectionEnabled; },
   get doNotDisturb() { return doNotDisturb; },
   shouldDropForDnd: () => _state.shouldDropForDnd ? _state.shouldDropForDnd() : doNotDisturb,
   get hideBubbles() { return getAllBubblesHidden(); },
@@ -2038,6 +2057,7 @@ const _serverCtx = {
   setState,
   updateSession: agentRuntime.updateSessionFromServer,
   updateSessionMetadata: (sessionId, opts) => _state.updateSessionMetadata(sessionId, opts),
+  updateAccountQuota: (host, quotas) => _state.updateAccountQuota(host, quotas),
   resolvePermissionEntry,
   sendPermissionResponse,
   addPendingPermission,
@@ -3269,6 +3289,9 @@ const SETTINGS_MIRROR_SETTERS = {
   sessionHudShowStateLabels: (v) => { sessionHudShowStateLabels = v; },
   sessionHudShowElapsed: (v) => { sessionHudShowElapsed = v; },
   sessionHudShowContextUsage: (v) => { sessionHudShowContextUsage = v; },
+  sessionHudShowQuota: (v) => { sessionHudShowQuota = v; },
+  claudeQuotaCollectionEnabled: (v) => { claudeQuotaCollectionEnabled = v; },
+  quotaMergeSources: (v) => { quotaMergeSources = v; },
   sessionHudCleanupDetached: (v) => { sessionHudCleanupDetached = v; },
   sessionHudPinned: (v) => { sessionHudPinned = v; },
   sessionStaleMs: (v) => { sessionStaleMs = v; }, workingStaleMs: (v) => { workingStaleMs = v; },
@@ -3523,6 +3546,7 @@ registerSettingsIpc({
   fs,
   path,
   settingsController: _settingsController,
+  getQuotaSourceCount: () => _state.getQuotaSourceCount(),
   themeLoader,
   codexPetMain,
   getSettingsWindow,

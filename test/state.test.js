@@ -1936,123 +1936,136 @@ describe("updateSession()", () => {
     });
   });
 
-  it("stores antigravityQuota from updateSession opts", () => {
-    update(api, {
-      id: "s1",
-      state: "working",
-      antigravityQuota: {
-        geminiFiveHour: { usedPercent: 100 },
-        geminiWeekly: { usedPercent: 98, resetAt: 1738831180000 },
-      },
-    });
-
-    assert.deepStrictEqual(api.sessions.get("s1").antigravityQuota, {
-      geminiFiveHour: { usedPercent: 100 },
-      geminiWeekly: { usedPercent: 98, resetAt: 1738831180000 },
-    });
-  });
-
-  it("keeps antigravityQuota sticky when later events omit it", () => {
-    update(api, {
-      id: "s1",
-      state: "thinking",
-      antigravityQuota: { thirdPartyWeekly: { usedPercent: 69 } },
-    });
-    update(api, { id: "s1", state: "working" });
-
-    assert.deepStrictEqual(api.sessions.get("s1").antigravityQuota, {
-      thirdPartyWeekly: { usedPercent: 69 },
-    });
-  });
-
-  it("updates antigravityQuota without changing state when preserveState is true", () => {
-    update(api, {
-      id: "antigravity:abc",
-      state: "working",
-      agentId: "antigravity-cli",
-    });
-    api.updateSession("antigravity:abc", "idle", undefined, {
-      agentId: "antigravity-cli",
-      cwd: "/tmp",
-      preserveState: true,
-      antigravityQuota: { geminiWeekly: { usedPercent: 98, resetAt: 1738831180000 } },
-    });
-
-    const session = api.sessions.get("antigravity:abc");
-    assert.strictEqual(session.state, "working");
-    assert.deepStrictEqual(session.antigravityQuota, {
-      geminiWeekly: { usedPercent: 98, resetAt: 1738831180000 },
-    });
-  });
-
-  it("stores claudeQuota from updateSession opts", () => {
-    update(api, {
-      id: "s1",
-      state: "working",
+  // Account quota is not session state: it lives in the session-independent
+  // per-source store (src/state-account-quota.js), fed via updateAccountQuota
+  // and exported as snapshot.accountQuota — the headline case is "check a
+  // remote's quota before starting work" when no session exists at all.
+  it("updateAccountQuota stores per-source quota with no session required", () => {
+    const resetAt = Date.now() + 3600000;
+    const applied = api.updateAccountQuota("pi", {
       claudeQuota: {
-        claudeFiveHour: { usedPercent: 24, resetAt: 1738425600000 },
+        claudeFiveHour: { usedPercent: 24, resetAt },
         claudeWeekly: { usedPercent: 41 },
       },
     });
 
-    assert.deepStrictEqual(api.sessions.get("s1").claudeQuota, {
-      claudeFiveHour: { usedPercent: 24, resetAt: 1738425600000 },
-      claudeWeekly: { usedPercent: 41 },
+    assert.strictEqual(applied, true);
+    assert.strictEqual(api.sessions.size, 0, "quota must never create sessions");
+    const { snapshot } = api.emitSessionSnapshot({ force: true });
+    assert.strictEqual(snapshot.accountQuota.length, 1);
+    const entry = snapshot.accountQuota[0];
+    assert.strictEqual(entry.host, "pi");
+    assert.deepStrictEqual(entry.claudeQuota.group, {
+      claudeFiveHour: { usedPercent: 24, resetAt, lastSeenAt: 0 },
+      claudeWeekly: { usedPercent: 41, lastSeenAt: 0 },
     });
+    assert.ok(Number.isFinite(entry.claudeQuota.updatedAt));
   });
 
-  it("keeps claudeQuota sticky when later events omit it", () => {
-    update(api, {
-      id: "s1",
-      state: "thinking",
-      claudeQuota: { claudeWeekly: { usedPercent: 41 } },
-    });
-    update(api, { id: "s1", state: "working" });
+  it("updateAccountQuota keeps sources independent and sorts local first", () => {
+    const resetAt = Date.now() + 3600000;
+    api.updateAccountQuota("pi", { codexQuota: { codexWeekly: { usedPercent: 43, resetAt } } });
+    api.updateAccountQuota(null, { codexQuota: { codexWeekly: { usedPercent: 7, resetAt } } });
 
-    assert.deepStrictEqual(api.sessions.get("s1").claudeQuota, {
-      claudeWeekly: { usedPercent: 41 },
-    });
+    const { snapshot } = api.emitSessionSnapshot({ force: true });
+    assert.deepStrictEqual(snapshot.accountQuota.map((e) => e.host), [null, "pi"]);
+    assert.strictEqual(snapshot.accountQuota[0].codexQuota.group.codexWeekly.usedPercent, 7);
+    assert.strictEqual(snapshot.accountQuota[1].codexQuota.group.codexWeekly.usedPercent, 43);
   });
 
-  it("updates claudeQuota without changing state when preserveState is true", () => {
-    update(api, { id: "s1", state: "working" });
-    api.updateSession("s1", "idle", undefined, {
-      preserveState: true,
-      claudeQuota: { claudeFiveHour: { usedPercent: 24, resetAt: 1738425600000 } },
+  it("updateAccountQuota change-detects identical refreshes (no re-broadcast, no re-stamp)", () => {
+    const broadcasts = [];
+    const localApi = require("../src/state")(makeCtx({
+      broadcastSessionSnapshot: (snapshot) => broadcasts.push(snapshot),
+    }));
+    const resetAt = Date.now() + 3600000;
+    localApi.updateAccountQuota(null, { claudeQuota: { claudeWeekly: { usedPercent: 41, resetAt } } });
+    const before = broadcasts.length;
+    assert.ok(before > 0, "first quota report must broadcast");
+    const stampBefore = localApi.getLastSessionSnapshot().accountQuota[0].claudeQuota.updatedAt;
+
+    const applied = localApi.updateAccountQuota(null, {
+      claudeQuota: { claudeWeekly: { usedPercent: 41, resetAt } },
     });
 
-    const session = api.sessions.get("s1");
-    assert.strictEqual(session.state, "working");
-    assert.deepStrictEqual(session.claudeQuota, {
-      claudeFiveHour: { usedPercent: 24, resetAt: 1738425600000 },
+    assert.strictEqual(applied, false);
+    assert.strictEqual(broadcasts.length, before, "identical refresh must not re-broadcast");
+    assert.strictEqual(
+      localApi.getLastSessionSnapshot().accountQuota[0].claudeQuota.updatedAt,
+      stampBefore,
+      "identical refresh must not look fresher"
+    );
+  });
+
+  it("updateAccountQuota drops invalid groups", () => {
+    const applied = api.updateAccountQuota("pi", {
+      claudeQuota: { claudeFiveHour: { usedPercent: "not-a-number" } },
     });
+
+    assert.strictEqual(applied, false);
+    const { snapshot } = api.emitSessionSnapshot({ force: true });
+    assert.deepStrictEqual(snapshot.accountQuota, []);
+  });
+
+  it("cleanup flushes pending account-quota writes to disk (before-quit path)", () => {
+    const persistPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "clawd-aq-")), "account-quota.json");
+    const localApi = require("../src/state")(makeCtx({ accountQuotaPersistPath: persistPath }));
+    localApi.updateAccountQuota("pi", {
+      claudeQuota: { claudeWeekly: { usedPercent: 41, resetAt: Date.now() + 3600000 } },
+    });
+    // The persist debounce has not fired yet — before-quit cleanup must not
+    // lose the final window of updates.
+    localApi.cleanup();
+
+    const persisted = JSON.parse(fs.readFileSync(persistPath, "utf8"));
+    assert.strictEqual(persisted.sources.length, 1);
+    assert.strictEqual(persisted.sources[0].host, "pi");
+  });
+
+  it("rejects incoming buckets whose resetAt already passed, keeps live siblings", () => {
+    api.updateAccountQuota(null, {
+      claudeQuota: {
+        // Already expired at write time: the number is wrong, not stale —
+        // the store refuses it outright. (Buckets that expire AFTER being
+        // stored are flagged instead; covered with a mocked clock in
+        // test/state-account-quota.test.js.)
+        claudeFiveHour: { usedPercent: 80, resetAt: Date.now() - 60000 },
+        claudeWeekly: { usedPercent: 41, resetAt: Date.now() + 3600000 },
+      },
+    });
+
+    const { snapshot } = api.emitSessionSnapshot({ force: true });
+    const group = snapshot.accountQuota[0].claudeQuota.group;
+    assert.strictEqual(group.claudeFiveHour, undefined);
+    assert.strictEqual(group.claudeWeekly.expired, undefined);
+    assert.strictEqual(group.claudeWeekly.usedPercent, 41);
   });
 
   // #590 B2 — statusline refresh POSTs go through updateSessionMetadata,
-  // which annotates quota/context onto an existing session and does nothing
+  // which annotates context usage onto an existing session and does nothing
   // else: no session creation, no recentEvents append, no updatedAt bump.
-  it("updateSessionMetadata annotates quota without touching lifecycle fields", () => {
+  // (Account quota deliberately does NOT flow through here — see the
+  // updateAccountQuota tests above.)
+  it("updateSessionMetadata annotates contextUsage without touching lifecycle fields", () => {
     update(api, { id: "s1", state: "working" });
     const session = api.sessions.get("s1");
     session.updatedAt = 12345; // pin so a bump is detectable
     const recentEventsBefore = JSON.stringify(session.recentEvents);
 
     const applied = api.updateSessionMetadata("s1", {
-      claudeQuota: { claudeFiveHour: { usedPercent: 24, resetAt: 1738425600000 } },
+      contextUsage: { used: 50000, limit: 200000, percent: 25, source: "claude" },
     });
 
     assert.strictEqual(applied, true);
     assert.strictEqual(session.state, "working");
     assert.strictEqual(session.updatedAt, 12345);
     assert.strictEqual(JSON.stringify(session.recentEvents), recentEventsBefore);
-    assert.deepStrictEqual(session.claudeQuota, {
-      claudeFiveHour: { usedPercent: 24, resetAt: 1738425600000 },
-    });
+    assert.deepStrictEqual(session.contextUsage, { used: 50000, limit: 200000, percent: 25, source: "claude" });
+    assert.ok(Number.isFinite(session.metadataUpdatedAt), "telemetry change must stamp metadataUpdatedAt");
   });
 
   it("updateSessionMetadata never creates a session for an unknown id", () => {
     const applied = api.updateSessionMetadata("ghost", {
-      claudeQuota: { claudeWeekly: { usedPercent: 55 } },
       contextUsage: { used: 1000, limit: 200000, percent: 1, source: "claude" },
     });
 
@@ -2065,45 +2078,11 @@ describe("updateSession()", () => {
     const session = api.sessions.get("s1");
 
     const applied = api.updateSessionMetadata("s1", {
-      claudeQuota: { claudeFiveHour: { usedPercent: "not-a-number" } },
+      contextUsage: { used: -5 },
     });
 
     assert.strictEqual(applied, false);
-    assert.strictEqual(session.claudeQuota, null);
-  });
-
-  it("updateSessionMetadata updates contextUsage and antigravityQuota too", () => {
-    update(api, { id: "antigravity:abc", state: "idle", agentId: "antigravity-cli" });
-
-    api.updateSessionMetadata("antigravity:abc", {
-      contextUsage: { used: 50000, limit: 1000000, percent: 5, source: "antigravity" },
-      antigravityQuota: { geminiWeekly: { usedPercent: 98, resetAt: 1738831180000 } },
-    });
-
-    const session = api.sessions.get("antigravity:abc");
-    assert.deepStrictEqual(session.contextUsage, { used: 50000, limit: 1000000, percent: 5, source: "antigravity" });
-    assert.deepStrictEqual(session.antigravityQuota, {
-      geminiWeekly: { usedPercent: 98, resetAt: 1738831180000 },
-    });
-  });
-
-  it("updateSessionMetadata broadcasts the refreshed snapshot (signature dedup applies)", () => {
-    const broadcasts = [];
-    const localApi = require("../src/state")(makeCtx({
-      broadcastSessionSnapshot: (snapshot) => broadcasts.push(snapshot),
-    }));
-    update(localApi, { id: "s1", state: "working" });
-    const before = broadcasts.length;
-
-    localApi.updateSessionMetadata("s1", {
-      claudeQuota: { claudeWeekly: { usedPercent: 41 } },
-    });
-
-    assert.ok(broadcasts.length > before, "quota change must broadcast a fresh snapshot");
-    localApi.updateSessionMetadata("s1", {
-      claudeQuota: { claudeWeekly: { usedPercent: 41 } },
-    });
-    assert.strictEqual(broadcasts.length, before + 1, "identical refresh must be deduped by signature");
+    assert.strictEqual(session.contextUsage, null);
   });
 
   it("updateSessionMetadata stamps metadataUpdatedAt on change only, never updatedAt", () => {
@@ -2112,30 +2091,30 @@ describe("updateSession()", () => {
     session.updatedAt = 12345;
 
     api.updateSessionMetadata("s1", {
-      claudeQuota: { claudeWeekly: { usedPercent: 41 } },
+      contextUsage: { used: 100, limit: 200000, percent: 0, source: "claude" },
     });
-    assert.ok(Number.isFinite(session.metadataUpdatedAt), "quota change must stamp metadataUpdatedAt");
+    assert.ok(Number.isFinite(session.metadataUpdatedAt), "telemetry change must stamp metadataUpdatedAt");
     assert.strictEqual(session.updatedAt, 12345);
 
     session.metadataUpdatedAt = 777; // pin so a re-stamp is detectable
     api.updateSessionMetadata("s1", {
-      claudeQuota: { claudeWeekly: { usedPercent: 41 } },
+      contextUsage: { used: 100, limit: 200000, percent: 0, source: "claude" },
     });
     assert.strictEqual(session.metadataUpdatedAt, 777, "identical refresh must not re-stamp");
   });
 
-  it("lifecycle events carry metadataUpdatedAt forward with the quota they preserve", () => {
+  it("lifecycle events carry metadataUpdatedAt forward with the telemetry they preserve", () => {
     update(api, { id: "s1", state: "working" });
     api.updateSessionMetadata("s1", {
-      claudeQuota: { claudeWeekly: { usedPercent: 41 } },
+      contextUsage: { used: 100, limit: 200000, percent: 0, source: "claude" },
     });
     api.sessions.get("s1").metadataUpdatedAt = 777; // pin to make loss detectable
 
     update(api, { id: "s1", state: "working", event: "PostToolUse" });
 
     const session = api.sessions.get("s1");
-    assert.deepStrictEqual(session.claudeQuota, { claudeWeekly: { usedPercent: 41 } });
-    assert.strictEqual(session.metadataUpdatedAt, 777, "hook-event rebuild must not drop the quota freshness stamp");
+    assert.deepStrictEqual(session.contextUsage, { used: 100, limit: 200000, percent: 0, source: "claude" });
+    assert.strictEqual(session.metadataUpdatedAt, 777, "hook-event rebuild must not drop the freshness stamp");
   });
 
   it("trims whitespace on sessionTitle", () => {
@@ -2327,7 +2306,11 @@ describe("buildSessionSnapshot", () => {
 
   it("returns a JSON-serializable empty snapshot", () => {
     const snapshot = api.buildSessionSnapshot();
-    assert.deepStrictEqual(snapshot, {
+    // Icon URLs are absolute file:// paths (machine-dependent) — assert the
+    // shape, then compare the rest exactly.
+    const { quotaAgentIcons, ...rest } = snapshot;
+    assert.deepStrictEqual(Object.keys(quotaAgentIcons).sort(), ["antigravityQuota", "claudeQuota", "codexQuota"]);
+    assert.deepStrictEqual(rest, {
       sessions: [],
       groups: [],
       orderedIds: [],
@@ -2337,6 +2320,7 @@ describe("buildSessionSnapshot", () => {
       hudLastTitle: null,
       lastSessionId: null,
       lastTitle: null,
+      accountQuota: [],
     });
     assert.doesNotThrow(() => JSON.stringify(snapshot));
   });

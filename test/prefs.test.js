@@ -55,6 +55,9 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.sessionHudShowStateLabels, true);
     assert.strictEqual(d.sessionHudShowElapsed, false);
     assert.strictEqual(d.sessionHudShowContextUsage, true);
+    assert.strictEqual(d.sessionHudShowQuota, true);
+    assert.strictEqual(d.claudeQuotaCollectionEnabled, false);
+    assert.strictEqual(d.quotaMergeSources, false);
     assert.strictEqual(d.sessionHudCleanupDetached, true);
     assert.strictEqual("sessionHudAutoHide" in d, false);
     assert.strictEqual(d.sessionHudPinned, false);

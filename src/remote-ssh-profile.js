@@ -24,6 +24,13 @@
 
 const path = require("path");
 
+// Must stay equal to hooks/server-config.js SERVER_PORTS: remote hooks and
+// the remotely registered Claude statusline discover the tunnel by walking
+// SERVER_PORTS on the remote's 127.0.0.1 (there is no ~/.clawd/runtime.json
+// there). Constraining the forward port to this set is what guarantees that
+// walk always finds the tunnel — widen one list without the other and
+// remote quota/state POSTs silently stop. Enforced by a test
+// (test/remote-ssh-profile.test.js).
 const REMOTE_FORWARD_PORTS = [23333, 23334, 23335, 23336, 23337];
 
 const HOST_BARE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -35,6 +42,7 @@ const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]/;
 // quoting on the remote even with our ssh-stdin write. Single quote, double
 // quote, backtick, dollar, backslash, exclamation.
 const HOST_PREFIX_FORBIDDEN_RE = /[\x00-\x1f\x7f'"`$\\!]/;
+const MAX_MANAGED_DEPLOY_TARGETS = 8;
 
 function isValidDetectedRemoteNodeBin(value) {
   return typeof value === "string"
@@ -97,6 +105,72 @@ function isValidId(value) {
   return typeof value === "string" && /^[a-zA-Z0-9_-]{1,64}$/.test(value);
 }
 
+function sanitizeManagedDeployTarget(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const target = {
+    host: typeof raw.host === "string" ? raw.host.trim() : "",
+    port: Number.isInteger(raw.port) && raw.port !== 22 ? raw.port : undefined,
+    identityFile: typeof raw.identityFile === "string" && raw.identityFile.length > 0
+      ? raw.identityFile
+      : undefined,
+    remoteForwardPort: Number.isInteger(raw.remoteForwardPort) ? raw.remoteForwardPort : 23333,
+    hostPrefix: typeof raw.hostPrefix === "string" && raw.hostPrefix.length > 0
+      ? raw.hostPrefix
+      : undefined,
+    chainStatusline: raw.chainStatusline === true,
+    deployedAt: Number(raw.deployedAt),
+  };
+  if (!isValidHost(target.host)
+    || (target.port !== undefined && !isValidPort(target.port))
+    || (target.identityFile !== undefined && !isValidIdentityFile(target.identityFile))
+    || !isValidRemoteForwardPort(target.remoteForwardPort)
+    || (target.hostPrefix !== undefined && !isValidHostPrefix(target.hostPrefix))
+    || !Number.isFinite(target.deployedAt)
+    || target.deployedAt <= 0) {
+    return null;
+  }
+  if (isValidDetectedRemoteNodeBin(raw.detectedRemoteNodeBin)) {
+    target.detectedRemoteNodeBin = raw.detectedRemoteNodeBin;
+    if (isValidDetectedRemoteNodeVersion(raw.detectedRemoteNodeVersion)) {
+      target.detectedRemoteNodeVersion = raw.detectedRemoteNodeVersion;
+    }
+    if (isValidDetectedRemoteNodeSource(raw.detectedRemoteNodeSource)) {
+      target.detectedRemoteNodeSource = raw.detectedRemoteNodeSource;
+    }
+    if (Number.isFinite(raw.detectedRemoteNodeAt) && raw.detectedRemoteNodeAt > 0) {
+      target.detectedRemoteNodeAt = raw.detectedRemoteNodeAt;
+    }
+  }
+  for (const key of Object.keys(target)) {
+    if (target[key] === undefined) delete target[key];
+  }
+  return target;
+}
+
+function remoteAccountKey(profile) {
+  if (!profile || typeof profile !== "object") return "";
+  const host = typeof profile.host === "string" ? profile.host.trim() : "";
+  const port = Number.isInteger(profile.port) ? profile.port : 22;
+  return `${host}\n${port}`;
+}
+
+function normalizeManagedDeployTargets(value) {
+  if (!Array.isArray(value)) return [];
+  const byAccount = new Map();
+  for (const raw of value) {
+    const target = sanitizeManagedDeployTarget(raw);
+    if (!target) continue;
+    const account = remoteAccountKey(target);
+    const previous = byAccount.get(account);
+    if (!previous || target.deployedAt >= previous.deployedAt) {
+      byAccount.set(account, target);
+    }
+  }
+  return Array.from(byAccount.values())
+    .sort((a, b) => a.deployedAt - b.deployedAt)
+    .slice(-MAX_MANAGED_DEPLOY_TARGETS);
+}
+
 // Validate a profile candidate. Returns { status: "ok" } or
 // { status: "error", message }.
 function validateProfile(profile) {
@@ -145,6 +219,11 @@ function validateProfile(profile) {
   if (typeof profile.autoStartCodexMonitor !== "boolean") {
     return { status: "error", message: "profile.autoStartCodexMonitor must be a boolean" };
   }
+  // Optional for backward compatibility: profiles stored before the field
+  // existed simply lack it (sanitizeProfile normalizes absence to false).
+  if (profile.chainStatusline !== undefined && typeof profile.chainStatusline !== "boolean") {
+    return { status: "error", message: "profile.chainStatusline must be a boolean" };
+  }
   if (typeof profile.connectOnLaunch !== "boolean") {
     return { status: "error", message: "profile.connectOnLaunch must be a boolean" };
   }
@@ -156,6 +235,16 @@ function validateProfile(profile) {
   if (profile.lastDeployedAt !== undefined && profile.lastDeployedAt !== null) {
     if (!Number.isFinite(profile.lastDeployedAt) || profile.lastDeployedAt <= 0) {
       return { status: "error", message: "profile.lastDeployedAt must be a positive finite number" };
+    }
+  }
+  if (profile.managedDeployTargets !== undefined) {
+    if (!Array.isArray(profile.managedDeployTargets)
+      || profile.managedDeployTargets.length > MAX_MANAGED_DEPLOY_TARGETS
+      || profile.managedDeployTargets.some((target) => !sanitizeManagedDeployTarget(target))) {
+      return {
+        status: "error",
+        message: `profile.managedDeployTargets must contain at most ${MAX_MANAGED_DEPLOY_TARGETS} valid owned targets`,
+      };
     }
   }
   if (profile.detectedRemoteNodeBin !== undefined && profile.detectedRemoteNodeBin !== null) {
@@ -198,12 +287,17 @@ function sanitizeProfile(raw) {
       ? raw.hostPrefix
       : undefined,
     autoStartCodexMonitor: raw.autoStartCodexMonitor === true,
+    // Opt-in: on deploy, wrap a pre-existing third-party statusline on the
+    // remote (chain mode) instead of leaving the quota source unregistered.
+    chainStatusline: raw.chainStatusline === true,
     connectOnLaunch: raw.connectOnLaunch === true,
     createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
     lastDeployedAt: Number.isFinite(raw.lastDeployedAt) && raw.lastDeployedAt > 0
       ? raw.lastDeployedAt
       : undefined,
   };
+  const managedDeployTargets = normalizeManagedDeployTargets(raw.managedDeployTargets);
+  if (managedDeployTargets.length) out.managedDeployTargets = managedDeployTargets;
   if (isValidDetectedRemoteNodeBin(raw.detectedRemoteNodeBin)) {
     out.detectedRemoteNodeBin = raw.detectedRemoteNodeBin;
     if (isValidDetectedRemoteNodeVersion(raw.detectedRemoteNodeVersion)) {
@@ -269,19 +363,26 @@ function deployTargetFingerprint(profile) {
   const hostPrefix = typeof profile.hostPrefix === "string" && profile.hostPrefix.length > 0
     ? profile.hostPrefix
     : undefined;
+  // false and absent are equivalent: profiles stored before the field
+  // existed lack it, and both mean "deploy without statusline chaining".
+  const chainStatusline = profile.chainStatusline === true ? true : undefined;
   return {
     host: typeof profile.host === "string" && profile.host.length > 0 ? profile.host : undefined,
     port,
     identityFile,
     remoteForwardPort: Number.isInteger(profile.remoteForwardPort) ? profile.remoteForwardPort : undefined,
     hostPrefix,
+    chainStatusline,
   };
 }
 
 // Compare two fingerprints. Returns null if equal, or the name of the first
 // drifted field. Stable field order so the diff is deterministic for UX
 // messages ("host changed during deploy").
-const DEPLOY_TARGET_FIELDS = ["host", "port", "identityFile", "remoteForwardPort", "hostPrefix"];
+// chainStatusline is a deploy-target field: flipping it changes what the
+// install-claude step writes on the remote, so the profile must read as
+// "not deployed" until the user redeploys.
+const DEPLOY_TARGET_FIELDS = ["host", "port", "identityFile", "remoteForwardPort", "hostPrefix", "chainStatusline"];
 
 function deployTargetDrift(a, b) {
   if (!a || !b) return DEPLOY_TARGET_FIELDS[0];
@@ -294,6 +395,7 @@ function deployTargetDrift(a, b) {
 module.exports = {
   REMOTE_FORWARD_PORTS,
   DEPLOY_TARGET_FIELDS,
+  MAX_MANAGED_DEPLOY_TARGETS,
   isValidHost,
   isValidPort,
   isValidRemoteForwardPort,
@@ -310,4 +412,7 @@ module.exports = {
   getDefaults,
   deployTargetFingerprint,
   deployTargetDrift,
+  sanitizeManagedDeployTarget,
+  normalizeManagedDeployTargets,
+  remoteAccountKey,
 };

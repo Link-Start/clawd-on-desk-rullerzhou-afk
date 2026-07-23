@@ -189,6 +189,16 @@ function registerSettingsIpc(options = {}) {
   }
 
   handle("settings:get-snapshot", () => settingsController.getSnapshot());
+  // Distinct quota-reporting sources (this machine + WSL / SSH remotes). The
+  // General tab uses it to hide the "merge across machines" switch when it is
+  // a single-machine no-op.
+  handle("settings:get-quota-source-count", () => {
+    try {
+      return typeof options.getQuotaSourceCount === "function" ? options.getQuotaSourceCount() : 0;
+    } catch (_err) {
+      return 0;
+    }
+  });
   handle("settings:get-pet-tint-options", () => listPetTintOptions());
   handle("settings:update", (_event, payload) => {
     if (!payload || typeof payload !== "object") {

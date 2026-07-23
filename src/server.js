@@ -281,7 +281,11 @@ function registerClaudeHooksTask(meta) {
       };
     }
 
-    const { registerHooksAsync, registerClaudeStatusline } = require("../hooks/install.js");
+    const {
+      registerHooksAsync,
+      registerClaudeStatusline,
+      unregisterClaudeStatusline,
+    } = require("../hooks/install.js");
     const result = await registerHooksAsync({
       silent: true,
       autoStart: meta.autoStart,
@@ -289,9 +293,15 @@ function registerClaudeHooksTask(meta) {
     });
     if (CLAUDE_STATUSLINE_REGISTER_SOURCES.has(meta.source)) {
       try {
-        const statuslineResult = registerClaudeStatusline({ silent: true });
-        if (statuslineResult.changed) {
-          console.log("Clawd: registered Claude Code statusline");
+        if (ctx.claudeQuotaCollectionEnabled === true) {
+          const statuslineResult = registerClaudeStatusline({ silent: true });
+          if (statuslineResult.changed) {
+            console.log("Clawd: registered Claude Code statusline");
+          }
+        } else {
+          // Migration/startup cleanup is ownership-safe: the installer only
+          // removes a statusLine command carrying Clawd's marker.
+          unregisterClaudeStatusline({ backup: true, silent: true });
         }
       } catch (statuslineErr) {
         console.warn("Clawd: failed to sync Claude Code statusline:", statuslineErr.message);
@@ -353,6 +363,45 @@ function uninstallClaudeHooksQueued(callOptions = {}) {
   const source = typeof callOptions.source === "string" ? callOptions.source : "unspecified";
   const automatic = callOptions.automatic === true;
   return claudeHookOperations.enqueue({ source, automatic }, unregisterClaudeHooksTask({ source }));
+}
+
+function setClaudeQuotaCollectionEnabled(callOptions = {}) {
+  const source = typeof callOptions.source === "string"
+    ? callOptions.source
+    : "quota-collection";
+  const enabled = callOptions.enabled === true;
+  return claudeHookOperations.enqueue({ source, automatic: false }, async () => {
+    const {
+      registerClaudeStatusline,
+      unregisterClaudeStatusline,
+    } = require("../hooks/install.js");
+    if (!enabled) {
+      const result = unregisterClaudeStatusline({ backup: true, silent: true });
+      return { status: "ok", enabled: false, ...result };
+    }
+    if (!shouldSyncAgentIntegration("claude-code")) {
+      return {
+        status: "error",
+        message: "Enable the Claude Code integration before collecting its quota",
+      };
+    }
+    const result = registerClaudeStatusline({ backup: true, silent: true });
+    if (result.skippedExisting) {
+      return {
+        status: "error",
+        reason: "statusline-occupied",
+        message: "Claude Code already has a custom statusline; Clawd left it unchanged",
+      };
+    }
+    if (result.installed !== true) {
+      return {
+        status: "error",
+        reason: "claude-not-installed",
+        message: "Claude Code settings were not found",
+      };
+    }
+    return { status: "ok", enabled: true, ...result };
+  });
 }
 
 function setClaudeAutoStart(callOptions = {}) {
@@ -691,6 +740,7 @@ return {
   clearRecentHookEvents,
   syncClawdHooks,
   uninstallClaudeHooks: uninstallClaudeHooksQueued,
+  setClaudeQuotaCollectionEnabled,
   setClaudeAutoStart,
   syncGeminiHooks,
   syncAntigravityHooks,

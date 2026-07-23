@@ -93,6 +93,7 @@ contextBridge.exposeInMainWorld("settingsAPI", {
   // shipped), so the presence enable switch can be ready without a user-saved App ID.
   discordDefaultAppIdPresent,
   getSnapshot: () => ipcRenderer.invoke("settings:get-snapshot"),
+  getQuotaSourceCount: () => ipcRenderer.invoke("settings:get-quota-source-count"),
   getPetTintOptions: () => ipcRenderer.invoke("settings:get-pet-tint-options"),
   getShortcutFailures: () => ipcRenderer.invoke("settings:getShortcutFailures"),
   getAnimationOverridesData: () => ipcRenderer.invoke("settings:get-animation-overrides-data"),
@@ -203,6 +204,7 @@ contextBridge.exposeInMainWorld("remoteSsh", {
   status: (profileId) => ipcRenderer.invoke("remoteSsh:status", profileId),
   connect: (profileId) => ipcRenderer.invoke("remoteSsh:connect", profileId),
   disconnect: (profileId) => ipcRenderer.invoke("remoteSsh:disconnect", profileId),
+  cleanup: (profileId) => ipcRenderer.invoke("remoteSsh:cleanup", profileId),
   deploy: (profileId) => ipcRenderer.invoke("remoteSsh:deploy", profileId),
   authenticate: (profileId) => ipcRenderer.invoke("remoteSsh:authenticate", profileId),
   openTerminal: (profileId) => ipcRenderer.invoke("remoteSsh:open-terminal", profileId),

@@ -30,6 +30,7 @@ const {
   readClaudeVersionFallbackAsync,
   getClaudeVersionAsync,
   isClawdPermissionUrl,
+  parseClaudeInstallCliOptions,
 } = __test;
 
 // registerHooks derives the hook command format from real-environment WSL
@@ -1799,6 +1800,23 @@ describe("Hook installer settings backup", () => {
 });
 
 describe("Claude Code statusline installer", () => {
+  it("keeps local CLI hook reinstalls opted out unless --statusline is explicit", () => {
+    assert.deepStrictEqual(parseClaudeInstallCliOptions([]), {
+      remote: false,
+      chainExisting: false,
+      installStatusline: false,
+    });
+    assert.strictEqual(parseClaudeInstallCliOptions(["--statusline"]).installStatusline, true);
+  });
+
+  it("keeps remote deploy statusline collection enabled without an extra flag", () => {
+    assert.deepStrictEqual(parseClaudeInstallCliOptions(["--remote", "--chain-existing"]), {
+      remote: true,
+      chainExisting: true,
+      installStatusline: true,
+    });
+  });
+
   it("registers the statusline command when settings.json has none", () => {
     const settingsPath = makeTempSettings({});
 
@@ -1820,6 +1838,185 @@ describe("Claude Code statusline installer", () => {
     const result = registerClaudeStatusline({ silent: true, settingsPath, nodeBin: "/usr/local/bin/node" });
 
     assert.strictEqual(result.changed, false);
+  });
+
+  // Remote deploys run install.js --remote ON the remote (POSIX shells only —
+  // deploy aborts on cmd.exe), and CLAWD_REMOTE=1 is what makes the
+  // statusline stamp body.host so quota rides the reverse tunnel. The adapter
+  // itself keeps a short best-effort transport timeout to protect visible UI.
+  it("remote: prefixes the command with CLAWD_REMOTE=1 and stays marker-detectable", () => {
+    const settingsPath = makeTempSettings({});
+
+    const result = registerClaudeStatusline({
+      silent: true,
+      settingsPath,
+      remote: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    });
+
+    assert.strictEqual(result.installed, true);
+    assert.strictEqual(result.changed, true);
+    const command = readSettings(settingsPath).statusLine.command;
+    assert.ok(command.startsWith("CLAWD_REMOTE=1 "), command);
+    assert.ok(command.includes(STATUSLINE_MARKER));
+
+    // Re-register (deploy repair) must be idempotent on the remote form too.
+    const again = registerClaudeStatusline({
+      silent: true,
+      settingsPath,
+      remote: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    });
+    assert.strictEqual(again.changed, false);
+  });
+
+  it("remote: still never overwrites a pre-existing third-party statusline", () => {
+    const settingsPath = makeTempSettings({
+      statusLine: { type: "command", command: "~/.claude/my-custom-statusline.sh" },
+    });
+
+    const result = registerClaudeStatusline({
+      silent: true,
+      settingsPath,
+      remote: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    });
+
+    assert.strictEqual(result.skippedExisting, true);
+    assert.strictEqual(
+      readSettings(settingsPath).statusLine.command,
+      "~/.claude/my-custom-statusline.sh"
+    );
+  });
+
+  // A realistic third-party statusline command: a bash -c one-liner full of
+  // nested quoting (claude-hud shape). The sidecar must preserve the object
+  // verbatim - both for the chained exec and for the unregister restore.
+  const NASTY_STATUSLINE = {
+    type: "command",
+    command: `bash -c 'cols=$(stty size </dev/tty 2>/dev/null | awk '"'"'{print $2}'"'"'); exec "/home/user/.bun/bin/bun" "$HOME/hud/src/index.ts"'`,
+    padding: 1,
+  };
+
+  function makeChainSidecarPath() {
+    return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "clawd-chain-sidecar-")), "clawd-statusline-chain.json");
+  }
+
+  it("remote --chain-existing: wraps a third-party statusline via the sidecar", () => {
+    const settingsPath = makeTempSettings({ statusLine: NASTY_STATUSLINE });
+    const chainSidecarPath = makeChainSidecarPath();
+
+    const result = registerClaudeStatusline({
+      silent: true,
+      settingsPath,
+      chainSidecarPath,
+      remote: true,
+      chainExisting: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    });
+
+    assert.strictEqual(result.skippedExisting, false);
+    assert.strictEqual(result.chained, true);
+    const command = readSettings(settingsPath).statusLine.command;
+    assert.ok(command.startsWith("CLAWD_REMOTE=1 "), command);
+    assert.ok(command.includes(STATUSLINE_MARKER));
+    assert.ok(command.endsWith(" --chain"), command);
+    // The user's original survives byte-for-byte in the sidecar.
+    assert.deepStrictEqual(
+      JSON.parse(fs.readFileSync(chainSidecarPath, "utf8")).statusLine,
+      NASTY_STATUSLINE
+    );
+  });
+
+  it("remote --chain-existing: an omitted repair preference keeps the chain and sidecar", () => {
+    const settingsPath = makeTempSettings({ statusLine: NASTY_STATUSLINE });
+    const chainSidecarPath = makeChainSidecarPath();
+    const opts = {
+      silent: true,
+      settingsPath,
+      chainSidecarPath,
+      remote: true,
+      chainExisting: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    };
+    registerClaudeStatusline(opts);
+
+    const { chainExisting: _omitted, ...repairOpts } = opts;
+    const again = registerClaudeStatusline(repairOpts);
+
+    assert.strictEqual(again.changed, false);
+    assert.strictEqual(again.chained, true);
+    assert.deepStrictEqual(
+      JSON.parse(fs.readFileSync(chainSidecarPath, "utf8")).statusLine,
+      NASTY_STATUSLINE
+    );
+  });
+
+  it("remote --chain-existing: explicit false restores the original statusline", () => {
+    const settingsPath = makeTempSettings({ statusLine: NASTY_STATUSLINE });
+    const chainSidecarPath = makeChainSidecarPath();
+    const opts = {
+      silent: true,
+      settingsPath,
+      chainSidecarPath,
+      remote: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    };
+    registerClaudeStatusline({ ...opts, chainExisting: true });
+
+    const result = registerClaudeStatusline({ ...opts, chainExisting: false });
+
+    assert.strictEqual(result.changed, true);
+    assert.strictEqual(result.chained, false);
+    assert.strictEqual(result.restoredChained, true);
+    assert.strictEqual(result.skippedExisting, true);
+    assert.deepStrictEqual(readSettings(settingsPath).statusLine, NASTY_STATUSLINE);
+    assert.strictEqual(fs.existsSync(chainSidecarPath), false);
+  });
+
+  it("remote --chain-existing: unregister restores the original statusLine object and consumes the sidecar", () => {
+    const settingsPath = makeTempSettings({ statusLine: NASTY_STATUSLINE });
+    const chainSidecarPath = makeChainSidecarPath();
+    registerClaudeStatusline({
+      silent: true,
+      settingsPath,
+      chainSidecarPath,
+      remote: true,
+      chainExisting: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    });
+
+    const result = unregisterClaudeStatusline({ silent: true, settingsPath, chainSidecarPath });
+
+    assert.strictEqual(result.removed, 1);
+    assert.strictEqual(result.restoredChained, true);
+    assert.deepStrictEqual(readSettings(settingsPath).statusLine, NASTY_STATUSLINE);
+    assert.strictEqual(fs.existsSync(chainSidecarPath), false);
+  });
+
+  it("local chainExisting is ignored (chain is remote-only in v1)", () => {
+    const settingsPath = makeTempSettings({ statusLine: NASTY_STATUSLINE });
+    const chainSidecarPath = makeChainSidecarPath();
+
+    const result = registerClaudeStatusline({
+      silent: true,
+      settingsPath,
+      chainSidecarPath,
+      chainExisting: true,
+      platform: "linux",
+      nodeBin: "/usr/bin/node",
+    });
+
+    assert.strictEqual(result.skippedExisting, true);
+    assert.strictEqual(fs.existsSync(chainSidecarPath), false);
+    assert.deepStrictEqual(readSettings(settingsPath).statusLine, NASTY_STATUSLINE);
   });
 
   // On Windows Claude Code runs statusLine.command through Git Bash whenever

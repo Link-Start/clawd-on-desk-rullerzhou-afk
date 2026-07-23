@@ -5,6 +5,70 @@ const path = require("node:path");
 
 const sessionHudHtml = fs.readFileSync(path.join(__dirname, "..", "src", "session-hud.html"), "utf8");
 const sessionHudRenderer = fs.readFileSync(path.join(__dirname, "..", "src", "session-hud-renderer.js"), "utf8");
+const quotaRingHtml = fs.readFileSync(path.join(__dirname, "..", "src", "quota-ring.html"), "utf8");
+const quotaRingRenderer = fs.readFileSync(path.join(__dirname, "..", "src", "quota-ring-renderer.js"), "utf8");
+
+describe("session HUD is sessions-only (quota moved to the ring)", () => {
+  it("no longer renders an account-quota strip inside the HUD", () => {
+    assert.doesNotMatch(sessionHudRenderer, /buildQuotaStrip/);
+    assert.doesNotMatch(sessionHudRenderer, /createQuotaMeter/);
+    assert.doesNotMatch(sessionHudHtml, /\.quota-strip/);
+    assert.doesNotMatch(sessionHudHtml, /\.quota-window-fill/);
+  });
+});
+
+describe("pet-attached quota ring", () => {
+  it("draws one coin per provider with up to two concentric rings (outer/inner window)", () => {
+    assert.match(quotaRingRenderer, /buildCoinSvg/);
+    assert.match(quotaRingRenderer, /OUTER_R/);
+    assert.match(quotaRingRenderer, /INNER_R/);
+    // Fill sweeps with USED percent, clockwise from 12 o'clock.
+    assert.match(quotaRingRenderer, /rotate\(-90/);
+    assert.match(quotaRingRenderer, /stroke-dasharray/);
+  });
+
+  it("colors coins by severity and dims reset/stale states", () => {
+    assert.match(quotaRingRenderer, /severityClass/);
+    assert.match(quotaRingHtml, /\.fill\.sev-ok/);
+    assert.match(quotaRingHtml, /\.fill\.sev-warn/);
+    assert.match(quotaRingHtml, /\.fill\.sev-hot/);
+    assert.match(quotaRingHtml, /\.fill\.sev-reset/);
+    assert.match(quotaRingHtml, /is-stale/);
+    // Expired window reads as a dim 0-ring, never the pre-reset high.
+    assert.match(quotaRingRenderer, /usedPercent: 0, expired: true/);
+  });
+
+  it("labels windows from reporter metadata, never hard-coding 5h/7d", () => {
+    assert.match(quotaRingRenderer, /formatWindowLabel/);
+    assert.match(quotaRingRenderer, /windowMinutes/);
+    assert.match(quotaRingRenderer, /minutes \/ \(24 \* 60\)/);
+  });
+
+  it("states used explicitly in the tooltip (no color-only cue) and reuses provider agent icons", () => {
+    // The ring fills with USED percent and an empty ring is the reset state, so
+    // the tooltip spells out "used" rather than a persistent on-cluster label.
+    assert.match(quotaRingRenderer, /quotaRingUsedWord/);
+    assert.match(quotaRingRenderer, /coinTooltip/);
+    assert.match(quotaRingRenderer, /quotaAgentIcons/);
+  });
+
+  it("clicking a coin or the overflow opens the Dashboard", () => {
+    assert.match(quotaRingRenderer, /openDashboard\(\)/);
+    assert.match(quotaRingRenderer, /buildOverflow/);
+  });
+
+  it("does not advertise unreachable keyboard controls in the non-focusable ring panel", () => {
+    assert.match(quotaRingHtml, /id="cluster"[^>]*aria-hidden="true"/);
+    assert.doesNotMatch(quotaRingRenderer, /tabindex/);
+    assert.doesNotMatch(quotaRingRenderer, /addEventListener\("keydown"/);
+    assert.doesNotMatch(quotaRingRenderer, /setAttribute\("role", "button"\)/);
+  });
+
+  it("honors reduced motion for the near-exhausted pulse", () => {
+    assert.match(quotaRingHtml, /prefers-reduced-motion: reduce/);
+    assert.match(quotaRingHtml, /coin-pulse/);
+  });
+});
 
 describe("session HUD visual shell", () => {
   it("adds asymmetric body padding so the shadow has more room below than above", () => {

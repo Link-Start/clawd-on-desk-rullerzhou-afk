@@ -143,6 +143,12 @@ const SCHEMA = {
   sessionHudShowStateLabels: { type: "boolean", default: true },
   sessionHudShowElapsed: { type: "boolean", default: false },
   sessionHudShowContextUsage: { type: "boolean", default: true },
+  sessionHudShowQuota: { type: "boolean", default: true },
+  // Claude Code exposes subscription limits only through its visible,
+  // single-slot statusline. Keep collection opt-in so a fresh Clawd install
+  // never changes the user's terminal UI without an explicit choice.
+  claudeQuotaCollectionEnabled: { type: "boolean", default: false },
+  quotaMergeSources: { type: "boolean", default: false },
   sessionHudCleanupDetached: { type: "boolean", default: true },
   sessionHudPinned: { type: "boolean", default: false },
   // Stale-cleanup intervals (ms). Defaults match the historical constants in

@@ -2,7 +2,7 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert");
 
 const permission = require("../src/permission");
-const { computeBubbleStackLayout, clampBubbleHeight } = permission.__test;
+const { computeBubbleStackLayout, clampBubbleHeight, collectVisibleWindowBounds } = permission.__test;
 
 // Common defaults so each test only spells out what's interesting.
 const BW = 340;
@@ -38,6 +38,24 @@ describe("permission bubble height clamp", () => {
 
   it("falls back to the natural height when work area height is unavailable", () => {
     assert.strictEqual(clampBubbleHeight(500, 0), 500);
+  });
+});
+
+describe("permission bubble Orbit avoidance bounds", () => {
+  it("keeps only live visible window bounds, including a fading request removed from pending state", () => {
+    const rect = { x: 100, y: 200, width: 340, height: 180 };
+    const makeWindow = ({ destroyed = false, visible = true, bounds = rect } = {}) => ({
+      isDestroyed: () => destroyed,
+      isVisible: () => visible,
+      getBounds: () => bounds,
+    });
+
+    assert.deepStrictEqual(collectVisibleWindowBounds([
+      makeWindow(),
+      makeWindow({ visible: false }),
+      makeWindow({ destroyed: true }),
+      makeWindow({ bounds: { x: 0, y: 0, width: 0, height: 100 } }),
+    ]), [rect]);
   });
 });
 

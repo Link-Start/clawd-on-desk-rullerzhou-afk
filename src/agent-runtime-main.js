@@ -173,34 +173,43 @@ function createAgentRuntimeMain(options = {}) {
       const CodexLogMonitor = loadCodexLogMonitor();
       const codexAgent = loadCodexAgent();
       codexMonitor = new CodexLogMonitor(codexAgent, (sid, state, event, extra) => {
+        // Subscription quota is account state, not session state: it goes
+        // to the session-independent per-source store (null host = this
+        // machine), never into updateSession opts — see state.js
+        // updateAccountQuota and src/state-account-quota.js.
+        const { codexQuota, ...sessionOptions } = buildCodexMonitorUpdateOptions(extra, {
+          includeHeadless: true,
+        });
+        const annotateCodexQuota = () => {
+          if (!codexQuota) return;
+          const stateRuntime = getStateRuntime();
+          if (stateRuntime && typeof stateRuntime.updateAccountQuota === "function") {
+            stateRuntime.updateAccountQuota(null, { codexQuota });
+          }
+        };
         if (isCodexMonitorMetadataOnlyEvent(event, extra)) {
-          const metadataOptions = buildCodexMonitorUpdateOptions(extra, {
-            includeHeadless: true,
-          });
-          if (metadataOptions.contextUsage) {
+          if (sessionOptions.contextUsage) {
             updateSession(sid, state, event, {
-              ...metadataOptions,
+              ...sessionOptions,
               preserveState: true,
             });
           }
+          annotateCodexQuota();
           return;
         }
         if (shouldSuppressCodexLogEvent(sid, state, event)) {
-          const metadataOptions = buildCodexMonitorUpdateOptions(extra, {
-            includeHeadless: true,
-          });
-          if (metadataOptions.contextUsage) {
+          if (sessionOptions.contextUsage) {
             updateSession(sid, state, event, {
-              ...metadataOptions,
+              ...sessionOptions,
               preserveState: true,
             });
           }
+          annotateCodexQuota();
           return;
         }
         clearCodexNotifyBubbles(sid, `codex-state-transition:${state}`);
-        updateSession(sid, state, event, buildCodexMonitorUpdateOptions(extra, {
-          includeHeadless: true,
-        }));
+        updateSession(sid, state, event, sessionOptions);
+        annotateCodexQuota();
       }, {
         classifier: codexSubagentClassifier,
         onUserInputRequest: (sid, request, extra) => {

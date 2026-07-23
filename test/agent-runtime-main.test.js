@@ -212,6 +212,51 @@ describe("agent-runtime-main", () => {
     ]);
   });
 
+  it("routes JSONL codexQuota to the session-independent store, never updateSession opts", () => {
+    const instances = [];
+    const calls = [];
+    const quotaCalls = [];
+    const FakeMonitor = makeFakeMonitorClass(instances);
+    const runtime = createAgentRuntimeMain({
+      loadCodexLogMonitor: () => FakeMonitor,
+      loadCodexAgent: () => ({ id: "codex" }),
+      isAgentEnabled: (agentId) => agentId === "codex",
+      updateSession: (...args) => calls.push(["update", ...args]),
+      clearCodexNotifyBubbles: (...args) => calls.push(["clear", ...args]),
+      getStateRuntime: () => ({
+        updateAccountQuota: (...args) => quotaCalls.push(args),
+      }),
+      codexSubagentClassifier: {},
+    });
+    const monitor = runtime.startCodexLogMonitor();
+
+    const codexQuota = {
+      codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+      codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+    };
+    monitor.emit("codex:abc", "working", "event_msg:token_count", {
+      cwd: "D:\\repo",
+      contextUsage: { used: 23959, limit: 258400, percent: 9, source: "codex" },
+      codexQuota,
+    });
+    // Quota-only refresh (no contextUsage): must not enter the updateSession
+    // lifecycle machine at all, only feed the store.
+    monitor.emit("codex:abc", "working", "event_msg:token_count", { codexQuota });
+
+    // updateSession must never see codexQuota in its opts: account quota is
+    // not session state (src/state-account-quota.js).
+    for (const call of calls) {
+      if (call[0] !== "update") continue;
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(call[4], "codexQuota"), false);
+    }
+    assert.strictEqual(calls.filter((c) => c[0] === "update").length, 1);
+    // Local monitor reports as the local source (null host).
+    assert.deepStrictEqual(quotaCalls, [
+      [null, { codexQuota }],
+      [null, { codexQuota }],
+    ]);
+  });
+
   it("captures Ghostty terminal id for foreground session-start events", () => {
     const updates = [];
     const focusUpdates = [];

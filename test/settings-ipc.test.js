@@ -191,6 +191,7 @@ function createHarness(overrides = {}) {
     getAllAgents: overrides.getAllAgents || (() => []),
     getHookServerPort: overrides.getHookServerPort,
     getRecentHookEvents: overrides.getRecentHookEvents,
+    getQuotaSourceCount: overrides.getQuotaSourceCount,
     detectAgentInstallations: overrides.detectAgentInstallations,
     checkForUpdates: (manual) => calls.push(["checkForUpdates", manual]),
     showTutorial: overrides.showTutorial || (() => {
@@ -208,6 +209,7 @@ test("settings IPC registers owned channels and leaves animation override channe
   const { ipcMain, runtime } = createHarness();
 
   assert.ok(ipcMain.handlers.has("settings:get-snapshot"));
+  assert.ok(ipcMain.handlers.has("settings:get-quota-source-count"));
   assert.ok(ipcMain.handlers.has("settings:get-pet-tint-options"));
   assert.ok(ipcMain.handlers.has("settings:pick-sound-file"));
   assert.ok(ipcMain.handlers.has("settings:list-themes"));
@@ -231,6 +233,20 @@ test("settings IPC registers owned channels and leaves animation override channe
 
   assert.strictEqual(ipcMain.handlers.size, 0);
   assert.strictEqual(ipcMain.listeners.size, 0);
+});
+
+test("settings IPC reports quota source count and fails closed when the provider throws", async () => {
+  const ok = createHarness({ getQuotaSourceCount: () => 3 });
+  assert.strictEqual(await ok.ipcMain.invoke("settings:get-quota-source-count"), 3);
+  ok.runtime.dispose();
+
+  const broken = createHarness({
+    getQuotaSourceCount: () => {
+      throw new Error("quota store unavailable");
+    },
+  });
+  assert.strictEqual(await broken.ipcMain.invoke("settings:get-quota-source-count"), 0);
+  broken.runtime.dispose();
 });
 
 test("settings IPC opens the tutorial from Settings", async () => {

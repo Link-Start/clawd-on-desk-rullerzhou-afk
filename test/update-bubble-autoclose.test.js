@@ -61,6 +61,7 @@ function loadUpdateBubbleWithElectron(fakeElectron) {
 function createHarness() {
   FakeBrowserWindow.instances = [];
   let updateAutoCloseMs = 9_000;
+  const orbitRepositions = [];
   const initUpdateBubble = loadUpdateBubbleWithElectron({ BrowserWindow: FakeBrowserWindow });
   const api = initUpdateBubble({
     win: { isDestroyed: () => false },
@@ -78,9 +79,11 @@ function createHarness() {
     getHudReservedOffset: () => 0,
     guardAlwaysOnTop: () => {},
     reapplyMacVisibility: () => {},
+    repositionSessionHud: () => orbitRepositions.push("reposition"),
   });
   return {
     api,
+    orbitRepositions,
     setUpdateAutoCloseMs(value) {
       updateAutoCloseMs = value;
     },
@@ -143,5 +146,27 @@ describe("update bubble auto-close refresh", () => {
 
     mock.timers.tick(250);
     assert.strictEqual(bubble.isVisible(), false);
+  });
+
+  it("repositions Orbit when the update bubble shows, resizes, and finishes hiding", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const harness = createHarness();
+
+    await harness.api.showUpdateBubble({
+      mode: "up-to-date",
+      title: "Up to date",
+      requireAction: false,
+      defaultAction: "dismiss",
+    });
+    const bubble = harness.api.getBubbleWindow();
+    assert.strictEqual(harness.orbitRepositions.length, 1, "show should add update bounds to Orbit avoidance");
+
+    harness.api.handleUpdateBubbleHeight({ sender: bubble.webContents }, 220);
+    assert.strictEqual(harness.orbitRepositions.length, 2, "measured height should reflow Orbit");
+
+    harness.api.hideUpdateBubble();
+    assert.strictEqual(harness.orbitRepositions.length, 2, "Orbit must keep avoiding the fade-out window");
+    mock.timers.tick(250);
+    assert.strictEqual(harness.orbitRepositions.length, 3, "hidden window should release Orbit avoidance");
   });
 });

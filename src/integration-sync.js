@@ -103,7 +103,11 @@ function createIntegrationSyncRuntime(options = {}) {
           automatic,
         });
       }
-      const { registerHooks, registerClaudeStatusline } = require("../hooks/install.js");
+      const {
+        registerHooks,
+        registerClaudeStatusline,
+        unregisterClaudeStatusline,
+      } = require("../hooks/install.js");
       const { added, updated, removed } = registerHooks({
         silent: true,
         autoStart: ctx.autoStartWithClaude,
@@ -117,9 +121,13 @@ function createIntegrationSyncRuntime(options = {}) {
       // statusline), so a skip here is expected and must not affect the
       // hooks-sync status returned below.
       try {
-        const statuslineResult = registerClaudeStatusline({ silent: true });
-        if (statuslineResult.changed) {
-          console.log("Clawd: registered Claude Code statusline (rate limit quota)");
+        if (ctx.claudeQuotaCollectionEnabled === true) {
+          const statuslineResult = registerClaudeStatusline({ silent: true });
+          if (statuslineResult.changed) {
+            console.log("Clawd: registered Claude Code statusline (rate limit quota)");
+          }
+        } else {
+          unregisterClaudeStatusline({ backup: true, silent: true });
         }
       } catch (statuslineErr) {
         console.warn("Clawd: failed to sync Claude Code statusline:", statuslineErr.message);
