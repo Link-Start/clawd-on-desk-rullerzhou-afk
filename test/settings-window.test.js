@@ -58,6 +58,11 @@ class FakeBrowserWindow {
     this.menuBarVisible = value;
   }
 
+  setTitle(value) {
+    this.calls.push(["setTitle", value]);
+    this.title = value;
+  }
+
   loadFile(filePath) {
     this.calls.push(["loadFile", filePath]);
     this.loadedFile = filePath;
@@ -199,6 +204,19 @@ test("settings window runtime creates the Settings BrowserWindow with taskbar id
   win.emit("closed");
   assert.deepStrictEqual(events, ["before-create", "before-closed", "after-closed-null"]);
   assert.strictEqual(runtime.getWindow(), null);
+});
+
+test("settings window uses and refreshes the localized title", () => {
+  let title = "Clawd 设置";
+  const { runtime } = createRuntime({ runtime: { getTitle: () => title } });
+
+  runtime.open();
+  const win = FakeBrowserWindow.instances[0];
+  assert.strictEqual(win.options.title, "Clawd 设置");
+
+  title = "Clawd 設定";
+  runtime.applyTitleToWindow();
+  assert.strictEqual(win.title, "Clawd 設定");
 });
 
 test("settings window injects the Discord default-App-ID flag into the sandboxed preload", () => {

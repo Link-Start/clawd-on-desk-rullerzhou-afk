@@ -4,6 +4,7 @@
   const STRINGS = {
     en: {
       settingsTitle: "Settings",
+      settingsWindowTitle: "Clawd Settings",
       settingsSubtitle: "Configure how Clawd behaves on your desktop.",
       settingsTutorialReplayLink: "Show getting started guide",
       settingsTutorialReplayFailed: "Couldn't open the guide",
@@ -783,6 +784,7 @@
     },
     zh: {
       settingsTitle: "设置",
+      settingsWindowTitle: "Clawd 设置",
       settingsSubtitle: "配置 Clawd 在桌面上的行为。",
       settingsTutorialReplayLink: "重新打开新手指南",
       settingsTutorialReplayFailed: "无法打开新手指南",
@@ -1550,6 +1552,7 @@
     },
     "zh-TW": {
       settingsTitle: "設定",
+      settingsWindowTitle: "Clawd 設定",
       settingsSubtitle: "設定 Clawd 在桌面上怎麼動作。",
       settingsTutorialReplayLink: "重新開啟新手指南",
       settingsTutorialReplayFailed: "無法開啟新手指南",
@@ -2321,6 +2324,7 @@
     },
     ko: {
       settingsTitle: "설정",
+      settingsWindowTitle: "Clawd 설정",
       settingsSubtitle: "데스크톱에서 Clawd의 동작 방식을 설정합니다.",
       settingsTutorialReplayLink: "시작 가이드 다시 보기",
       settingsTutorialReplayFailed: "가이드를 열 수 없습니다",
@@ -3092,6 +3096,7 @@
     },
     ja: {
       settingsTitle: "設定",
+      settingsWindowTitle: "Clawd 設定",
       settingsSubtitle: "Clawd のデスクトップでの動作を設定します。",
       settingsTutorialReplayLink: "はじめにガイドを開く",
       settingsTutorialReplayFailed: "ガイドを開けませんでした",

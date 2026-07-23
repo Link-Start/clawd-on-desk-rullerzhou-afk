@@ -65,6 +65,7 @@ function createHarness(ctxOverrides = {}) {
     setMenuBarVisibility() {}
     loadFile(file) { this.loadedFile = file; }
     setBackgroundColor(color) { this.backgroundColors.push(color); }
+    setTitle(title) { this.title = title; }
     once(event, cb) { this.onceCallbacks.set(event, cb); }
     on(event, cb) { this.onCallbacks.set(event, cb); }
     close() {
@@ -191,6 +192,20 @@ describe("tutorial window shell", () => {
     assert.deepStrictEqual(h.calls.setLang, ["zh"]);
     const after = h.sends.filter((s) => s.channel === "tutorial:state").length;
     assert.strictEqual(after, before + 1, "state re-pushed after language change");
+  });
+
+  it("refreshes the native title when the selected language changes", () => {
+    let lang = "en";
+    const titles = { en: "Welcome to Clawd on Desk", zh: "欢迎使用 Clawd on Desk" };
+    const h = createHarness({
+      t: (key) => key === "tutorialWindowTitle" ? titles[lang] : key,
+      setLang: (value) => { lang = value; h.calls.setLang.push(value); },
+    });
+
+    h.tutorial.open();
+    assert.strictEqual(h.getCreatedWindow().opts.title, titles.en);
+    h.listeners.get("tutorial:set-lang")({}, "zh");
+    assert.strictEqual(h.getCreatedWindow().title, titles.zh);
   });
 
   it("get-state handler returns the live state", () => {

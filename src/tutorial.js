@@ -78,6 +78,11 @@ module.exports = function initTutorial(ctx = {}) {
     win.webContents.send("tutorial:state", buildState());
   }
 
+  function applyTitleToWindow() {
+    if (!win || win.isDestroyed() || typeof win.setTitle !== "function") return;
+    win.setTitle(t("tutorialWindowTitle"));
+  }
+
   function applyZoom() {
     if (!win || win.isDestroyed() || !win.webContents) return;
     if (typeof ctx.getTextScale !== "function") return;
@@ -145,6 +150,7 @@ module.exports = function initTutorial(ctx = {}) {
         console.warn("Clawd: tutorial setLang failed:", err && err.message);
       }
       // Re-push so the wizard re-renders in the newly chosen language.
+      applyTitleToWindow();
       sendState();
     });
 
@@ -200,6 +206,7 @@ module.exports = function initTutorial(ctx = {}) {
     win.loadFile(path.join(__dirname, "tutorial.html"));
     win.webContents.once("did-finish-load", () => {
       applyZoom();
+      applyTitleToWindow();
       sendState();
     });
     win.once("ready-to-show", () => {
@@ -221,6 +228,7 @@ module.exports = function initTutorial(ctx = {}) {
       if (win.isMinimized()) win.restore();
       win.show();
       win.focus();
+      applyTitleToWindow();
       sendState();
       return win;
     }
@@ -243,6 +251,7 @@ module.exports = function initTutorial(ctx = {}) {
     open,
     close,
     sendState,
+    applyTitleToWindow,
     getWindow: () => win,
   };
 };

@@ -644,6 +644,7 @@ const settingsWindowRuntime = createSettingsWindowRuntime({
   getPetWindowBounds: () => getPetWindowBounds(),
   getNearestWorkArea: (cx, cy) => getNearestWorkArea(cx, cy),
   getTextScale: () => effectiveTextScaleForKey(getSettingsDisplayKey()),
+  getTitle: () => translate("settingsWindowTitle"),
   onBeforeCreate: () => bumpAnimationOverridePreviewPosterGeneration(),
   onBeforeClosed: () => {
     bumpAnimationOverridePreviewPosterGeneration();
@@ -3327,6 +3328,10 @@ const settingsEffectRouter = createSettingsEffectRouter({
   sendToRenderer,
   sendDashboardI18n: () => sendDashboardI18n(),
   sendSessionHudI18n: () => sendSessionHudI18n(),
+  syncWindowTitles: () => {
+    settingsWindowRuntime.applyTitleToWindow();
+    _tutorial.applyTitleToWindow();
+  },
   emitSessionSnapshot: (options) => _state.emitSessionSnapshot(options),
   cleanStaleSessions: () => _state.cleanStaleSessions(),
   syncPermissionShortcuts,
