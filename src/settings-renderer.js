@@ -136,18 +136,23 @@ if (window.settingsAPI && typeof window.settingsAPI.getShortcutFailures === "fun
 }
 
 if (window.settingsAPI && typeof window.settingsAPI.getSnapshot === "function") {
-  const tintOptionsPromise =
-    typeof window.settingsAPI.getPetTintOptions === "function"
-      ? window.settingsAPI.getPetTintOptions().catch((err) => {
-        console.warn("settings: getPetTintOptions failed", err);
-        return [];
+  const tintDataPromise =
+    typeof window.settingsAPI.getPetTintData === "function"
+      ? window.settingsAPI.getPetTintData().catch((err) => {
+        console.warn("settings: getPetTintData failed", err);
+        return { options: [], supportedThemeIds: [] };
       })
-      : Promise.resolve([]);
+      : Promise.resolve({ options: [], supportedThemeIds: [] });
   Promise.all([
     window.settingsAPI.getSnapshot(),
-    tintOptionsPromise,
-  ]).then(([snapshot, petTintOptions]) => {
-    core.runtime.petTintOptions = Array.isArray(petTintOptions) ? petTintOptions : [];
+    tintDataPromise,
+  ]).then(([snapshot, petTintData]) => {
+    core.runtime.petTintOptions = Array.isArray(petTintData && petTintData.options)
+      ? petTintData.options
+      : [];
+    core.runtime.petTintSupportedThemeIds = Array.isArray(petTintData && petTintData.supportedThemeIds)
+      ? petTintData.supportedThemeIds
+      : [];
     core.ops.applyBootstrap(snapshot);
   });
 }

@@ -129,6 +129,7 @@ function createRendererHarness(options = {}) {
       themeConfig: {
         assetsPath: "../assets/svg",
         eyeTracking: { states: ["idle"] },
+        petTintSupported: true,
         // Matches the pre-displayed file above, so tests that don't care about
         // the #509 idle choice keep resting on the "follow" sprite.
         idleFollowSvg: "current.svg",
@@ -856,9 +857,33 @@ describe("renderer pet tint", () => {
       assetsPath: "../themes/other",
       eyeTracking: { states: [] },
       idleFollowSvg: "idle.svg",
+      petTintSupported: true,
     });
     assert.strictEqual(harness.api.clawdEl, displayed);
     assert.strictEqual(displayed.style.filter, filter);
+  });
+
+  it("clears a persisted tint when the active theme opts out and restores it when support returns", () => {
+    const harness = createRendererHarness();
+    const filter = "hue-rotate(265deg) saturate(1.6) contrast(1.05)";
+    harness.electronHandlers.onPetTintChange({ id: "vaporwave", filter });
+    assert.strictEqual(harness.clawd.style.filter, filter);
+
+    harness.electronHandlers.onThemeConfig({
+      assetsPath: "../themes/calico",
+      eyeTracking: { states: [] },
+      idleFollowSvg: "idle.png",
+      petTintSupported: false,
+    });
+    assert.strictEqual(harness.clawd.style.filter, "");
+
+    harness.electronHandlers.onThemeConfig({
+      assetsPath: "../themes/clawd",
+      eyeTracking: { states: ["idle"] },
+      idleFollowSvg: "idle.svg",
+      petTintSupported: true,
+    });
+    assert.strictEqual(harness.clawd.style.filter, filter);
   });
 
   it("wires an initial resolved payload and a narrow preload event channel", () => {
@@ -873,7 +898,7 @@ describe("renderer pet tint", () => {
       'onPetTintChange: (cb) => ipcRenderer.on("pet-tint-change", (_, payload) => cb(payload))'
     ));
     assert.ok(main.includes(
-      'sendToRenderer("pet-tint-change", resolvePetTintPayload(petTint));'
+      'sendToRenderer("pet-tint-change", resolvePetTintPayload(petTint, getActiveTheme()));'
     ));
   });
 });

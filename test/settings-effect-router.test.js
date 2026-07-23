@@ -357,7 +357,10 @@ describe("settings-effect-router", () => {
   });
 
   it("resolves a pet tint id before sending it to renderer and rebuilds menus once", () => {
-    const { calls, emit } = createHarness();
+    const clawd = { _id: "clawd", _builtin: true, _capabilities: { petTint: true } };
+    const { calls, emit } = createHarness({
+      routerOptions: { getActiveTheme: () => clawd },
+    });
 
     emit({ petTint: "gold" });
     assert.deepStrictEqual(calls, [
@@ -375,6 +378,40 @@ describe("settings-effect-router", () => {
       ["updateMirrors", { petTint: "not-in-catalog" }],
       ["sendToRenderer", "pet-tint-change", { id: "none", filter: "" }],
       ["rebuildAllMenus"],
+    ]);
+  });
+
+  it("uses the active theme's pet tint policy", () => {
+    let activeTheme = {
+      _id: "calico",
+      _builtin: true,
+      _capabilities: { petTint: false },
+    };
+    const { calls, emit } = createHarness({
+      routerOptions: { getActiveTheme: () => activeTheme },
+    });
+
+    emit({ petTint: "vaporwave" });
+    assert.deepStrictEqual(calls[1], [
+      "sendToRenderer",
+      "pet-tint-change",
+      { id: "none", filter: "" },
+    ]);
+
+    calls.length = 0;
+    activeTheme = {
+      _id: "cloudling",
+      _builtin: true,
+      _capabilities: { petTint: true },
+    };
+    emit({ petTint: "vaporwave" });
+    assert.deepStrictEqual(calls[1], [
+      "sendToRenderer",
+      "pet-tint-change",
+      {
+        id: "vaporwave",
+        filter: "hue-rotate(75deg) saturate(1.25) brightness(1)",
+      },
     ]);
   });
 

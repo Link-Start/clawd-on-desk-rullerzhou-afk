@@ -76,6 +76,7 @@ function createSettingsEffectRouter(options = {}) {
   const reclampPetAfterEdgePinningChange = options.reclampPetAfterEdgePinningChange || noop;
   const exitMiniMode = options.exitMiniMode || noop;
   const getMiniMode = options.getMiniMode || (() => false);
+  const getActiveTheme = options.getActiveTheme || (() => null);
   const refreshIdleVisual = options.refreshIdleVisual || noop;
   const rebuildAllMenus = options.rebuildAllMenus || noop;
   const reconcilePowerSaveBlocker = options.reconcilePowerSaveBlocker || noop;
@@ -105,7 +106,7 @@ function createSettingsEffectRouter(options = {}) {
       sendToRenderer("low-power-idle-mode-change", changes.lowPowerIdleMode);
     }
     if ("petTint" in changes) {
-      sendToRenderer("pet-tint-change", resolvePetTintPayload(changes.petTint));
+      sendToRenderer("pet-tint-change", resolvePetTintPayload(changes.petTint, getActiveTheme()));
     }
     if ("keepAwakeWhileWorking" in changes) {
       safeCall(logWarn, "Clawd: reconcilePowerSaveBlocker failed:", reconcilePowerSaveBlocker);

@@ -56,6 +56,13 @@ module.exports = function initMenu(ctx) {
     return true;
   }
 
+  function isPetTintSupported() {
+    const caps = typeof ctx.getActiveThemeCapabilities === "function"
+      ? ctx.getActiveThemeCapabilities()
+      : null;
+    return !!(caps && caps.petTint === true);
+  }
+
   function buildMiniModeMenuItem() {
     const miniSupported = isMiniSupported();
     const inMiniMode = ctx.getMiniMode();
@@ -135,6 +142,7 @@ module.exports = function initMenu(ctx) {
     const current = ctx.petTint;
     return {
       label: t("petColor"),
+      enabled: isPetTintSupported(),
       submenu: PET_TINT_CATALOG.map((entry) => ({
         label: t(entry.labelKey),
         type: "radio",

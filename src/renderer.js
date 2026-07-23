@@ -26,6 +26,7 @@ let queuedSystemWakePayload = null;
 let queuedSystemWakeReplayTimer = null;
 let _lowPowerStaticImageOverrides = {};
 let _petTintPayload = { id: "none", filter: "" };
+let _petTintSupported = false;
 
 // ── Theme config (injected via preload.js additionalArguments) ──
 let tc = window.themeConfig || {};
@@ -44,6 +45,7 @@ function initWithConfig(cfg) {
   _trustedScriptedSvgFiles = new Set(Array.isArray(tc.trustedScriptedSvgFiles) ? tc.trustedScriptedSvgFiles : []);
   _forceSvgObjectChannel = !!(tc.rendering && tc.rendering.svgChannel === "object");
   _lowPowerStaticImageOverrides = (tc.rendering && tc.rendering.lowPowerStaticImageOverrides) || {};
+  _petTintSupported = tc.petTintSupported === true;
   _imgCacheBustSeq = 0;
   _miniViewBox = tc.miniModeViewBox || null;
   _fileViewBoxes = tc.fileViewBoxes || {};
@@ -472,7 +474,7 @@ function normalizePetTintPayload(payload) {
 
 function applyPetTintToElement(element) {
   if (!element || (element.tagName !== "OBJECT" && element.tagName !== "IMG")) return;
-  element.style.filter = _petTintPayload.filter;
+  element.style.filter = _petTintSupported ? _petTintPayload.filter : "";
 }
 
 function applyPetTintToAllMedia() {

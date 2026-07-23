@@ -439,7 +439,6 @@
     label.textContent = t("rowPetColor");
     const desc = document.createElement("span");
     desc.className = "row-desc";
-    desc.textContent = t("rowPetColorDesc");
     text.appendChild(label);
     text.appendChild(desc);
 
@@ -472,11 +471,20 @@
       select.disabled = true;
     }
 
+    function isSupportedForCurrentTheme() {
+      const themeId = state.snapshot && state.snapshot.theme;
+      return typeof themeId === "string"
+        && Array.isArray(runtime.petTintSupportedThemeIds)
+        && runtime.petTintSupportedThemeIds.includes(themeId);
+    }
+
     function syncFromSnapshot() {
       const value = state.snapshot && state.snapshot.petTint;
       select.value = options.some((entry) => entry.id === value) ? value : "none";
       select.classList.remove("pending");
-      select.disabled = options.length === 0;
+      const supported = isSupportedForCurrentTheme();
+      desc.textContent = t(supported ? "rowPetColorDesc" : "rowPetColorUnsupported");
+      select.disabled = options.length === 0 || !supported;
     }
 
     select.addEventListener("change", () => {
@@ -501,7 +509,7 @@
         .finally(() => {
           if (state.mountedControls.petTint && state.mountedControls.petTint.select === select) {
             select.classList.remove("pending");
-            select.disabled = options.length === 0;
+            select.disabled = options.length === 0 || !isSupportedForCurrentTheme();
           }
         });
     });

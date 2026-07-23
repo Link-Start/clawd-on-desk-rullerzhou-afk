@@ -615,6 +615,7 @@ function loadGeneralTabForTest({
 function makeGeneralSnapshot(overrides = {}) {
   return {
     lang: "en",
+    theme: "clawd",
     petTint: "none",
     size: 50,
     sessionHudEnabled: true,
@@ -1362,9 +1363,9 @@ describe("settings renderer browser environment", () => {
 
     assert.ok(rendererSource.includes("globalThis.ClawdSettingsCore"));
     assert.ok(rendererSource.includes("settingsAPI.onRemoteApprovalStatusChanged"));
-    assert.ok(rendererSource.includes("settingsAPI.getPetTintOptions"));
+    assert.ok(rendererSource.includes("settingsAPI.getPetTintData"));
     assert.ok(fs.readFileSync(PRELOAD_SETTINGS, "utf8").includes(
-      'getPetTintOptions: () => ipcRenderer.invoke("settings:get-pet-tint-options")'
+      'getPetTintData: () => ipcRenderer.invoke("settings:get-pet-tint-data")'
     ));
     assert.ok(rendererSource.includes("tab.refreshRuntimeStatus(payload)"));
     assert.ok(coreSource.includes("ClawdSettingsSizeSlider"));
@@ -3918,6 +3919,7 @@ describe("settings renderer browser environment", () => {
       { id: "matcha", labelKey: "tintMatcha" },
       { id: "mono", labelKey: "tintMono" },
     ];
+    harness.core.runtime.petTintSupportedThemeIds = ["clawd", "cloudling"];
     harness.renderContent();
 
     const control = harness.core.state.mountedControls.petTint;
@@ -3964,6 +3966,7 @@ describe("settings renderer browser environment", () => {
       { id: "midnight", labelKey: "tintMidnight" },
       { id: "gold", labelKey: "tintGold" },
     ];
+    harness.core.runtime.petTintSupportedThemeIds = ["clawd", "cloudling"];
     harness.renderContent();
 
     const select = harness.core.state.mountedControls.petTint.select;
@@ -3974,6 +3977,26 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(select.value, "midnight");
     assert.strictEqual(select.disabled, false);
     assert.strictEqual(select.classList.contains("pending"), false);
+  });
+
+  it("disables pet color for unsupported themes while preserving the stored choice", () => {
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ theme: "calico", petTint: "matcha" }),
+    });
+    harness.core.runtime.petTintOptions = [
+      { id: "none", labelKey: "tintNone" },
+      { id: "matcha", labelKey: "tintMatcha" },
+    ];
+    harness.core.runtime.petTintSupportedThemeIds = ["clawd", "cloudling"];
+    harness.renderContent();
+
+    const control = harness.core.state.mountedControls.petTint;
+    assert.strictEqual(control.select.value, "matcha");
+    assert.strictEqual(control.select.disabled, true);
+    assert.strictEqual(
+      control.row.querySelector(".row-desc").textContent,
+      "This theme preserves its authored colors and does not support color filters."
+    );
   });
 
   it("lets the sound summary switch toggle sound without opening the collapsible group", async () => {

@@ -1101,7 +1101,7 @@ function syncHitStateAfterLoad() {
 
 function syncRendererStateAfterLoad({ includeStartupRecovery = true } = {}) {
   syncSoundPreloads();
-  sendToRenderer("pet-tint-change", resolvePetTintPayload(petTint));
+  sendToRenderer("pet-tint-change", resolvePetTintPayload(petTint, getActiveTheme()));
   sendToRenderer("low-power-idle-mode-change", lowPowerIdleMode);
   if (_mini.getMiniMode()) {
     sendToRenderer("mini-mode-change", true, _mini.getMiniEdge());
@@ -3316,6 +3316,7 @@ const settingsEffectRouter = createSettingsEffectRouter({
   reclampPetAfterEdgePinningChange,
   exitMiniMode: () => exitMiniMode(),
   getMiniMode: () => _mini.getMiniMode(),
+  getActiveTheme: () => getActiveTheme(),
   // #509: re-rest the pet on the newly selected idle visual right away, but
   // only while actually idle — task/sleep/mini states pick it up on their
   // next natural revert instead.

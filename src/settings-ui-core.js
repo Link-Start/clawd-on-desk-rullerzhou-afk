@@ -98,6 +98,7 @@
     codexPetRemovalPendingThemeId: null,
     animationOverridesData: null,
     petTintOptions: [],
+    petTintSupportedThemeIds: [],
     animationOverridesFetchSeq: 0,
     animationPosterRenderPending: false,
     animationPosterRenderFlags: null,
@@ -1041,6 +1042,9 @@
     }
     return window.settingsAPI.listThemes().then((list) => {
       runtime.themeList = Array.isArray(list) ? list : [];
+      runtime.petTintSupportedThemeIds = runtime.themeList
+        .filter((theme) => theme && theme.capabilities && theme.capabilities.petTint === true)
+        .map((theme) => theme.id);
       return runtime.themeList;
     }).catch((err) => {
       console.warn("settings: listThemes failed", err);

@@ -68,7 +68,7 @@ function buildBaseCtx(overrides = {}) {
     getMiniMode: () => false,
     getMiniTransitioning: () => false,
     getDisableMiniMode: () => false,
-    getActiveThemeCapabilities: () => ({ miniMode: true }),
+    getActiveThemeCapabilities: () => ({ miniMode: true, petTint: true }),
     openDashboard: () => {},
     openSettingsWindow: () => {},
     togglePetVisibility: () => {},
@@ -236,6 +236,26 @@ describe("pet color menu", () => {
     ctx.petTint = "vaporwave";
     menu.buildContextMenu();
     assertTintMenu(ctx.contextMenu.template, ctx);
+  });
+
+  it("disables pet color controls when the active theme opts out", () => {
+    const initMenu = loadMenuWithElectron(fakeElectron());
+    let trayTemplate = null;
+    const ctx = buildBaseCtx({
+      petTint: "matcha",
+      getActiveThemeCapabilities: () => ({ miniMode: true, petTint: false }),
+      tray: { setContextMenu(menuObj) { trayTemplate = menuObj.template; } },
+    });
+    const menu = initMenu(ctx);
+
+    menu.buildTrayMenu();
+    const tintMenu = findTintMenu(trayTemplate);
+    assert.ok(tintMenu);
+    assert.strictEqual(tintMenu.enabled, false);
+    assert.deepStrictEqual(
+      tintMenu.submenu.filter((item) => item.checked).map((item) => item.label),
+      ["🍵 Matcha"]
+    );
   });
 });
 

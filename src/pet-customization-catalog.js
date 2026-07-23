@@ -39,6 +39,12 @@ const PET_TINT_CATALOG = Object.freeze([
 
 const PET_TINT_BY_ID = new Map(PET_TINT_CATALOG.map((entry) => [entry.id, entry]));
 const PET_TINT_IDS = Object.freeze(PET_TINT_CATALOG.map((entry) => entry.id));
+const PET_TINT_THEME_ALIASES = Object.freeze({
+  cloudling: Object.freeze({
+    vaporwave: "matcha",
+    matcha: "vaporwave",
+  }),
+});
 
 function isPetTintId(value) {
   return typeof value === "string" && PET_TINT_BY_ID.has(value);
@@ -48,11 +54,24 @@ function getPetTint(value) {
   return PET_TINT_BY_ID.get(value) || PET_TINT_BY_ID.get("none");
 }
 
-function resolvePetTintPayload(value) {
+function isPetTintSupportedForTheme(theme) {
+  if (!theme) return true;
+  return !!(theme._capabilities && theme._capabilities.petTint === true);
+}
+
+function resolvePetTintPayload(value, theme = null) {
   const entry = getPetTint(value);
+  if (!isPetTintSupportedForTheme(theme)) {
+    return { id: "none", filter: "" };
+  }
+  const themeAliases = theme && theme._builtin === true
+    ? PET_TINT_THEME_ALIASES[theme._id]
+    : null;
+  const recipeId = (themeAliases && themeAliases[entry.id]) || entry.id;
+  const recipe = getPetTint(recipeId);
   return {
     id: entry.id,
-    filter: entry.filter,
+    filter: recipe.filter,
   };
 }
 
@@ -65,6 +84,7 @@ module.exports = {
   PET_TINT_IDS,
   isPetTintId,
   getPetTint,
+  isPetTintSupportedForTheme,
   resolvePetTintPayload,
   listPetTintOptions,
 };
