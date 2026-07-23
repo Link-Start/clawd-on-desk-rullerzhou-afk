@@ -81,6 +81,10 @@ const {
 } = require("./settings-size-preview-session");
 const { registerSettingsIpc } = require("./settings-ipc");
 const createSettingsEffectRouter = require("./settings-effect-router");
+const {
+  getPetTintIdForTheme,
+  resolvePetTintPayload,
+} = require("./pet-customization-catalog");
 const { registerSessionIpc } = require("./session-ipc");
 const { createSessionFolderOpener } = require("./session-open-folder");
 const { registerPetInteractionIpc } = require("./pet-interaction-ipc");
@@ -928,6 +932,7 @@ let soundMuted = _settingsController.get("soundMuted");
 let soundVolume = _settingsController.get("soundVolume");
 let lowPowerIdleMode = _settingsController.get("lowPowerIdleMode");
 let keepAwakeWhileWorking = _settingsController.get("keepAwakeWhileWorking");
+let petTint = _settingsController.get("petTint");
 let allowEdgePinningCached = _settingsController.get("allowEdgePinning");
 let disableMiniModeCached = _settingsController.get("disableMiniMode");
 let keepSizeAcrossDisplaysCached = _settingsController.get("keepSizeAcrossDisplays");
@@ -1106,6 +1111,9 @@ function syncHitStateAfterLoad() {
 
 function syncRendererStateAfterLoad({ includeStartupRecovery = true } = {}) {
   syncSoundPreloads();
+  const activeTheme = getActiveTheme();
+  const tintId = getPetTintIdForTheme(petTint, activeTheme && activeTheme._id);
+  sendToRenderer("pet-tint-change", resolvePetTintPayload(tintId, activeTheme));
   sendToRenderer("low-power-idle-mode-change", lowPowerIdleMode);
   if (_mini.getMiniMode()) {
     sendToRenderer("mini-mode-change", true, _mini.getMiniEdge());
@@ -1539,12 +1547,19 @@ function getIdleVisualChoice() {
   return resolveIdleVisualChoice(getActiveTheme(), _settingsController.get("idleVisual"));
 }
 
-// Renderer theme config with the idle choice stamped on — the renderer's
-// pre-IPC first frame should already show the selected visual, not flash the
-// follow sprite. getRendererConfig() returns a fresh object, safe to extend.
+// Renderer theme config with pre-IPC choices stamped on — the first media load
+// should already use the selected idle visual and tint instead of briefly
+// showing theme defaults. getRendererConfig() returns a fresh object, safe to
+// extend.
 function buildRendererThemeConfig() {
   const cfg = themeRuntime.getRendererConfig();
-  if (cfg) cfg.idleDefaultVisual = getIdleVisualChoice();
+  if (cfg) {
+    const activeTheme = getActiveTheme();
+    const tintSelections = _settingsController.get("petTint");
+    const tintId = getPetTintIdForTheme(tintSelections, activeTheme && activeTheme._id);
+    cfg.idleDefaultVisual = getIdleVisualChoice();
+    cfg.petTintPayload = resolvePetTintPayload(tintId, activeTheme);
+  }
   return cfg;
 }
 
@@ -3279,6 +3294,7 @@ const SETTINGS_MIRROR_SETTERS = {
   detachedIdleStaleMs: (v) => { detachedIdleStaleMs = v; },
   soundMuted: (v) => { soundMuted = v; }, soundVolume: (v) => { soundVolume = v; }, lowPowerIdleMode: (v) => { lowPowerIdleMode = v; },
   keepAwakeWhileWorking: (v) => { keepAwakeWhileWorking = v; },
+  petTint: (v) => { petTint = v; },
   allowEdgePinning: (v) => { allowEdgePinningCached = v; }, disableMiniMode: (v) => { disableMiniModeCached = v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; resetKeepSizeFrozen(); },
   fullscreenOverlay: (v) => { fullscreenOverlayCached = v; },
   freeRoam: (v) => { _roam.setEnabled(v); },
@@ -3329,6 +3345,7 @@ const settingsEffectRouter = createSettingsEffectRouter({
   reclampPetAfterEdgePinningChange,
   exitMiniMode: () => exitMiniMode(),
   getMiniMode: () => _mini.getMiniMode(),
+  getActiveTheme: () => getActiveTheme(),
   // #509: re-rest the pet on the newly selected idle visual right away, but
   // only while actually idle — task/sleep/mini states pick it up on their
   // next natural revert instead.

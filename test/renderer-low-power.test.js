@@ -129,6 +129,7 @@ function createRendererHarness(options = {}) {
       themeConfig: {
         assetsPath: "../assets/svg",
         eyeTracking: { states: ["idle"] },
+        petTintSupported: true,
         // Matches the pre-displayed file above, so tests that don't care about
         // the #509 idle choice keep resting on the "follow" sprite.
         idleFollowSvg: "current.svg",
@@ -182,6 +183,8 @@ globalThis.__rendererTest = {
     _layeredTrackingDocument = document;
   },
   getPetMediaElements,
+  normalizePetTintPayload,
+  applyPetTintToAllMedia,
   get pendingNext() { return pendingNext; },
   get pendingSvgFile() { return pendingSvgFile; },
   get activeSwapToken() { return activeSwapToken; },
@@ -673,18 +676,23 @@ describe("renderer object-channel selection", () => {
         },
       },
     });
+    const filter = "grayscale(1) brightness(1.05)";
+    harness.electronHandlers.onPetTintChange({ id: "mono", filter });
 
     harness.electronHandlers.onStateChange("sleeping", "sleep.svg");
     assert.strictEqual(harness.api.pendingNext.tagName, "OBJECT");
     assert.strictEqual(harness.api.pendingSvgFile, "sleep.svg");
+    assert.strictEqual(harness.api.pendingNext.style.filter, filter);
 
     harness.electronHandlers.onLowPowerIdleModeChange(true);
     assert.strictEqual(harness.api.pendingNext.tagName, "IMG");
     assert.strictEqual(harness.api.pendingSvgFile, "sleep-static.png");
+    assert.strictEqual(harness.api.pendingNext.style.filter, filter);
 
     harness.electronHandlers.onLowPowerIdleModeChange(false);
     assert.strictEqual(harness.api.pendingNext.tagName, "OBJECT");
     assert.strictEqual(harness.api.pendingSvgFile, "sleep.svg");
+    assert.strictEqual(harness.api.pendingNext.style.filter, filter);
   });
 
   it("gates idle eye-tracking attachment on the follow-idle file", () => {
@@ -774,6 +782,138 @@ describe("renderer object-channel selection", () => {
       harness.electronCalls.filter((call) => call.name === "notifyPetVisualReady"),
       [{ name: "notifyPetVisualReady", args: [] }]
     );
+  });
+});
+
+describe("renderer pet tint", () => {
+  it("applies the stamped tint before the pre-IPC initial media load", () => {
+    const filter = "sepia(0.8) saturate(2.2) hue-rotate(-18deg) brightness(1.05)";
+    const harness = createRendererHarness({
+      initialObjectData: "",
+      themeConfig: {
+        idleFollowSvg: "first.svg",
+        petTintPayload: { id: "gold", filter },
+      },
+    });
+
+    assert.ok(harness.api.pendingNext, "the initial idle visual should be loading");
+    assert.strictEqual(harness.api.pendingNext.style.filter, filter);
+  });
+
+  it("applies the selected filter to current, pending, and fading media elements", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        transitions: {
+          "current.svg": { out: 500 },
+        },
+      },
+    });
+    const setTint = harness.electronHandlers.onPetTintChange;
+    const gold = {
+      id: "gold",
+      filter: "sepia(0.8) saturate(2.2) hue-rotate(-18deg) brightness(1.05)",
+    };
+
+    assert.strictEqual(typeof setTint, "function");
+    setTint(gold);
+    assert.strictEqual(harness.clawd.style.filter, gold.filter);
+
+    harness.api.swapToFile("next.png", "working", false);
+    const pending = harness.api.pendingNext;
+    assert.strictEqual(pending.tagName, "IMG");
+    assert.strictEqual(pending.style.filter, gold.filter);
+
+    pending.listeners.get("load")();
+    assert.strictEqual(harness.api.clawdEl, pending);
+    assert.strictEqual(harness.clawd.isConnected, true, "old media should still be fading");
+
+    const mono = { id: "mono", filter: "grayscale(1) brightness(1.05)" };
+    setTint(mono);
+    const filters = [...harness.api.getPetMediaElements()].map((element) => element.style.filter);
+    assert.deepStrictEqual(filters, [mono.filter, mono.filter]);
+  });
+
+  it("clears invalid or custom CSS payloads instead of applying them", () => {
+    const harness = createRendererHarness();
+    const setTint = harness.electronHandlers.onPetTintChange;
+
+    setTint({ id: "mono", filter: "grayscale(1) brightness(1.05)" });
+    assert.strictEqual(harness.clawd.style.filter, "grayscale(1) brightness(1.05)");
+    setTint({ id: "none", filter: "" });
+    assert.strictEqual(harness.clawd.style.filter, "");
+
+    setTint({ id: "custom", filter: "url(file:///secret)" });
+    assert.strictEqual(harness.clawd.style.filter, "");
+
+    setTint({ id: "none", filter: "grayscale(1)" });
+    assert.strictEqual(harness.clawd.style.filter, "");
+
+    setTint("grayscale(1)");
+    assert.strictEqual(harness.clawd.style.filter, "");
+  });
+
+  it("keeps tint through same-file dedup and theme config reload", () => {
+    const harness = createRendererHarness();
+    const filter = "hue-rotate(265deg) saturate(1.6) contrast(1.05)";
+    harness.electronHandlers.onPetTintChange({ id: "vaporwave", filter });
+
+    harness.api.swapToFile("rest.svg", "working", false);
+    harness.api.pendingNext.listeners.get("load")();
+    const displayed = harness.api.clawdEl;
+    assert.strictEqual(displayed.style.filter, filter);
+
+    harness.electronHandlers.onStateChange("working", "rest.svg");
+    assert.strictEqual(harness.api.pendingNext, null);
+    assert.strictEqual(harness.api.clawdEl, displayed);
+    assert.strictEqual(displayed.style.filter, filter);
+
+    harness.electronHandlers.onThemeConfig({
+      assetsPath: "../themes/other",
+      eyeTracking: { states: [] },
+      idleFollowSvg: "idle.svg",
+      petTintSupported: true,
+    });
+    assert.strictEqual(harness.api.clawdEl, displayed);
+    assert.strictEqual(displayed.style.filter, filter);
+  });
+
+  it("clears a persisted tint when the active theme opts out and restores it when support returns", () => {
+    const harness = createRendererHarness();
+    const filter = "hue-rotate(265deg) saturate(1.6) contrast(1.05)";
+    harness.electronHandlers.onPetTintChange({ id: "vaporwave", filter });
+    assert.strictEqual(harness.clawd.style.filter, filter);
+
+    harness.electronHandlers.onThemeConfig({
+      assetsPath: "../themes/calico",
+      eyeTracking: { states: [] },
+      idleFollowSvg: "idle.png",
+      petTintSupported: false,
+    });
+    assert.strictEqual(harness.clawd.style.filter, "");
+
+    harness.electronHandlers.onThemeConfig({
+      assetsPath: "../themes/clawd",
+      eyeTracking: { states: ["idle"] },
+      idleFollowSvg: "idle.svg",
+      petTintSupported: true,
+    });
+    assert.strictEqual(harness.clawd.style.filter, filter);
+  });
+
+  it("wires an initial resolved payload and a narrow preload event channel", () => {
+    const source = readNormalized(RENDERER);
+    const preload = readNormalized(PRELOAD);
+    const main = readNormalized(MAIN);
+
+    assert.ok(source.includes('let _petTintPayload = { id: "none", filter: "" };'));
+    assert.ok(source.includes("applyPetTintToElement(next);"));
+    assert.ok(source.includes("for (const element of getPetMediaElements()) applyPetTintToElement(element);"));
+    assert.ok(preload.includes(
+      'onPetTintChange: (cb) => ipcRenderer.on("pet-tint-change", (_, payload) => cb(payload))'
+    ));
+    assert.ok(main.includes(
+      "const tintId = getPetTintIdForTheme(petTint, activeTheme && activeTheme._id);"
+    ));
   });
 });
 

@@ -4,6 +4,7 @@ const defaultFs = require("fs");
 const defaultPath = require("path");
 const { detectAgentInstallations: defaultDetectAgentInstallations } = require("./agent-installation-detector");
 const settingsThemeImporter = require("./settings-theme-importer");
+const { listPetTintOptions } = require("./pet-customization-catalog");
 
 const SOUND_OVERRIDE_ASSET_EXTS = new Set([".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac"]);
 const SOUND_OVERRIDE_DIALOG_STRINGS = {
@@ -198,6 +199,7 @@ function registerSettingsIpc(options = {}) {
       return 0;
     }
   });
+  handle("settings:get-pet-tint-options", () => listPetTintOptions());
   handle("settings:update", (_event, payload) => {
     if (!payload || typeof payload !== "object") {
       return { status: "error", message: "settings:update payload must be { key, value }" };

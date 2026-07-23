@@ -1,5 +1,10 @@
 "use strict";
 
+const {
+  getPetTintIdForTheme,
+  resolvePetTintPayload,
+} = require("./pet-customization-catalog");
+
 const MENU_AFFECTING_KEYS = new Set([
   "lang",
   "soundMuted",
@@ -73,6 +78,7 @@ function createSettingsEffectRouter(options = {}) {
   const reclampPetAfterEdgePinningChange = options.reclampPetAfterEdgePinningChange || noop;
   const exitMiniMode = options.exitMiniMode || noop;
   const getMiniMode = options.getMiniMode || (() => false);
+  const getActiveTheme = options.getActiveTheme || (() => null);
   const refreshIdleVisual = options.refreshIdleVisual || noop;
   const rebuildAllMenus = options.rebuildAllMenus || noop;
   const reconcilePowerSaveBlocker = options.reconcilePowerSaveBlocker || noop;
@@ -109,6 +115,11 @@ function createSettingsEffectRouter(options = {}) {
         "Clawd: low-power Session HUD sync failed:",
         syncSessionHudVisibility
       );
+    }
+    if ("petTint" in changes) {
+      const activeTheme = getActiveTheme();
+      const tintId = getPetTintIdForTheme(changes.petTint, activeTheme && activeTheme._id);
+      sendToRenderer("pet-tint-change", resolvePetTintPayload(tintId, activeTheme));
     }
     if ("keepAwakeWhileWorking" in changes) {
       safeCall(logWarn, "Clawd: reconcilePowerSaveBlocker failed:", reconcilePowerSaveBlocker);

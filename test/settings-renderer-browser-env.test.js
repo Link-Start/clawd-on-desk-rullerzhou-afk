@@ -615,6 +615,8 @@ function loadGeneralTabForTest({
 function makeGeneralSnapshot(overrides = {}) {
   return {
     lang: "en",
+    theme: "clawd",
+    petTint: {},
     size: 50,
     sessionHudEnabled: true,
     sessionHudShowStateLabels: true,
@@ -781,6 +783,8 @@ function findAncestorByClass(el, className) {
 
 function loadThemeTabForTest({
   themes,
+  snapshot,
+  petTintOptions,
   settingsAPI = {},
 } = {}) {
   const body = new FakeElement("body");
@@ -789,6 +793,8 @@ function loadThemeTabForTest({
   body.appendChild(content);
 
   const commands = [];
+  const updates = [];
+  let themeListState = Array.isArray(themes) ? themes : [];
   const document = {
     body,
     createElement: (tagName) => new FakeElement(tagName),
@@ -801,6 +807,17 @@ function loadThemeTabForTest({
   const api = {
     command: (name, payload) => {
       commands.push({ name, payload });
+      if (name === "setThemeSelection" && payload && typeof payload.themeId === "string") {
+        themeListState = themeListState.map((theme) => ({
+          ...theme,
+          active: theme.id === payload.themeId,
+        }));
+      }
+      return Promise.resolve({ status: "ok" });
+    },
+    listThemes: () => Promise.resolve(themeListState),
+    update: (key, value) => {
+      updates.push({ key, value });
       return Promise.resolve({ status: "ok" });
     },
     ...settingsAPI,
@@ -847,13 +864,19 @@ function loadThemeTabForTest({
   vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-tab-theme.js"), "utf8"), context);
 
   const core = context.ClawdSettingsCore;
-  core.state.snapshot = { lang: "en" };
+  core.state.snapshot = { lang: "en", petTint: {}, ...(snapshot || {}) };
   core.state.activeTab = "theme";
-  core.runtime.themeList = Array.isArray(themes) ? themes : [];
+  core.runtime.themeList = themeListState;
+  core.runtime.petTintOptions = Array.isArray(petTintOptions) ? petTintOptions : [];
   context.ClawdSettingsTabTheme.init(core);
-  core.tabs.theme.render(content, core);
+  const renderContent = () => {
+    content.innerHTML = "";
+    core.tabs.theme.render(content, core);
+  };
+  core.ops.installRenderHooks({ content: renderContent });
+  renderContent();
 
-  return { content, commands };
+  return { content, commands, updates, core, renderContent };
 }
 
 function loadAgentsTabForTest({
@@ -1477,6 +1500,10 @@ describe("settings renderer browser environment", () => {
 
     assert.ok(rendererSource.includes("globalThis.ClawdSettingsCore"));
     assert.ok(rendererSource.includes("settingsAPI.onRemoteApprovalStatusChanged"));
+    assert.ok(rendererSource.includes("settingsAPI.getPetTintOptions"));
+    assert.ok(fs.readFileSync(PRELOAD_SETTINGS, "utf8").includes(
+      'getPetTintOptions: () => ipcRenderer.invoke("settings:get-pet-tint-options")'
+    ));
     assert.ok(rendererSource.includes("tab.refreshRuntimeStatus(payload)"));
     assert.ok(coreSource.includes("ClawdSettingsSizeSlider"));
     assert.ok(i18nSource.includes("globalThis"));
@@ -4613,6 +4640,7 @@ describe("settings renderer browser environment", () => {
 
   it("groups Theme cards and exposes theme import actions in Settings", () => {
     const tabSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-theme.js"), "utf8");
+    const generalSource = fs.readFileSync(SETTINGS_TAB_GENERAL, "utf8");
     const preloadSource = fs.readFileSync(PRELOAD_SETTINGS, "utf8");
     const settingsIpcSource = fs.readFileSync(SETTINGS_IPC, "utf8");
     const coreSource = fs.readFileSync(SETTINGS_UI_CORE, "utf8");
@@ -4632,6 +4660,11 @@ describe("settings renderer browser environment", () => {
     assert.ok(tabSource.includes("handleRemoveCodexPet"));
     assert.ok(tabSource.includes("themeUninstallPetLabel"));
     assert.ok(tabSource.includes('footer.className = "theme-card-footer";'));
+    assert.ok(tabSource.includes('btn.className = "theme-customize-btn";'));
+    assert.ok(tabSource.includes("function renderThemeDetail(parent, theme)"));
+    assert.ok(tabSource.includes("function supportsThemeCustomization(theme)"));
+    assert.ok(!generalSource.includes("rowPetColor"));
+    assert.ok(!generalSource.includes("petTint"));
     assert.ok(tabSource.includes('caps.powerProfile === "scripted"'));
     assert.ok(tabSource.includes("themeCapabilityFineMotion"));
     assert.ok(tabSource.includes('if (!theme.active) indicator.setAttribute("aria-hidden", "true");'));
@@ -4653,6 +4686,9 @@ describe("settings renderer browser environment", () => {
     assert.ok(css.includes(".theme-action-group"));
     assert.ok(css.includes(".theme-action-buttons"));
     assert.ok(css.includes(".theme-uninstall-btn"));
+    assert.ok(css.includes(".theme-customize-btn"));
+    assert.ok(css.includes(".theme-detail-hero"));
+    assert.ok(css.includes(".theme-customization-row"));
     assert.ok(/\.theme-card-footer\s*\{[^}]*min-height:\s*26px;[^}]*margin-top:\s*auto;[^}]*\}/.test(css));
     assert.ok(/\.theme-card-check\s*\{[^}]*white-space:\s*nowrap;[^}]*\}/.test(css));
     assert.ok(i18nSource.includes("themeImportPetZip"));
@@ -4662,6 +4698,9 @@ describe("settings renderer browser environment", () => {
     assert.ok(i18nSource.includes("toastUserThemeZipImportOk"));
     assert.ok(i18nSource.includes("toastCodexPetZipImportOk"));
     assert.ok(i18nSource.includes("toastCodexPetRemoveOk"));
+    assert.ok(i18nSource.includes("themeCustomize"));
+    assert.ok(i18nSource.includes("themeBackToPets"));
+    assert.ok(i18nSource.includes("themeAppearanceTitle"));
 
     const strings = loadSettingsI18nForTest();
     assert.strictEqual(strings.en.themeActionGroupCodexPets, "Codex Pets");
@@ -4672,6 +4711,8 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(strings.en.themeOpenUserThemesFolder, "Open themes folder");
     assert.strictEqual(strings.en.themeRefreshThemes, "Refresh themes");
     assert.strictEqual(strings.en.themeCapabilityFineMotion, "Fine motion");
+    assert.strictEqual(strings.en.themeCustomize, "Customize");
+    assert.strictEqual(strings.zh.themeCustomize, "装扮");
     assert.strictEqual(strings.zh.themeImportPetZip, "导入 Codex Pet 包（.zip）");
     assert.strictEqual(strings.zh.themeCapabilityFineMotion, "精细动效");
     assert.strictEqual(strings.zh.themeActionGroupCodexPets, "Codex Pets");
@@ -4734,6 +4775,191 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(deleteKeydown.defaultPrevented, false);
     assert.strictEqual(uninstallKeydown.defaultPrevented, false);
     assert.deepStrictEqual(commands, []);
+  });
+
+  it("keeps customization visible on every capable pet while omitting Calico", () => {
+    const supported = loadThemeTabForTest({
+      themes: [
+        {
+          id: "clawd",
+          name: "Clawd",
+          builtin: true,
+          active: true,
+          capabilities: { petTint: true },
+        },
+        {
+          id: "calico",
+          name: "Calico",
+          builtin: true,
+          active: false,
+          capabilities: { petTint: false },
+        },
+        {
+          id: "cloudling",
+          name: "Cloudling",
+          builtin: true,
+          active: false,
+          capabilities: { petTint: true },
+        },
+      ],
+    });
+    const buttons = supported.content.querySelectorAll(".theme-customize-btn");
+    assert.strictEqual(buttons.length, 2);
+    assert.deepStrictEqual(
+      buttons.map((button) => collectText(findAncestorByClass(button, "theme-card")))
+        .map((text) => (text.includes("Cloudling") ? "Cloudling" : "Clawd"))
+        .sort(),
+      ["Clawd", "Cloudling"]
+    );
+
+    const calicoActive = loadThemeTabForTest({
+      themes: [
+        {
+          id: "calico",
+          name: "Calico",
+          builtin: true,
+          active: true,
+          capabilities: { petTint: false },
+        },
+      ],
+    });
+    assert.strictEqual(calicoActive.content.querySelectorAll(".theme-customize-btn").length, 0);
+    assert.strictEqual(calicoActive.content.querySelector(".theme-detail-hero"), null);
+  });
+
+  it("selects an inactive capable pet and opens its customization in one click", async () => {
+    let listThemesCalls = 0;
+    const harness = loadThemeTabForTest({
+      themes: [
+        {
+          id: "clawd",
+          name: "Clawd",
+          builtin: true,
+          active: true,
+          capabilities: { petTint: true },
+        },
+        {
+          id: "cloudling",
+          name: "Cloudling",
+          builtin: true,
+          active: false,
+          capabilities: { petTint: true },
+        },
+      ],
+      settingsAPI: {
+        listThemes: () => {
+          listThemesCalls += 1;
+          return Promise.reject(new Error("theme enumeration unavailable"));
+        },
+      },
+    });
+    const cloudlingButton = harness.content.querySelectorAll(".theme-customize-btn")
+      .find((button) => collectText(findAncestorByClass(button, "theme-card")).includes("Cloudling"));
+    assert.ok(cloudlingButton);
+
+    cloudlingButton.dispatchEvent({ type: "click" });
+    assert.deepStrictEqual(
+      JSON.parse(JSON.stringify(harness.commands)),
+      [{
+        name: "setThemeSelection",
+        payload: { themeId: "cloudling" },
+      }]
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.ok(harness.content.querySelector(".theme-detail-hero"));
+    assert.ok(collectText(harness.content.querySelector(".theme-detail-heading")).includes("Cloudling"));
+    assert.strictEqual(harness.content.querySelector(".theme-grid"), null);
+    assert.strictEqual(listThemesCalls, 0, "opening details should not depend on a second theme fetch");
+  });
+
+  it("keeps existing theme cards when a refresh returns an impossible empty list", async () => {
+    const harness = loadThemeTabForTest({
+      themes: [
+        {
+          id: "clawd",
+          name: "Clawd",
+          builtin: true,
+          active: true,
+          capabilities: { petTint: true },
+        },
+      ],
+      settingsAPI: {
+        // settings:list-themes reports [] when main catches an enumeration
+        // failure, even though a healthy install always has built-in themes.
+        listThemes: () => Promise.resolve([]),
+      },
+    });
+    const previousThemeList = harness.core.runtime.themeList;
+
+    const result = await harness.core.ops.fetchThemes();
+    harness.renderContent();
+
+    assert.strictEqual(result, previousThemeList);
+    assert.strictEqual(harness.core.runtime.themeList, previousThemeList);
+    assert.strictEqual(harness.content.querySelectorAll(".theme-card").length, 1);
+  });
+
+  it("opens the active pet detail and saves color independently for that theme", async () => {
+    const harness = loadThemeTabForTest({
+      themes: [
+        {
+          id: "clawd",
+          name: "Clawd",
+          builtin: true,
+          active: true,
+          previewFileUrl: "file:///clawd.svg",
+          capabilities: { petTint: true },
+        },
+      ],
+      snapshot: {
+        petTint: { clawd: "matcha", cloudling: "vaporwave" },
+      },
+      petTintOptions: [
+        { id: "none", labelKey: "tintNone" },
+        { id: "midnight", labelKey: "tintMidnight" },
+        { id: "gold", labelKey: "tintGold" },
+        { id: "vaporwave", labelKey: "tintVaporwave" },
+        { id: "matcha", labelKey: "tintMatcha" },
+        { id: "mono", labelKey: "tintMono" },
+      ],
+    });
+
+    harness.content.querySelector(".theme-customize-btn").dispatchEvent({ type: "click" });
+    assert.ok(harness.content.querySelector(".theme-detail-back"));
+    assert.ok(harness.content.querySelector(".theme-detail-hero"));
+    assert.ok(harness.content.querySelector(".theme-customization-row"));
+    assert.strictEqual(harness.content.querySelector(".theme-grid"), null);
+
+    const select = harness.content.querySelector(".pet-tint-select");
+    assert.strictEqual(select.value, "matcha");
+    assert.deepStrictEqual(
+      select.children.map((option) => option.textContent),
+      ["Default", "🌙 Midnight", "🥇 Gold", "🌸 Vaporwave", "🍵 Matcha", "⬜ Monochrome"]
+    );
+
+    select.value = "gold";
+    select.dispatchEvent({ type: "change" });
+    assert.deepStrictEqual(
+      JSON.parse(JSON.stringify(harness.updates)),
+      [{
+        key: "petTint",
+        value: { clawd: "gold", cloudling: "vaporwave" },
+      }]
+    );
+    assert.strictEqual(select.disabled, true);
+    assert.strictEqual(select.classList.contains("pending"), true);
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(select.disabled, false);
+    assert.strictEqual(select.classList.contains("pending"), false);
+
+    harness.content.querySelector(".theme-detail-back").dispatchEvent({ type: "click" });
+    assert.ok(harness.content.querySelector(".theme-grid"));
+    assert.strictEqual(harness.content.querySelector(".theme-detail-hero"), null);
   });
 
   it("animates collapsible Settings groups with measured height instead of instant hidden jumps", () => {

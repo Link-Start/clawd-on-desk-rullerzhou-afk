@@ -8,6 +8,7 @@ const path = require("node:path");
 const zlib = require("node:zlib");
 
 const { registerSettingsIpc } = require("../src/settings-ipc");
+const { listPetTintOptions } = require("../src/pet-customization-catalog");
 
 class FakeIpcMain {
   constructor() {
@@ -209,6 +210,7 @@ test("settings IPC registers owned channels and leaves animation override channe
 
   assert.ok(ipcMain.handlers.has("settings:get-snapshot"));
   assert.ok(ipcMain.handlers.has("settings:get-quota-source-count"));
+  assert.ok(ipcMain.handlers.has("settings:get-pet-tint-options"));
   assert.ok(ipcMain.handlers.has("settings:pick-sound-file"));
   assert.ok(ipcMain.handlers.has("settings:list-themes"));
   assert.ok(ipcMain.handlers.has("settings:detect-agent-installations"));
@@ -299,6 +301,10 @@ test("settings IPC delegates controller and size preview handlers", async () => 
   const { ipcMain, calls } = createHarness();
 
   assert.deepStrictEqual(await ipcMain.invoke("settings:get-snapshot"), { lang: "en" });
+  assert.deepStrictEqual(
+    await ipcMain.invoke("settings:get-pet-tint-options"),
+    listPetTintOptions()
+  );
   assert.deepStrictEqual(
     await ipcMain.invoke("settings:update", null),
     { status: "error", message: "settings:update payload must be { key, value }" }
