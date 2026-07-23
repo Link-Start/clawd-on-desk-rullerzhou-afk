@@ -51,6 +51,7 @@ const {
   TEXT_SCALE_DEFAULT,
   normalizeTextScaleByDisplay,
 } = require("./text-scale");
+const { PET_TINT_IDS } = require("./pet-customization-catalog");
 
 const CURRENT_VERSION = 12;
 const DEFAULT_INTEGRATION_INSTALLED_IDS = Object.freeze(["claude-code", "codex"]);
@@ -262,6 +263,13 @@ const SCHEMA = {
   },
   // Theme
   theme: { type: "string", default: "clawd" },
+  // Theme-agnostic color filter applied to pet media. "none" preserves the
+  // active theme's native colors and is intentionally the opt-in-safe default.
+  petTint: {
+    type: "string",
+    default: "none",
+    enum: PET_TINT_IDS,
+  },
   // Phase 2/3 placeholders — schema reserves the keys so future migrations don't need v2.
   agents: {
     type: "object",

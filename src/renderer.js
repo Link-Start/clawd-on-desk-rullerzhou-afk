@@ -25,6 +25,7 @@ let pendingSystemWakeId = null;
 let queuedSystemWakePayload = null;
 let queuedSystemWakeReplayTimer = null;
 let _lowPowerStaticImageOverrides = {};
+let _petTintPayload = { id: "none", filter: "" };
 
 // ── Theme config (injected via preload.js additionalArguments) ──
 let tc = window.themeConfig || {};
@@ -437,11 +438,55 @@ window.electronAPI.onThemeConfig((newConfig) => {
   // Clean up layered tracking before reinitializing
   _cleanupLayeredTracking();
   initWithConfig(newConfig);
+  applyPetTintToAllMedia();
 });
 
 window.electronAPI.onViewportOffset((offsetY) => {
   setViewportOffset(offsetY);
 });
+
+// ── Pet color tint ──
+// Main resolves a persisted catalog id to this small payload. The renderer
+// still rejects URL/variable/custom CSS syntax before projecting the filter
+// onto every live pet media element (current, pending, and fading-out).
+const PET_TINT_FILTER_TOKEN_RE =
+  /^(?:hue-rotate\(-?\d+(?:\.\d+)?deg\)|(?:saturate|brightness|contrast|sepia|grayscale)\(\d+(?:\.\d+)?\))$/;
+
+function isSafePetTintFilter(value) {
+  if (value === "") return true;
+  if (typeof value !== "string" || value.length > 240) return false;
+  const tokens = value.trim().split(/\s+/);
+  return tokens.length > 0 && tokens.every((token) => PET_TINT_FILTER_TOKEN_RE.test(token));
+}
+
+function normalizePetTintPayload(payload) {
+  if (!payload || typeof payload !== "object") return { id: "none", filter: "" };
+  const id = typeof payload.id === "string" ? payload.id : "";
+  const filter = typeof payload.filter === "string" ? payload.filter.trim() : "";
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(id)) return { id: "none", filter: "" };
+  if (!isSafePetTintFilter(filter)) return { id: "none", filter: "" };
+  if (id === "none") return filter === "" ? { id, filter } : { id: "none", filter: "" };
+  if (!filter) return { id: "none", filter: "" };
+  return { id, filter };
+}
+
+function applyPetTintToElement(element) {
+  if (!element || (element.tagName !== "OBJECT" && element.tagName !== "IMG")) return;
+  element.style.filter = _petTintPayload.filter;
+}
+
+function applyPetTintToAllMedia() {
+  for (const element of getPetMediaElements()) applyPetTintToElement(element);
+}
+
+function setPetTintPayload(payload) {
+  _petTintPayload = normalizePetTintPayload(payload);
+  applyPetTintToAllMedia();
+}
+
+if (window.electronAPI && typeof window.electronAPI.onPetTintChange === "function") {
+  window.electronAPI.onPetTintChange(setPetTintPayload);
+}
 
 // Release an <object> SVG element: navigate away to unload the SVG document
 // (stops CSS animations and frees the internal frame), then remove from DOM.
@@ -873,6 +918,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
     next.style.opacity = "0";
     applyObjectScaleStyle(next, file, state);
     applyMiniFlip(next, state);
+    applyPetTintToElement(next);
     let swapCallbackSettled = false;
     const finishSwapReady = () => {
       if (swapCallbackSettled) return;
@@ -965,6 +1011,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
     next.style.opacity = "0";
     applyObjectScaleStyle(next, file, state);
     applyMiniFlip(next, state);
+    applyPetTintToElement(next);
 
     const swap = () => {
       if (pendingNext !== next) return;

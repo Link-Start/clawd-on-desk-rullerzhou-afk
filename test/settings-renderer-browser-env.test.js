@@ -615,6 +615,7 @@ function loadGeneralTabForTest({
 function makeGeneralSnapshot(overrides = {}) {
   return {
     lang: "en",
+    petTint: "none",
     size: 50,
     sessionHudEnabled: true,
     sessionHudShowStateLabels: true,
@@ -1361,6 +1362,10 @@ describe("settings renderer browser environment", () => {
 
     assert.ok(rendererSource.includes("globalThis.ClawdSettingsCore"));
     assert.ok(rendererSource.includes("settingsAPI.onRemoteApprovalStatusChanged"));
+    assert.ok(rendererSource.includes("settingsAPI.getPetTintOptions"));
+    assert.ok(fs.readFileSync(PRELOAD_SETTINGS, "utf8").includes(
+      'getPetTintOptions: () => ipcRenderer.invoke("settings:get-pet-tint-options")'
+    ));
     assert.ok(rendererSource.includes("tab.refreshRuntimeStatus(payload)"));
     assert.ok(coreSource.includes("ClawdSettingsSizeSlider"));
     assert.ok(i18nSource.includes("globalThis"));
@@ -3891,6 +3896,84 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(summary.children[1].classList.contains("on"), false);
     assert.strictEqual(volumeSlider.disabled, true);
     assert.strictEqual(summary.children[0].textContent, "off · 25%");
+  });
+
+  it("renders canonical pet color choices, commits ids, and patches the selection in place", async () => {
+    const updateCalls = [];
+    const initialSnapshot = makeGeneralSnapshot({ petTint: "none" });
+    const harness = loadGeneralTabForTest({
+      snapshot: initialSnapshot,
+      settingsAPI: {
+        update: (key, value) => {
+          updateCalls.push({ key, value });
+          return Promise.resolve({ status: "ok" });
+        },
+      },
+    });
+    harness.core.runtime.petTintOptions = [
+      { id: "none", labelKey: "tintNone" },
+      { id: "midnight", labelKey: "tintMidnight" },
+      { id: "gold", labelKey: "tintGold" },
+      { id: "vaporwave", labelKey: "tintVaporwave" },
+      { id: "matcha", labelKey: "tintMatcha" },
+      { id: "mono", labelKey: "tintMono" },
+    ];
+    harness.renderContent();
+
+    const control = harness.core.state.mountedControls.petTint;
+    const select = control.select;
+    assert.ok(control);
+    assert.strictEqual(select.disabled, false);
+    assert.strictEqual(select.value, "none");
+    assert.deepStrictEqual(
+      select.children.map((option) => option.textContent),
+      ["Default", "🌙 Midnight", "🥇 Gold", "🌸 Vaporwave", "🍵 Matcha", "⬜ Monochrome"]
+    );
+
+    select.value = "gold";
+    select.dispatchEvent({ type: "change" });
+    assert.deepStrictEqual(updateCalls, [{ key: "petTint", value: "gold" }]);
+    assert.strictEqual(select.disabled, true);
+    assert.strictEqual(select.classList.contains("pending"), true);
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(select.disabled, false);
+    assert.strictEqual(select.classList.contains("pending"), false);
+
+    const beforeRenderCount = harness.getContentRenderCount();
+    harness.core.ops.applyChanges({
+      changes: { petTint: "mono" },
+      snapshot: { ...initialSnapshot, petTint: "mono" },
+    });
+
+    assert.strictEqual(harness.getContentRenderCount(), beforeRenderCount);
+    assert.strictEqual(harness.core.state.mountedControls.petTint.select, select);
+    assert.strictEqual(select.value, "mono");
+  });
+
+  it("rolls the pet color selector back when persistence rejects the change", async () => {
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ petTint: "midnight" }),
+      settingsAPI: {
+        update: () => Promise.reject(new Error("denied")),
+      },
+    });
+    harness.core.runtime.petTintOptions = [
+      { id: "none", labelKey: "tintNone" },
+      { id: "midnight", labelKey: "tintMidnight" },
+      { id: "gold", labelKey: "tintGold" },
+    ];
+    harness.renderContent();
+
+    const select = harness.core.state.mountedControls.petTint.select;
+    select.value = "gold";
+    select.dispatchEvent({ type: "change" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.strictEqual(select.value, "midnight");
+    assert.strictEqual(select.disabled, false);
+    assert.strictEqual(select.classList.contains("pending"), false);
   });
 
   it("lets the sound summary switch toggle sound without opening the collapsible group", async () => {

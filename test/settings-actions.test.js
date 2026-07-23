@@ -67,6 +67,16 @@ describe("updateRegistry pure-data validators", () => {
     assert.strictEqual(updateRegistry.miniEdge("top", deps).status, "error");
   });
 
+  it("petTint accepts only ids from the canonical catalog", () => {
+    const deps = { snapshot: baseSnapshot };
+    for (const id of ["none", "midnight", "gold", "vaporwave", "matcha", "mono"]) {
+      assert.strictEqual(updateRegistry.petTint(id, deps).status, "ok", id);
+    }
+    assert.strictEqual(updateRegistry.petTint("custom", deps).status, "error");
+    assert.strictEqual(updateRegistry.petTint("url(file:///secret)", deps).status, "error");
+    assert.strictEqual(updateRegistry.petTint(null, deps).status, "error");
+  });
+
   it("x/y/preMiniX/preMiniY require finite numbers", () => {
     const deps = { snapshot: baseSnapshot };
     assert.strictEqual(updateRegistry.x(0, deps).status, "ok");

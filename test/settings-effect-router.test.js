@@ -356,6 +356,28 @@ describe("settings-effect-router", () => {
     ]);
   });
 
+  it("resolves a pet tint id before sending it to renderer and rebuilds menus once", () => {
+    const { calls, emit } = createHarness();
+
+    emit({ petTint: "gold" });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { petTint: "gold" }],
+      ["sendToRenderer", "pet-tint-change", {
+        id: "gold",
+        filter: "sepia(0.8) saturate(2.2) hue-rotate(-18deg) brightness(1.05)",
+      }],
+      ["rebuildAllMenus"],
+    ]);
+
+    calls.length = 0;
+    emit({ petTint: "not-in-catalog" });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { petTint: "not-in-catalog" }],
+      ["sendToRenderer", "pet-tint-change", { id: "none", filter: "" }],
+      ["rebuildAllMenus"],
+    ]);
+  });
+
   it("broadcasts settings changes only to live renderer windows", () => {
     const calls = [];
     const windows = [

@@ -77,6 +77,7 @@
       soundSummary: null,
       soundVolume: null,
       textScale: null,
+      petTint: null,
     },
     shortcutRecordingActionId: null,
     shortcutRecordingError: "",
@@ -96,6 +97,7 @@
     userThemeZipImportPending: false,
     codexPetRemovalPendingThemeId: null,
     animationOverridesData: null,
+    petTintOptions: [],
     animationOverridesFetchSeq: 0,
     animationPosterRenderPending: false,
     animationPosterRenderFlags: null,
@@ -856,6 +858,9 @@
     if (state.mountedControls.textScale && typeof state.mountedControls.textScale.dispose === "function") {
       state.mountedControls.textScale.dispose();
     }
+    if (state.mountedControls.petTint && typeof state.mountedControls.petTint.dispose === "function") {
+      state.mountedControls.petTint.dispose();
+    }
     state.mountedControls.generalSwitches.clear();
     state.mountedControls.bubblePolicyControls.clear();
     state.mountedControls.sessionCleanupControls.clear();
@@ -873,6 +878,7 @@
     state.mountedControls.soundSummary = null;
     state.mountedControls.soundVolume = null;
     state.mountedControls.textScale = null;
+    state.mountedControls.petTint = null;
   }
 
   function syncMountedSizeControl({ fromBroadcast = false } = {}) {

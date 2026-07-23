@@ -1415,6 +1415,27 @@ html, body {
   background: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
+.pet-tint-select {
+  min-width: 176px;
+  max-width: 240px;
+  padding: 7px 30px 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.pet-tint-select:hover:not(:disabled),
+.pet-tint-select:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+.pet-tint-select.pending,
+.pet-tint-select:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
 @media (prefers-color-scheme: dark) {
   .language-picker-menu {
     box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36), 0 3px 8px rgba(0, 0, 0, 0.22);

@@ -46,6 +46,7 @@ describe("prefs.getDefaults", () => {
     const d = prefs.getDefaults();
     assert.strictEqual(d.manageClaudeHooksAutomatically, true);
     assert.strictEqual(d.autoStartWithClaude, false);
+    assert.strictEqual(d.petTint, "none");
     assert.strictEqual(d.lowPowerIdleMode, false);
     assert.strictEqual(d.allowEdgePinning, false);
     assert.strictEqual(d.disableMiniMode, false);
@@ -185,6 +186,7 @@ describe("prefs.validate", () => {
       lang: "klingon",       // not in enum
       soundMuted: "yes",     // wrong type
       soundVolume: 2,        // out of range → default 1
+      petTint: "custom-css",
       lowPowerIdleMode: "yes",
       x: NaN,                // not finite
       bubbleFollowPet: true, // ok
@@ -207,6 +209,7 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.lang, d.lang);
     assert.strictEqual(v.soundMuted, false);
     assert.strictEqual(v.soundVolume, 1);
+    assert.strictEqual(v.petTint, "none");
     assert.strictEqual(v.lowPowerIdleMode, false);
     assert.strictEqual(v.x, 0);
     assert.strictEqual(v.bubbleFollowPet, true);
@@ -343,6 +346,7 @@ describe("prefs.validate", () => {
       size: "P:15",
       miniEdge: "left",
       theme: "calico",
+      petTint: "gold",
     });
     assert.strictEqual(v.lang, "ko");
     assert.strictEqual(v.soundMuted, true);
@@ -365,6 +369,7 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.size, "P:15");
     assert.strictEqual(v.miniEdge, "left");
     assert.strictEqual(v.theme, "calico");
+    assert.strictEqual(v.petTint, "gold");
   });
 
   it("accepts soundVolume 0 (silent playback is valid)", () => {
@@ -1350,6 +1355,15 @@ describe("prefs.save", () => {
     assert.strictEqual(snapshot.bubbleFollowPet, true);
     assert.strictEqual(snapshot.x, 42);
     assert.strictEqual(snapshot.version, prefs.CURRENT_VERSION);
+  });
+
+  it("round-trips a valid pet tint and normalizes an unknown tint before writing", () => {
+    const p = makeTempPath();
+    prefs.save(p, { ...prefs.getDefaults(), petTint: "vaporwave" });
+    assert.strictEqual(prefs.load(p).snapshot.petTint, "vaporwave");
+
+    prefs.save(p, { ...prefs.getDefaults(), petTint: "custom" });
+    assert.strictEqual(JSON.parse(fs.readFileSync(p, "utf8")).petTint, "none");
   });
 
   it("validates before writing — bad fields fall back to defaults on disk", () => {
