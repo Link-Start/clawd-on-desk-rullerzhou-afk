@@ -1,7 +1,6 @@
 "use strict";
 
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
@@ -148,6 +147,92 @@ function relativeOrBasename(repoRoot, filePath) {
     : relative;
 }
 
+function normalizeMachOSignaturePayload(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 32) {
+    return { ok: false, error: "Mach-O file is too small" };
+  }
+  const magic = buffer.readUInt32BE(0);
+  let endian = null;
+  let headerBytes = null;
+  if (magic === 0xfeedfacf) {
+    endian = "be";
+    headerBytes = 32;
+  } else if (magic === 0xcffaedfe) {
+    endian = "le";
+    headerBytes = 32;
+  } else if (magic === 0xfeedface) {
+    endian = "be";
+    headerBytes = 28;
+  } else if (magic === 0xcefaedfe) {
+    endian = "le";
+    headerBytes = 28;
+  } else {
+    return { ok: false, error: "Expected a thin Mach-O binary" };
+  }
+  const readUInt32 = (offset) => (
+    endian === "be" ? buffer.readUInt32BE(offset) : buffer.readUInt32LE(offset)
+  );
+  const ncmds = readUInt32(16);
+  const sizeofcmds = readUInt32(20);
+  const loadCommandsEnd = headerBytes + sizeofcmds;
+  if (loadCommandsEnd > buffer.length) {
+    return { ok: false, error: "Mach-O load commands exceed the file size" };
+  }
+
+  let cursor = headerBytes;
+  let signature = null;
+  for (let index = 0; index < ncmds; index += 1) {
+    if (cursor + 8 > loadCommandsEnd) {
+      return { ok: false, error: "Mach-O load command header exceeds sizeofcmds" };
+    }
+    const command = readUInt32(cursor);
+    const commandBytes = readUInt32(cursor + 4);
+    if (commandBytes < 8 || cursor + commandBytes > loadCommandsEnd) {
+      return { ok: false, error: "Mach-O load command has an invalid size" };
+    }
+    if (command === 0x1d) {
+      if (signature) return { ok: false, error: "Mach-O contains multiple LC_CODE_SIGNATURE commands" };
+      if (commandBytes < 16) {
+        return { ok: false, error: "Mach-O LC_CODE_SIGNATURE command is truncated" };
+      }
+      signature = {
+        commandOffset: cursor,
+        commandBytes,
+        dataOffset: readUInt32(cursor + 8),
+        dataBytes: readUInt32(cursor + 12),
+      };
+    }
+    cursor += commandBytes;
+  }
+  if (cursor !== loadCommandsEnd) {
+    return { ok: false, error: "Mach-O load command sizes do not equal sizeofcmds" };
+  }
+  if (!signature) {
+    return {
+      ok: true,
+      buffer: Buffer.from(buffer),
+      signaturePresent: false,
+      signatureOffset: null,
+      signatureBytes: 0,
+    };
+  }
+  if (signature.dataBytes === 0
+    || signature.dataOffset < loadCommandsEnd
+    || signature.dataOffset + signature.dataBytes !== buffer.length) {
+    return { ok: false, error: "Mach-O code signature is not the final bounded payload" };
+  }
+
+  const normalized = Buffer.from(buffer.subarray(0, signature.dataOffset));
+  normalized.fill(0, signature.commandOffset, signature.commandOffset + signature.commandBytes);
+  return {
+    ok: true,
+    buffer: normalized,
+    signaturePresent: true,
+    signatureOffset: signature.dataOffset,
+    signatureBytes: signature.dataBytes,
+  };
+}
+
 function normalizeDarwinCodeSignature(filePath, options = {}) {
   const fsModule = options.fs || fs;
   const spawn = options.spawnSync || spawnSync;
@@ -158,42 +243,24 @@ function normalizeDarwinCodeSignature(filePath, options = {}) {
   if (verification.error) {
     return { ok: false, error: `codesign verification could not start: ${verification.error.message}` };
   }
-  if (verification.status !== 0) {
-    if (!requireSignature) {
-      return {
-        ok: true,
-        buffer: fsModule.readFileSync(filePath),
-        signed: false,
-        method: "unsigned-source",
-      };
-    }
+  if (verification.status !== 0 && requireSignature) {
     const detail = String(verification.stderr || verification.stdout || "").trim();
     return { ok: false, error: `codesign verification failed${detail ? `: ${detail}` : ""}` };
   }
 
-  const tempDir = fsModule.mkdtempSync(path.join(os.tmpdir(), "clawd-sidecar-codesign-"));
-  const tempPath = path.join(tempDir, path.basename(filePath));
-  try {
-    fsModule.copyFileSync(filePath, tempPath);
-    const removal = spawn("codesign", ["--remove-signature", tempPath], {
-      encoding: "utf8",
-    });
-    if (removal.error) {
-      return { ok: false, error: `codesign signature removal could not start: ${removal.error.message}` };
-    }
-    if (removal.status !== 0) {
-      const detail = String(removal.stderr || removal.stdout || "").trim();
-      return { ok: false, error: `codesign signature removal failed${detail ? `: ${detail}` : ""}` };
-    }
-    return {
-      ok: true,
-      buffer: fsModule.readFileSync(tempPath),
-      signed: true,
-      method: "codesign-stripped",
-    };
-  } finally {
-    fsModule.rmSync(tempDir, { recursive: true, force: true });
+  const normalized = normalizeMachOSignaturePayload(fsModule.readFileSync(filePath));
+  if (!normalized.ok) return normalized;
+  if (verification.status === 0 && !normalized.signaturePresent) {
+    return { ok: false, error: "codesign verified a Mach-O without LC_CODE_SIGNATURE" };
   }
+  if (requireSignature && !normalized.signaturePresent) {
+    return { ok: false, error: "Packaged Mach-O has no LC_CODE_SIGNATURE" };
+  }
+  return {
+    ...normalized,
+    signed: verification.status === 0,
+    method: normalized.signaturePresent ? "macho-signature-excluded" : "unsigned-source",
+  };
 }
 
 function inspectPackagedSidecar(options = {}) {
@@ -237,6 +304,8 @@ function inspectPackagedSidecar(options = {}) {
   let normalizedSha256 = null;
   let sourceSigned = null;
   let packagedSigned = null;
+  let sourceSignatureBytes = null;
+  let packagedSignatureBytes = null;
   const executableRequired = target.platform !== "windows";
   const executableChecked = executableRequired && hostPlatform !== "win32";
 
@@ -274,6 +343,8 @@ function inspectPackagedSidecar(options = {}) {
           });
           sourceSigned = sourceNormalized.ok ? sourceNormalized.signed : null;
           packagedSigned = packagedNormalized.ok ? packagedNormalized.signed : null;
+          sourceSignatureBytes = sourceNormalized.ok ? sourceNormalized.signatureBytes : null;
+          packagedSignatureBytes = packagedNormalized.ok ? packagedNormalized.signatureBytes : null;
           if (!sourceNormalized.ok) {
             errors.push(`Could not normalize source ${target.dir} signature: ${sourceNormalized.error}`);
           }
@@ -352,6 +423,8 @@ function inspectPackagedSidecar(options = {}) {
         normalizedSha256,
         sourceSigned,
         packagedSigned,
+        sourceSignatureBytes,
+        packagedSignatureBytes,
         executableRequired,
         executableChecked,
         executable,
@@ -445,6 +518,7 @@ module.exports = {
   defaultLayout,
   inspectPackagedSidecar,
   normalizeDarwinCodeSignature,
+  normalizeMachOSignaturePayload,
   parseArgs,
   runAssertion,
   summarizeTree,

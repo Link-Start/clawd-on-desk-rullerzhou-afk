@@ -11,6 +11,7 @@ const {
   defaultLayout,
   inspectPackagedSidecar,
   normalizeDarwinCodeSignature,
+  normalizeMachOSignaturePayload,
   parseArgs,
 } = require("../scripts/assert-packaged-sidecar");
 const {
@@ -45,6 +46,21 @@ function machoBuffer(cpuType, marker = 0) {
   buffer.writeUInt32BE(0xfeedfacf, 0);
   buffer.writeUInt32BE(cpuType, 4);
   buffer.writeUInt8(marker, 127);
+  return buffer;
+}
+
+function signedMachoBuffer(cpuType, signatureBytes, signatureMarker) {
+  const buffer = Buffer.alloc(128 + signatureBytes, signatureMarker);
+  buffer.fill(0, 0, 128);
+  buffer.writeUInt32BE(0xfeedfacf, 0);
+  buffer.writeUInt32BE(cpuType, 4);
+  buffer.writeUInt32BE(1, 16);
+  buffer.writeUInt32BE(16, 20);
+  buffer.writeUInt32BE(0x1d, 32);
+  buffer.writeUInt32BE(16, 36);
+  buffer.writeUInt32BE(128, 40);
+  buffer.writeUInt32BE(signatureBytes, 44);
+  buffer.writeUInt8(7, 100);
   return buffer;
 }
 
@@ -189,9 +205,9 @@ test("packaged sidecar assertion rejects checksum and native architecture mismat
   }
 });
 
-test("Darwin packages accept only a signed copy matching the pinned source after signature removal", () => {
-  const packagedContents = machoBuffer(0x0100000c, 2);
-  const sourceContents = machoBuffer(0x0100000c, 1);
+test("Darwin packages accept only a signed copy matching the pinned source outside the bounded signature payload", () => {
+  const packagedContents = signedMachoBuffer(0x0100000c, 33, 2);
+  const sourceContents = signedMachoBuffer(0x0100000c, 56, 1);
   const item = fixture("darwin-arm64", packagedContents);
   const sourcePath = path.join(
     item.root,
@@ -202,8 +218,6 @@ test("Darwin packages accept only a signed copy matching the pinned source after
   );
   fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
   fs.writeFileSync(sourcePath, sourceContents);
-  const normalizedContents = machoBuffer(0x0100000c);
-  const normalizedCalls = [];
   try {
     const result = inspectPackagedSidecar({
       target: item.target.dir,
@@ -216,54 +230,46 @@ test("Darwin packages accept only a signed copy matching the pinned source after
         [binaryChecksumName(item.target)]: sha256(sourceContents),
       },
       hostPlatform: "win32",
-      normalizeDarwinBinary(filePath, options) {
-        normalizedCalls.push([filePath, options.role, options.requireSignature]);
-        return {
-          ok: true,
-          buffer: normalizedContents,
-          signed: options.role === "packaged",
-        };
+      normalizeDarwinBinary: normalizeDarwinCodeSignature,
+      spawnSync() {
+        return { status: 0, stdout: "", stderr: "" };
       },
     });
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.manifest.sidecar.expectedSha256, sha256(sourceContents));
     assert.strictEqual(result.manifest.sidecar.checksumMode, "codesign-normalized");
-    assert.strictEqual(result.manifest.sidecar.normalizedSha256, sha256(normalizedContents));
-    assert.strictEqual(result.manifest.sidecar.sourceSigned, false);
+    assert.strictEqual(
+      result.manifest.sidecar.normalizedSha256,
+      sha256(normalizeMachOSignaturePayload(sourceContents).buffer),
+    );
+    assert.strictEqual(result.manifest.sidecar.sourceSigned, true);
     assert.strictEqual(result.manifest.sidecar.packagedSigned, true);
-    assert.deepStrictEqual(normalizedCalls, [
-      [sourcePath, "source", false],
-      [item.binaryPath, "packaged", true],
-    ]);
+    assert.strictEqual(result.manifest.sidecar.sourceSignatureBytes, 56);
+    assert.strictEqual(result.manifest.sidecar.packagedSignatureBytes, 33);
   } finally {
     removeFixture(item);
   }
 });
 
-test("Darwin signature normalization verifies before stripping and rejects an unsigned package", () => {
+test("Darwin signature normalization verifies before excluding signature bytes and rejects an unsigned package", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-codesign-normalize-"));
   const signedPath = path.join(root, "cc-connect-clawd");
-  const signedContents = machoBuffer(0x0100000c, 2);
-  const normalizedContents = machoBuffer(0x0100000c);
+  const signedContents = signedMachoBuffer(0x0100000c, 33, 2);
   fs.writeFileSync(signedPath, signedContents);
   const calls = [];
   try {
     const normalized = normalizeDarwinCodeSignature(signedPath, {
       spawnSync(command, args) {
         calls.push([command, ...args]);
-        if (args[0] === "--verify") return { status: 0, stdout: "", stderr: "" };
-        fs.writeFileSync(args[1], normalizedContents);
         return { status: 0, stdout: "", stderr: "" };
       },
       requireSignature: true,
     });
     assert.strictEqual(normalized.ok, true);
     assert.strictEqual(normalized.signed, true);
-    assert.deepStrictEqual(normalized.buffer, normalizedContents);
-    assert.deepStrictEqual(calls.map((call) => call.slice(0, 3)), [
-      ["codesign", "--verify", "--strict"],
-      ["codesign", "--remove-signature", calls[1][2]],
-    ]);
+    assert.strictEqual(normalized.signatureBytes, 33);
+    assert.strictEqual(normalized.buffer.length, 128);
+    assert.deepStrictEqual(calls, [["codesign", "--verify", "--strict", signedPath]]);
 
     const rejected = normalizeDarwinCodeSignature(signedPath, {
       spawnSync() {
@@ -276,6 +282,29 @@ test("Darwin signature normalization verifies before stripping and rejects an un
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("Mach-O normalization excludes only the declared final signature payload", () => {
+  const first = signedMachoBuffer(0x0100000c, 56, 1);
+  const resigned = signedMachoBuffer(0x0100000c, 33, 2);
+  const firstNormalized = normalizeMachOSignaturePayload(first);
+  const resignedNormalized = normalizeMachOSignaturePayload(resigned);
+  assert.strictEqual(firstNormalized.ok, true);
+  assert.strictEqual(resignedNormalized.ok, true);
+  assert.deepStrictEqual(firstNormalized.buffer, resignedNormalized.buffer);
+
+  const changedPayload = Buffer.from(resigned);
+  changedPayload.writeUInt8(8, 100);
+  assert.notDeepStrictEqual(
+    firstNormalized.buffer,
+    normalizeMachOSignaturePayload(changedPayload).buffer,
+    "non-signature payload changes must remain visible",
+  );
+  const trailingBytes = Buffer.concat([resigned, Buffer.from([0])]);
+  assert.deepStrictEqual(normalizeMachOSignaturePayload(trailingBytes), {
+    ok: false,
+    error: "Mach-O code signature is not the final bounded payload",
+  });
 });
 
 test("packaged sidecar assertion checks executable mode on POSIX package runners", () => {
