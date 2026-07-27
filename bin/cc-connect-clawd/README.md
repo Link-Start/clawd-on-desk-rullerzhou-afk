@@ -1,9 +1,9 @@
 cc-connect-clawd sidecar binaries
 =================================
 
-Electron packaged builds copy this directory to:
+Electron packaged builds copy only the current target directory to:
 
-  resources/sidecars/cc-connect-clawd/
+  resources/sidecars/cc-connect-clawd/<platform>-<arch>/
 
 Place built sidecar binaries in platform/architecture directories:
 

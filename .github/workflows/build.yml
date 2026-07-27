@@ -19,12 +19,26 @@ jobs:
       - run: npm run fetch:sidecars -- --target windows-x64,windows-arm64
       - run: node scripts/verify-sidecar-binaries.js prebuild:win:all
       - run: npx electron-builder --win --publish never
+      - name: Assert packaged Windows sidecars
+        run: |
+          npm run assert:packaged-sidecar -- --target windows-x64
+          npm run assert:packaged-sidecar -- --target windows-arm64
+          npm run audit:assets -- --package-root dist/win-unpacked/resources/sidecars/cc-connect-clawd --target windows-x64 --output dist/repository-asset-audit/windows-x64
+          npm run audit:assets -- --package-root dist/win-arm64-unpacked/resources/sidecars/cc-connect-clawd --target windows-arm64 --output dist/repository-asset-audit/windows-arm64
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
           path: |
             dist/*.exe
             dist/latest.yml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-package-manifests
+          path: |
+            dist/sidecar-package-manifests/*.json
+            dist/repository-asset-audit/*/*.json
+          if-no-files-found: warn
 
   build-mac:
     runs-on: macos-latest
@@ -38,12 +52,26 @@ jobs:
       - run: npm run fetch:sidecars -- --target darwin-x64,darwin-arm64
       - run: node scripts/verify-sidecar-binaries.js prebuild:mac
       - run: npx electron-builder --mac --publish never
+      - name: Assert packaged macOS sidecars
+        run: |
+          npm run assert:packaged-sidecar -- --target darwin-x64
+          npm run assert:packaged-sidecar -- --target darwin-arm64
+          npm run audit:assets -- --package-root "dist/mac/Clawd on Desk.app/Contents/Resources/sidecars/cc-connect-clawd" --target darwin-x64 --output dist/repository-asset-audit/darwin-x64
+          npm run audit:assets -- --package-root "dist/mac-arm64/Clawd on Desk.app/Contents/Resources/sidecars/cc-connect-clawd" --target darwin-arm64 --output dist/repository-asset-audit/darwin-arm64
       - uses: actions/upload-artifact@v4
         with:
           name: mac-installer
           path: |
             dist/*.dmg
             dist/latest-mac.yml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-package-manifests
+          path: |
+            dist/sidecar-package-manifests/*.json
+            dist/repository-asset-audit/*/*.json
+          if-no-files-found: warn
 
   build-linux:
     runs-on: ubuntu-latest
@@ -57,6 +85,10 @@ jobs:
       - run: npm run fetch:sidecars -- --target linux-x64
       - run: node scripts/verify-sidecar-binaries.js prebuild:linux
       - run: npx electron-builder --linux --publish never
+      - name: Assert packaged Linux sidecar
+        run: |
+          npm run assert:packaged-sidecar -- --target linux-x64
+          npm run audit:assets -- --package-root dist/linux-unpacked/resources/sidecars/cc-connect-clawd --target linux-x64 --output dist/repository-asset-audit/linux-x64
       - uses: actions/upload-artifact@v4
         with:
           name: linux-installer
@@ -64,6 +96,14 @@ jobs:
             dist/*.AppImage
             dist/*.deb
             dist/latest-linux.yml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-package-manifests
+          path: |
+            dist/sidecar-package-manifests/*.json
+            dist/repository-asset-audit/*/*.json
+          if-no-files-found: warn
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -76,6 +116,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: "*-installer"
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:

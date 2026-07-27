@@ -261,15 +261,47 @@ describe("package build config", () => {
       assert.match(pkg.scripts.start, /node scripts\/ensure-sidecar-binaries\.js && node launch\.js/);
     });
 
-    it("copies cc-connect-clawd sidecars into packaged resources", () => {
-      const extra = pkg.build.extraResources || [];
-      const copied = extra.some(
-        (e) => e && e.from === "bin/cc-connect-clawd" && e.to === "sidecars/cc-connect-clawd"
+    it("does not copy the whole cc-connect-clawd workspace into every artifact", () => {
+      const commonExtra = pkg.build.extraResources || [];
+      assert.strictEqual(
+        commonExtra.some((entry) => entry && entry.from === "bin/cc-connect-clawd"),
+        false,
+        "common build.extraResources must not copy the whole sidecar workspace"
       );
-      assert.ok(
-        copied,
-        "build.extraResources must copy bin/cc-connect-clawd -> sidecars/cc-connect-clawd"
+    });
+
+    it("copies exactly the current platform and architecture sidecar via ${arch}", () => {
+      const expected = {
+        win: {
+          from: "bin/cc-connect-clawd/windows-${arch}",
+          to: "sidecars/cc-connect-clawd/windows-${arch}",
+        },
+        mac: {
+          from: "bin/cc-connect-clawd/darwin-${arch}",
+          to: "sidecars/cc-connect-clawd/darwin-${arch}",
+        },
+        linux: {
+          from: "bin/cc-connect-clawd/linux-${arch}",
+          to: "sidecars/cc-connect-clawd/linux-${arch}",
+        },
+      };
+      for (const [platform, entry] of Object.entries(expected)) {
+        assert.deepStrictEqual(
+          pkg.build[platform] && pkg.build[platform].extraResources,
+          [entry],
+          `${platform}.extraResources must copy only its current \${arch} sidecar`
+        );
+      }
+    });
+
+    it("exposes build and package assertion commands for all five targets", () => {
+      assert.strictEqual(
+        pkg.scripts["assert:packaged-sidecar"],
+        "node scripts/assert-packaged-sidecar.js"
       );
+      assert.strictEqual(pkg.scripts["build:mac:x64"], "electron-builder --mac dmg:x64");
+      assert.strictEqual(pkg.scripts["build:mac:arm64"], "electron-builder --mac dmg:arm64");
+      assert.strictEqual(pkg.scripts["build:linux:x64"], "electron-builder --linux AppImage:x64 deb:x64");
     });
 
     it("documents the expected sidecar binary names in the README", () => {
@@ -301,6 +333,44 @@ describe("package build config", () => {
         "node scripts/verify-sidecar-binaries.js prebuild:linux",
         "npx electron-builder --linux --publish never"
       );
+    });
+
+    it("asserts all five unpacked package targets after release builds", () => {
+      const workflow = fs.readFileSync(path.join(ROOT, ".github", "workflows", "build.yml"), "utf8");
+      for (const target of [
+        "windows-x64",
+        "windows-arm64",
+        "darwin-x64",
+        "darwin-arm64",
+        "linux-x64",
+      ]) {
+        assert.match(
+          workflow,
+          new RegExp(`npm run assert:packaged-sidecar -- --target ${target}`),
+          `release workflow should assert ${target}`
+        );
+      }
+    });
+
+    it("builds and uploads all five target artifacts in pull-request CI", () => {
+      const workflowPath = path.join(ROOT, ".github", "workflows", "sidecar-package-audit.yml");
+      assert.ok(fs.existsSync(workflowPath), "sidecar package audit workflow should exist");
+      const workflow = fs.readFileSync(workflowPath, "utf8");
+      assert.match(workflow, /pull_request:/);
+      for (const target of [
+        "windows-x64",
+        "windows-arm64",
+        "darwin-x64",
+        "darwin-arm64",
+        "linux-x64",
+      ]) {
+        assert.match(workflow, new RegExp(`target: ${target}`));
+        assert.match(
+          workflow,
+          new RegExp(`sidecar-package-\\$\\{\\{ matrix\\.target \\}\\}`),
+          "five-target CI should upload target-specific artifacts and manifests"
+        );
+      }
     });
 
     it("publishes GitHub releases only for version tags", () => {

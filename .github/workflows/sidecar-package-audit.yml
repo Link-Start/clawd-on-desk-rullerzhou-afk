@@ -1,0 +1,97 @@
+name: Sidecar Package Audit
+
+on:
+  pull_request:
+    paths:
+      - "package.json"
+      - "package-lock.json"
+      - "bin/cc-connect-clawd/README.md"
+      - "scripts/assert-packaged-sidecar.js"
+      - "scripts/audit-repository-assets.js"
+      - "scripts/fetch-sidecar-binaries.js"
+      - "scripts/verify-sidecar-binaries.js"
+      - "test/assert-packaged-sidecar.test.js"
+      - "test/package-build-config.test.js"
+      - "test/verify-sidecar-binaries.test.js"
+      - ".github/workflows/build.yml"
+      - ".github/workflows/sidecar-package-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm install
+      - run: |
+          node --test \
+            test/assert-packaged-sidecar.test.js \
+            test/package-build-config.test.js \
+            test/telegram-approval-sidecar.test.js \
+            test/verify-sidecar-binaries.test.js
+
+  package:
+    needs: unit
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            runner: windows-latest
+            build_script: build:win:x64
+            package_root: dist/win-unpacked/resources/sidecars/cc-connect-clawd
+            artifact_glob: dist/Clawd-on-Desk-Setup-*-x64.exe
+          - target: windows-arm64
+            runner: windows-latest
+            build_script: build:win:arm64
+            package_root: dist/win-arm64-unpacked/resources/sidecars/cc-connect-clawd
+            artifact_glob: dist/Clawd-on-Desk-Setup-*-arm64.exe
+          - target: darwin-x64
+            runner: macos-latest
+            build_script: build:mac:x64
+            package_root: dist/mac/Clawd on Desk.app/Contents/Resources/sidecars/cc-connect-clawd
+            artifact_glob: dist/Clawd-on-Desk-*-x64.dmg
+          - target: darwin-arm64
+            runner: macos-latest
+            build_script: build:mac:arm64
+            package_root: dist/mac-arm64/Clawd on Desk.app/Contents/Resources/sidecars/cc-connect-clawd
+            artifact_glob: dist/Clawd-on-Desk-*-arm64.dmg
+          - target: linux-x64
+            runner: ubuntu-latest
+            build_script: build:linux:x64
+            package_root: dist/linux-unpacked/resources/sidecars/cc-connect-clawd
+            artifact_glob: |
+              dist/Clawd-on-Desk-*-x64.AppImage
+              dist/Clawd-on-Desk-*-x64.deb
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm install
+      - run: npm run fetch:sidecars -- --target ${{ matrix.target }}
+      - run: npm run ${{ matrix.build_script }} -- --publish never
+      - run: npm run assert:packaged-sidecar -- --target ${{ matrix.target }}
+      - run: >-
+          npm run audit:assets --
+          --package-root "${{ matrix.package_root }}"
+          --target ${{ matrix.target }}
+          --output dist/repository-asset-audit/${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sidecar-package-${{ matrix.target }}
+          path: |
+            ${{ matrix.artifact_glob }}
+            dist/sidecar-package-manifests/*.json
+            dist/repository-asset-audit/*/*.json
+          if-no-files-found: warn
+          retention-days: 7

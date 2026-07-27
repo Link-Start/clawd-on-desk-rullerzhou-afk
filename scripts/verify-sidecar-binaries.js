@@ -25,7 +25,16 @@ const BUILD_REQUIREMENTS = Object.freeze({
     ["darwin", "x64"],
     ["darwin", "arm64"],
   ],
+  "build:mac:x64": [
+    ["darwin", "x64"],
+  ],
+  "build:mac:arm64": [
+    ["darwin", "arm64"],
+  ],
   "build:linux": [
+    ["linux", "x64"],
+  ],
+  "build:linux:x64": [
     ["linux", "x64"],
   ],
   "build:all": [

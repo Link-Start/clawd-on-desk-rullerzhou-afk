@@ -38,6 +38,15 @@ test("getRequiredSidecarsForLifecycle maps configured build targets", () => {
     { platform: "darwin", arch: "x64" },
     { platform: "darwin", arch: "arm64" },
   ]);
+  assert.deepEqual(getRequiredSidecarsForLifecycle("prebuild:mac:x64"), [
+    { platform: "darwin", arch: "x64" },
+  ]);
+  assert.deepEqual(getRequiredSidecarsForLifecycle("prebuild:mac:arm64"), [
+    { platform: "darwin", arch: "arm64" },
+  ]);
+  assert.deepEqual(getRequiredSidecarsForLifecycle("prebuild:linux:x64"), [
+    { platform: "linux", arch: "x64" },
+  ]);
 });
 
 test("sidecarBinaryPath uses resolver-compatible binary names", () => {
@@ -89,7 +98,10 @@ test("package build scripts use the sidecar verification command", () => {
     "prebuild:win:arm64",
     "prebuild:win:all",
     "prebuild:mac",
+    "prebuild:mac:x64",
+    "prebuild:mac:arm64",
     "prebuild:linux",
+    "prebuild:linux:x64",
     "prebuild:all",
   ]) {
     assert.equal(pkg.scripts[name], VERIFY_COMMAND, `${name} should verify bundled sidecars before packaging`);

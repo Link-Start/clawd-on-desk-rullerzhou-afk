@@ -10,18 +10,25 @@
     "build:win:arm64": "electron-builder --win nsis:arm64",
     "build:win:all": "electron-builder --win nsis:x64 nsis:arm64",
     "build:mac": "electron-builder --mac",
+    "build:mac:x64": "electron-builder --mac dmg:x64",
+    "build:mac:arm64": "electron-builder --mac dmg:arm64",
     "build:linux": "electron-builder --linux",
+    "build:linux:x64": "electron-builder --linux AppImage:x64 deb:x64",
     "build:all": "electron-builder --win --mac --linux",
     "fetch:sidecars": "node scripts/fetch-sidecar-binaries.js",
     "verify:electron": "node scripts/verify-electron-install.js",
     "verify:sidecars": "node scripts/verify-sidecar-binaries.js",
+    "assert:packaged-sidecar": "node scripts/assert-packaged-sidecar.js",
     "postinstall": "node scripts/verify-electron-install.js --context postinstall",
     "prebuild": "node scripts/verify-sidecar-binaries.js",
     "prebuild:win:x64": "node scripts/verify-sidecar-binaries.js",
     "prebuild:win:arm64": "node scripts/verify-sidecar-binaries.js",
     "prebuild:win:all": "node scripts/verify-sidecar-binaries.js",
     "prebuild:mac": "node scripts/verify-sidecar-binaries.js",
+    "prebuild:mac:x64": "node scripts/verify-sidecar-binaries.js",
+    "prebuild:mac:arm64": "node scripts/verify-sidecar-binaries.js",
     "prebuild:linux": "node scripts/verify-sidecar-binaries.js",
+    "prebuild:linux:x64": "node scripts/verify-sidecar-binaries.js",
     "prebuild:all": "node scripts/verify-sidecar-binaries.js",
     "test": "node test/run-tests.js",
     "audit:assets": "node scripts/audit-repository-assets.js",
@@ -95,7 +102,13 @@
       "category": "public.app-category.entertainment",
       "extendInfo": {
         "LSUIElement": true
-      }
+      },
+      "extraResources": [
+        {
+          "from": "bin/cc-connect-clawd/darwin-${arch}",
+          "to": "sidecars/cc-connect-clawd/darwin-${arch}"
+        }
+      ]
     },
     "win": {
       "icon": "assets/icon.ico",
@@ -107,6 +120,12 @@
             "x64",
             "arm64"
           ]
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "bin/cc-connect-clawd/windows-${arch}",
+          "to": "sidecars/cc-connect-clawd/windows-${arch}"
         }
       ]
     },
@@ -127,6 +146,12 @@
           "arch": [
             "x64"
           ]
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "bin/cc-connect-clawd/linux-${arch}",
+          "to": "sidecars/cc-connect-clawd/linux-${arch}"
         }
       ]
     },
@@ -170,10 +195,6 @@
       {
         "from": "assets/icon.ico",
         "to": "icon.ico"
-      },
-      {
-        "from": "bin/cc-connect-clawd",
-        "to": "sidecars/cc-connect-clawd"
       }
     ],
     "publish": [
