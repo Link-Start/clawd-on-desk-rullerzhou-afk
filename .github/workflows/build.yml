@@ -5,6 +5,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      artifact_validation_only:
+        description: "Use focused package tests for Windows while retaining full macOS/Linux tests"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build-windows:
@@ -16,6 +22,10 @@ jobs:
           node-version-file: .nvmrc
       - run: npm install
       - run: npm test
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.artifact_validation_only }}
+      - name: Run package validation tests
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_validation_only }}
+        run: node --test test/assert-packaged-sidecar.test.js test/package-build-config.test.js test/telegram-approval-sidecar.test.js test/verify-sidecar-binaries.test.js
       - run: npm run fetch:sidecars -- --target windows-x64,windows-arm64
       - run: node scripts/verify-sidecar-binaries.js prebuild:win:all
       - run: npx electron-builder --win --publish never
@@ -26,6 +36,7 @@ jobs:
           npm run audit:assets -- --package-root dist/win-unpacked/resources/sidecars/cc-connect-clawd --target windows-x64 --output dist/repository-asset-audit/windows-x64
           npm run audit:assets -- --package-root dist/win-arm64-unpacked/resources/sidecars/cc-connect-clawd --target windows-arm64 --output dist/repository-asset-audit/windows-arm64
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: windows-installer
           path: |
@@ -59,6 +70,7 @@ jobs:
           npm run audit:assets -- --package-root "dist/mac/Clawd on Desk.app/Contents/Resources/sidecars/cc-connect-clawd" --target darwin-x64 --output dist/repository-asset-audit/darwin-x64
           npm run audit:assets -- --package-root "dist/mac-arm64/Clawd on Desk.app/Contents/Resources/sidecars/cc-connect-clawd" --target darwin-arm64 --output dist/repository-asset-audit/darwin-arm64
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: mac-installer
           path: |
@@ -90,6 +102,7 @@ jobs:
           npm run assert:packaged-sidecar -- --target linux-x64
           npm run audit:assets -- --package-root dist/linux-unpacked/resources/sidecars/cc-connect-clawd --target linux-x64 --output dist/repository-asset-audit/linux-x64
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: linux-installer
           path: |

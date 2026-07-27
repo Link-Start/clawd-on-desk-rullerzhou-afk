@@ -352,6 +352,30 @@ describe("package build config", () => {
       }
     });
 
+    it("keeps full tag tests while allowing a manual packaging-only evidence run", () => {
+      const workflow = fs.readFileSync(path.join(ROOT, ".github", "workflows", "build.yml"), "utf8");
+      assert.match(workflow, /artifact_validation_only:/);
+      assert.strictEqual(
+        (workflow.match(/github\.event_name != 'workflow_dispatch' \|\| !inputs\.artifact_validation_only/g) || []).length,
+        1,
+        "the Windows release job must keep npm test for tag pushes and normal manual runs"
+      );
+      assert.strictEqual(
+        (workflow.match(/github\.event_name == 'workflow_dispatch' && inputs\.artifact_validation_only/g) || []).length,
+        1,
+        "only the Windows job should substitute the package-validation tests in evidence mode"
+      );
+      assert.strictEqual(
+        (workflow.match(/node --test test\/assert-packaged-sidecar\.test\.js test\/package-build-config\.test\.js test\/telegram-approval-sidecar\.test\.js test\/verify-sidecar-binaries\.test\.js/g) || []).length,
+        1
+      );
+      assert.strictEqual(
+        (workflow.match(/      - run: npm test/g) || []).length,
+        3,
+        "Windows, macOS, and Linux release jobs must all retain their npm test step"
+      );
+    });
+
     it("builds and uploads all five target artifacts in pull-request CI", () => {
       const workflowPath = path.join(ROOT, ".github", "workflows", "sidecar-package-audit.yml");
       assert.ok(fs.existsSync(workflowPath), "sidecar package audit workflow should exist");
@@ -371,6 +395,8 @@ describe("package build config", () => {
           "five-target CI should upload target-specific artifacts and manifests"
         );
       }
+      assert.match(workflow, /Clawd-on-Desk-\*-x86_64\.AppImage/);
+      assert.match(workflow, /Clawd-on-Desk-\*-amd64\.deb/);
     });
 
     it("publishes GitHub releases only for version tags", () => {

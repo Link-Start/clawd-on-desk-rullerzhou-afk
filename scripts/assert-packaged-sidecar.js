@@ -1,13 +1,16 @@
 "use strict";
 
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 
 const {
   TARGETS,
   PINNED_CHECKSUMS,
   binaryChecksumName,
   sha256,
+  targetBinaryPath,
 } = require("./fetch-sidecar-binaries");
 const {
   inspectNativeBuffer,
@@ -63,8 +66,8 @@ function defaultLayout(targetName, pkg) {
       packageRoot: path.join("dist", "linux-unpacked"),
       resourcesRoot: path.join("dist", "linux-unpacked", "resources"),
       artifacts: [
-        path.join("dist", `Clawd-on-Desk-${version}-x64.AppImage`),
-        path.join("dist", `Clawd-on-Desk-${version}-x64.deb`),
+        path.join("dist", `Clawd-on-Desk-${version}-x86_64.AppImage`),
+        path.join("dist", `Clawd-on-Desk-${version}-amd64.deb`),
       ],
     },
   };
@@ -145,6 +148,54 @@ function relativeOrBasename(repoRoot, filePath) {
     : relative;
 }
 
+function normalizeDarwinCodeSignature(filePath, options = {}) {
+  const fsModule = options.fs || fs;
+  const spawn = options.spawnSync || spawnSync;
+  const requireSignature = options.requireSignature === true;
+  const verification = spawn("codesign", ["--verify", "--strict", filePath], {
+    encoding: "utf8",
+  });
+  if (verification.error) {
+    return { ok: false, error: `codesign verification could not start: ${verification.error.message}` };
+  }
+  if (verification.status !== 0) {
+    if (!requireSignature) {
+      return {
+        ok: true,
+        buffer: fsModule.readFileSync(filePath),
+        signed: false,
+        method: "unsigned-source",
+      };
+    }
+    const detail = String(verification.stderr || verification.stdout || "").trim();
+    return { ok: false, error: `codesign verification failed${detail ? `: ${detail}` : ""}` };
+  }
+
+  const tempDir = fsModule.mkdtempSync(path.join(os.tmpdir(), "clawd-sidecar-codesign-"));
+  const tempPath = path.join(tempDir, path.basename(filePath));
+  try {
+    fsModule.copyFileSync(filePath, tempPath);
+    const removal = spawn("codesign", ["--remove-signature", tempPath], {
+      encoding: "utf8",
+    });
+    if (removal.error) {
+      return { ok: false, error: `codesign signature removal could not start: ${removal.error.message}` };
+    }
+    if (removal.status !== 0) {
+      const detail = String(removal.stderr || removal.stdout || "").trim();
+      return { ok: false, error: `codesign signature removal failed${detail ? `: ${detail}` : ""}` };
+    }
+    return {
+      ok: true,
+      buffer: fsModule.readFileSync(tempPath),
+      signed: true,
+      method: "codesign-stripped",
+    };
+  } finally {
+    fsModule.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 function inspectPackagedSidecar(options = {}) {
   const fsModule = options.fs || fs;
   const repoRoot = options.repoRoot || path.join(__dirname, "..");
@@ -181,14 +232,70 @@ function inspectPackagedSidecar(options = {}) {
   const expectedRecord = fileRecords.find((item) => item.path === expectedRelativePath) || null;
   let native = null;
   let executable = null;
+  let expectedSha256 = null;
+  let checksumMode = null;
+  let normalizedSha256 = null;
+  let sourceSigned = null;
+  let packagedSigned = null;
   const executableRequired = target.platform !== "windows";
   const executableChecked = executableRequired && hostPlatform !== "win32";
 
   if (expectedRecord && isFile(fsModule, expectedPath)) {
-    const expectedSha256 = String(checksums[binaryChecksumName(target)] || "").toLowerCase();
+    expectedSha256 = String(checksums[binaryChecksumName(target)] || "").toLowerCase() || null;
     if (!expectedSha256) {
       errors.push(`Missing pinned checksum for ${binaryChecksumName(target)}`);
-    } else if (expectedRecord.sha256 !== expectedSha256) {
+    } else if (expectedRecord.sha256 === expectedSha256) {
+      checksumMode = "exact";
+    } else if (target.platform === "darwin"
+      && (hostPlatform === "darwin" || typeof options.normalizeDarwinBinary === "function")) {
+      const sourcePath = targetBinaryPath(repoRoot, target);
+      if (!isFile(fsModule, sourcePath)) {
+        errors.push(`Missing pinned source sidecar for signature comparison: ${target.dir}/${target.exe}`);
+      } else {
+        const sourceBuffer = fsModule.readFileSync(sourcePath);
+        const sourceSha256 = sha256(sourceBuffer);
+        if (sourceSha256 !== expectedSha256) {
+          errors.push(
+            `Source sidecar checksum mismatch for ${target.dir}: got ${sourceSha256}, expected ${expectedSha256}`,
+          );
+        } else {
+          const normalize = options.normalizeDarwinBinary || normalizeDarwinCodeSignature;
+          const sourceNormalized = normalize(sourcePath, {
+            fs: fsModule,
+            role: "source",
+            requireSignature: false,
+            spawnSync: options.spawnSync,
+          });
+          const packagedNormalized = normalize(expectedPath, {
+            fs: fsModule,
+            role: "packaged",
+            requireSignature: true,
+            spawnSync: options.spawnSync,
+          });
+          sourceSigned = sourceNormalized.ok ? sourceNormalized.signed : null;
+          packagedSigned = packagedNormalized.ok ? packagedNormalized.signed : null;
+          if (!sourceNormalized.ok) {
+            errors.push(`Could not normalize source ${target.dir} signature: ${sourceNormalized.error}`);
+          }
+          if (!packagedNormalized.ok) {
+            errors.push(`Could not normalize packaged ${target.dir} signature: ${packagedNormalized.error}`);
+          }
+          if (sourceNormalized.ok && packagedNormalized.ok) {
+            const sourceNormalizedSha256 = sha256(sourceNormalized.buffer);
+            const packagedNormalizedSha256 = sha256(packagedNormalized.buffer);
+            normalizedSha256 = packagedNormalizedSha256;
+            if (sourceNormalizedSha256 === packagedNormalizedSha256) {
+              checksumMode = "codesign-normalized";
+            } else {
+              errors.push(
+                `Packaged sidecar normalized checksum mismatch for ${target.dir}: `
+                + `got ${packagedNormalizedSha256}, expected ${sourceNormalizedSha256}`,
+              );
+            }
+          }
+        }
+      }
+    } else {
       errors.push(
         `Packaged sidecar checksum mismatch for ${target.dir}: got ${expectedRecord.sha256}, expected ${expectedSha256}`,
       );
@@ -240,6 +347,11 @@ function inspectPackagedSidecar(options = {}) {
         files: fileRecords,
         bytes: fileRecords.reduce((total, item) => total + item.bytes, 0),
         native,
+        expectedSha256,
+        checksumMode,
+        normalizedSha256,
+        sourceSigned,
+        packagedSigned,
         executableRequired,
         executableChecked,
         executable,
@@ -332,6 +444,7 @@ module.exports = {
   SIDECAR_RESOURCE_ROOT,
   defaultLayout,
   inspectPackagedSidecar,
+  normalizeDarwinCodeSignature,
   parseArgs,
   runAssertion,
   summarizeTree,

@@ -10,6 +10,7 @@ const test = require("node:test");
 const {
   defaultLayout,
   inspectPackagedSidecar,
+  normalizeDarwinCodeSignature,
   parseArgs,
 } = require("../scripts/assert-packaged-sidecar");
 const {
@@ -36,6 +37,14 @@ function elfBuffer(machine) {
   buffer.write("ELF", 1, "ascii");
   buffer[5] = 1;
   buffer.writeUInt16LE(machine, 18);
+  return buffer;
+}
+
+function machoBuffer(cpuType, marker = 0) {
+  const buffer = Buffer.alloc(128);
+  buffer.writeUInt32BE(0xfeedfacf, 0);
+  buffer.writeUInt32BE(cpuType, 4);
+  buffer.writeUInt8(marker, 127);
   return buffer;
 }
 
@@ -86,6 +95,10 @@ test("default layouts cover all five release targets with target-specific unpack
       ["linux-x64", path.join("dist", "linux-unpacked", "resources")],
     ],
   );
+  assert.deepStrictEqual(defaultLayout("linux-x64", pkg).artifacts, [
+    path.join("dist", `Clawd-on-Desk-${pkg.version}-x86_64.AppImage`),
+    path.join("dist", `Clawd-on-Desk-${pkg.version}-amd64.deb`),
+  ]);
 });
 
 test("packaged sidecar assertion emits a deterministic manifest for the one expected target", () => {
@@ -113,6 +126,8 @@ test("packaged sidecar assertion emits a deterministic manifest for the one expe
       arch: "x64",
       format: "pe",
     });
+    assert.strictEqual(first.manifest.sidecar.expectedSha256, item.checksums[binaryChecksumName(item.target)]);
+    assert.strictEqual(first.manifest.sidecar.checksumMode, "exact");
   } finally {
     removeFixture(item);
   }
@@ -171,6 +186,95 @@ test("packaged sidecar assertion rejects checksum and native architecture mismat
     assert.ok(result.errors.some((message) => message.includes("native target mismatch")));
   } finally {
     removeFixture(item);
+  }
+});
+
+test("Darwin packages accept only a signed copy matching the pinned source after signature removal", () => {
+  const packagedContents = machoBuffer(0x0100000c, 2);
+  const sourceContents = machoBuffer(0x0100000c, 1);
+  const item = fixture("darwin-arm64", packagedContents);
+  const sourcePath = path.join(
+    item.root,
+    "bin",
+    "cc-connect-clawd",
+    item.target.dir,
+    item.target.exe,
+  );
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(sourcePath, sourceContents);
+  const normalizedContents = machoBuffer(0x0100000c);
+  const normalizedCalls = [];
+  try {
+    const result = inspectPackagedSidecar({
+      target: item.target.dir,
+      repoRoot: item.root,
+      packageJson: { version: "test" },
+      resourcesRoot: item.resourcesRoot,
+      resourcesLabel: "package/resources",
+      artifacts: [],
+      checksums: {
+        [binaryChecksumName(item.target)]: sha256(sourceContents),
+      },
+      hostPlatform: "win32",
+      normalizeDarwinBinary(filePath, options) {
+        normalizedCalls.push([filePath, options.role, options.requireSignature]);
+        return {
+          ok: true,
+          buffer: normalizedContents,
+          signed: options.role === "packaged",
+        };
+      },
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.manifest.sidecar.expectedSha256, sha256(sourceContents));
+    assert.strictEqual(result.manifest.sidecar.checksumMode, "codesign-normalized");
+    assert.strictEqual(result.manifest.sidecar.normalizedSha256, sha256(normalizedContents));
+    assert.strictEqual(result.manifest.sidecar.sourceSigned, false);
+    assert.strictEqual(result.manifest.sidecar.packagedSigned, true);
+    assert.deepStrictEqual(normalizedCalls, [
+      [sourcePath, "source", false],
+      [item.binaryPath, "packaged", true],
+    ]);
+  } finally {
+    removeFixture(item);
+  }
+});
+
+test("Darwin signature normalization verifies before stripping and rejects an unsigned package", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-codesign-normalize-"));
+  const signedPath = path.join(root, "cc-connect-clawd");
+  const signedContents = machoBuffer(0x0100000c, 2);
+  const normalizedContents = machoBuffer(0x0100000c);
+  fs.writeFileSync(signedPath, signedContents);
+  const calls = [];
+  try {
+    const normalized = normalizeDarwinCodeSignature(signedPath, {
+      spawnSync(command, args) {
+        calls.push([command, ...args]);
+        if (args[0] === "--verify") return { status: 0, stdout: "", stderr: "" };
+        fs.writeFileSync(args[1], normalizedContents);
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      requireSignature: true,
+    });
+    assert.strictEqual(normalized.ok, true);
+    assert.strictEqual(normalized.signed, true);
+    assert.deepStrictEqual(normalized.buffer, normalizedContents);
+    assert.deepStrictEqual(calls.map((call) => call.slice(0, 3)), [
+      ["codesign", "--verify", "--strict"],
+      ["codesign", "--remove-signature", calls[1][2]],
+    ]);
+
+    const rejected = normalizeDarwinCodeSignature(signedPath, {
+      spawnSync() {
+        return { status: 1, stdout: "", stderr: "code object is not signed at all" };
+      },
+      requireSignature: true,
+    });
+    assert.strictEqual(rejected.ok, false);
+    assert.match(rejected.error, /codesign verification failed/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

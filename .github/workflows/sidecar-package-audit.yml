@@ -68,8 +68,8 @@ jobs:
             build_script: build:linux:x64
             package_root: dist/linux-unpacked/resources/sidecars/cc-connect-clawd
             artifact_glob: |
-              dist/Clawd-on-Desk-*-x64.AppImage
-              dist/Clawd-on-Desk-*-x64.deb
+              dist/Clawd-on-Desk-*-x86_64.AppImage
+              dist/Clawd-on-Desk-*-amd64.deb
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
