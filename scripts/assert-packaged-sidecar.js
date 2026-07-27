@@ -172,6 +172,10 @@ function normalizeMachOSignaturePayload(buffer) {
   const readUInt32 = (offset) => (
     endian === "be" ? buffer.readUInt32BE(offset) : buffer.readUInt32LE(offset)
   );
+  const readUInt64 = (offset) => {
+    const value = endian === "be" ? buffer.readBigUInt64BE(offset) : buffer.readBigUInt64LE(offset);
+    return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
+  };
   const ncmds = readUInt32(16);
   const sizeofcmds = readUInt32(20);
   const loadCommandsEnd = headerBytes + sizeofcmds;
@@ -181,6 +185,7 @@ function normalizeMachOSignaturePayload(buffer) {
 
   let cursor = headerBytes;
   let signature = null;
+  let linkedit = null;
   for (let index = 0; index < ncmds; index += 1) {
     if (cursor + 8 > loadCommandsEnd) {
       return { ok: false, error: "Mach-O load command header exceeds sizeofcmds" };
@@ -202,6 +207,34 @@ function normalizeMachOSignaturePayload(buffer) {
         dataBytes: readUInt32(cursor + 12),
       };
     }
+    if (command === 0x19 || command === 0x1) {
+      const segment64 = command === 0x19;
+      const minimumBytes = segment64 ? 72 : 56;
+      if (commandBytes < minimumBytes) {
+        return { ok: false, error: "Mach-O segment command is truncated" };
+      }
+      const segmentName = buffer.toString("ascii", cursor + 8, cursor + 24).replace(/\0.*$/, "");
+      if (segmentName === "__LINKEDIT") {
+        if (linkedit) return { ok: false, error: "Mach-O contains multiple __LINKEDIT segments" };
+        const virtualSizeOffset = cursor + (segment64 ? 32 : 28);
+        const fileOffsetOffset = cursor + (segment64 ? 40 : 32);
+        const fileSizeOffset = cursor + (segment64 ? 48 : 36);
+        const virtualBytes = segment64 ? readUInt64(virtualSizeOffset) : readUInt32(virtualSizeOffset);
+        const fileOffset = segment64 ? readUInt64(fileOffsetOffset) : readUInt32(fileOffsetOffset);
+        const fileBytes = segment64 ? readUInt64(fileSizeOffset) : readUInt32(fileSizeOffset);
+        if (virtualBytes === null || fileOffset === null || fileBytes === null) {
+          return { ok: false, error: "Mach-O __LINKEDIT fields exceed safe integer bounds" };
+        }
+        linkedit = {
+          virtualSizeOffset,
+          fileSizeOffset,
+          fieldBytes: segment64 ? 8 : 4,
+          virtualBytes,
+          fileOffset,
+          fileBytes,
+        };
+      }
+    }
     cursor += commandBytes;
   }
   if (cursor !== loadCommandsEnd) {
@@ -221,15 +254,26 @@ function normalizeMachOSignaturePayload(buffer) {
     || signature.dataOffset + signature.dataBytes !== buffer.length) {
     return { ok: false, error: "Mach-O code signature is not the final bounded payload" };
   }
+  if (!linkedit) {
+    return { ok: false, error: "Signed Mach-O has no __LINKEDIT segment" };
+  }
+  if (linkedit.fileOffset > signature.dataOffset
+    || linkedit.fileOffset + linkedit.fileBytes !== buffer.length
+    || linkedit.virtualBytes < linkedit.fileBytes) {
+    return { ok: false, error: "Mach-O __LINKEDIT does not bound the signed tail" };
+  }
 
   const normalized = Buffer.from(buffer.subarray(0, signature.dataOffset));
   normalized.fill(0, signature.commandOffset, signature.commandOffset + signature.commandBytes);
+  normalized.fill(0, linkedit.virtualSizeOffset, linkedit.virtualSizeOffset + linkedit.fieldBytes);
+  normalized.fill(0, linkedit.fileSizeOffset, linkedit.fileSizeOffset + linkedit.fieldBytes);
   return {
     ok: true,
     buffer: normalized,
     signaturePresent: true,
     signatureOffset: signature.dataOffset,
     signatureBytes: signature.dataBytes,
+    linkeditFileBytes: linkedit.fileBytes,
   };
 }
 
@@ -306,6 +350,10 @@ function inspectPackagedSidecar(options = {}) {
   let packagedSigned = null;
   let sourceSignatureBytes = null;
   let packagedSignatureBytes = null;
+  let sourceSignatureOffset = null;
+  let packagedSignatureOffset = null;
+  let sourceLinkeditBytes = null;
+  let packagedLinkeditBytes = null;
   const executableRequired = target.platform !== "windows";
   const executableChecked = executableRequired && hostPlatform !== "win32";
 
@@ -345,6 +393,10 @@ function inspectPackagedSidecar(options = {}) {
           packagedSigned = packagedNormalized.ok ? packagedNormalized.signed : null;
           sourceSignatureBytes = sourceNormalized.ok ? sourceNormalized.signatureBytes : null;
           packagedSignatureBytes = packagedNormalized.ok ? packagedNormalized.signatureBytes : null;
+          sourceSignatureOffset = sourceNormalized.ok ? sourceNormalized.signatureOffset : null;
+          packagedSignatureOffset = packagedNormalized.ok ? packagedNormalized.signatureOffset : null;
+          sourceLinkeditBytes = sourceNormalized.ok ? sourceNormalized.linkeditFileBytes : null;
+          packagedLinkeditBytes = packagedNormalized.ok ? packagedNormalized.linkeditFileBytes : null;
           if (!sourceNormalized.ok) {
             errors.push(`Could not normalize source ${target.dir} signature: ${sourceNormalized.error}`);
           }
@@ -425,6 +477,10 @@ function inspectPackagedSidecar(options = {}) {
         packagedSigned,
         sourceSignatureBytes,
         packagedSignatureBytes,
+        sourceSignatureOffset,
+        packagedSignatureOffset,
+        sourceLinkeditBytes,
+        packagedLinkeditBytes,
         executableRequired,
         executableChecked,
         executable,

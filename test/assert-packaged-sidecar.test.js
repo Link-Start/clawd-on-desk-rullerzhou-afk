@@ -54,13 +54,19 @@ function signedMachoBuffer(cpuType, signatureBytes, signatureMarker) {
   buffer.fill(0, 0, 128);
   buffer.writeUInt32BE(0xfeedfacf, 0);
   buffer.writeUInt32BE(cpuType, 4);
-  buffer.writeUInt32BE(1, 16);
-  buffer.writeUInt32BE(16, 20);
-  buffer.writeUInt32BE(0x1d, 32);
-  buffer.writeUInt32BE(16, 36);
-  buffer.writeUInt32BE(128, 40);
-  buffer.writeUInt32BE(signatureBytes, 44);
-  buffer.writeUInt8(7, 100);
+  buffer.writeUInt32BE(2, 16);
+  buffer.writeUInt32BE(88, 20);
+  buffer.writeUInt32BE(0x19, 32);
+  buffer.writeUInt32BE(72, 36);
+  buffer.write("__LINKEDIT", 40, "ascii");
+  buffer.writeBigUInt64BE(BigInt(8 + signatureBytes), 64);
+  buffer.writeBigUInt64BE(120n, 72);
+  buffer.writeBigUInt64BE(BigInt(8 + signatureBytes), 80);
+  buffer.writeUInt32BE(0x1d, 104);
+  buffer.writeUInt32BE(16, 108);
+  buffer.writeUInt32BE(128, 112);
+  buffer.writeUInt32BE(signatureBytes, 116);
+  buffer.writeUInt8(7, 124);
   return buffer;
 }
 
@@ -246,6 +252,10 @@ test("Darwin packages accept only a signed copy matching the pinned source outsi
     assert.strictEqual(result.manifest.sidecar.packagedSigned, true);
     assert.strictEqual(result.manifest.sidecar.sourceSignatureBytes, 56);
     assert.strictEqual(result.manifest.sidecar.packagedSignatureBytes, 33);
+    assert.strictEqual(result.manifest.sidecar.sourceSignatureOffset, 128);
+    assert.strictEqual(result.manifest.sidecar.packagedSignatureOffset, 128);
+    assert.strictEqual(result.manifest.sidecar.sourceLinkeditBytes, 64);
+    assert.strictEqual(result.manifest.sidecar.packagedLinkeditBytes, 41);
   } finally {
     removeFixture(item);
   }
@@ -268,6 +278,7 @@ test("Darwin signature normalization verifies before excluding signature bytes a
     assert.strictEqual(normalized.ok, true);
     assert.strictEqual(normalized.signed, true);
     assert.strictEqual(normalized.signatureBytes, 33);
+    assert.strictEqual(normalized.linkeditFileBytes, 41);
     assert.strictEqual(normalized.buffer.length, 128);
     assert.deepStrictEqual(calls, [["codesign", "--verify", "--strict", signedPath]]);
 
