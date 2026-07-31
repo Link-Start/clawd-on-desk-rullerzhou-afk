@@ -79,6 +79,7 @@
       soundVolume: null,
       textScale: null,
       settingsSelects: new Set(),
+      segmentedRadios: new Set(),
       aboutAutoUpdate: null,
     },
     shortcutRecordingActionId: null,
@@ -366,6 +367,140 @@
       lockWhilePending: config.lockWhilePending !== false,
     });
     state.mountedControls.settingsSelects.add(control);
+    return control;
+  }
+
+  function buildSegmentedRadio(config = {}) {
+    const options = Array.isArray(config.options)
+      ? config.options.filter((option) => option && option.value != null)
+      : [];
+    const values = options.map((option) => String(option.value));
+    let currentValue = values.includes(String(config.value))
+      ? String(config.value)
+      : (values[0] || "");
+    let disabled = config.disabled === true;
+    let pending = false;
+    let disposed = false;
+
+    const element = document.createElement("div");
+    element.className = ["segmented", "settings-segmented-radio", config.className || ""]
+      .filter(Boolean)
+      .join(" ");
+    element.setAttribute("role", "radiogroup");
+    if (config.ariaLabel) element.setAttribute("aria-label", config.ariaLabel);
+
+    const buttons = options.map((option) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.setAttribute("role", "radio");
+      button.dataset.value = String(option.value);
+
+      const label = document.createElement("span");
+      label.className = "settings-segmented-radio-label";
+      label.textContent = option.label == null ? String(option.value) : String(option.label);
+      button.appendChild(label);
+
+      if (option.description) {
+        const description = document.createElement("span");
+        description.className = "settings-segmented-radio-description";
+        description.textContent = String(option.description);
+        button.appendChild(description);
+      }
+      element.appendChild(button);
+      return button;
+    });
+
+    function syncVisualState() {
+      element.classList.toggle("pending", pending);
+      element.classList.toggle("disabled", disabled);
+      element.setAttribute("aria-busy", pending ? "true" : "false");
+      for (const button of buttons) {
+        const selected = button.dataset.value === currentValue;
+        button.classList.toggle("active", selected);
+        button.setAttribute("aria-checked", selected ? "true" : "false");
+        button.tabIndex = selected ? 0 : -1;
+        button.disabled = disabled || pending;
+      }
+    }
+
+    async function selectValue(nextValue) {
+      const next = String(nextValue);
+      if (disposed || disabled || pending || !values.includes(next)) return false;
+      if (next === currentValue) return true;
+      const previous = currentValue;
+      currentValue = next;
+      pending = true;
+      syncVisualState();
+      let accepted = true;
+      try {
+        if (typeof config.onChange === "function") {
+          accepted = (await Promise.resolve(config.onChange(next))) !== false;
+        }
+      } catch (_) {
+        accepted = false;
+      }
+      if (!accepted) currentValue = previous;
+      pending = false;
+      syncVisualState();
+      return accepted;
+    }
+
+    function onClick(event) {
+      const button = event && event.currentTarget;
+      if (button) void selectValue(button.dataset.value);
+    }
+
+    function onKeyDown(event) {
+      if (disabled || pending || buttons.length === 0) return;
+      const currentIndex = Math.max(0, buttons.indexOf(event.currentTarget));
+      let nextIndex = currentIndex;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        nextIndex = (currentIndex + 1) % buttons.length;
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        nextIndex = (currentIndex - 1 + buttons.length) % buttons.length;
+      } else if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = buttons.length - 1;
+      } else if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      const target = buttons[nextIndex];
+      if (target && typeof target.focus === "function") target.focus();
+      void selectValue(target.dataset.value);
+    }
+
+    for (const button of buttons) {
+      button.addEventListener("click", onClick);
+      button.addEventListener("keydown", onKeyDown);
+    }
+    syncVisualState();
+
+    const control = {
+      element,
+      getValue: () => currentValue,
+      setValue(value) {
+        const next = String(value);
+        if (!values.includes(next)) return false;
+        currentValue = next;
+        syncVisualState();
+        return true;
+      },
+      setDisabled(value) {
+        disabled = value === true;
+        syncVisualState();
+      },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        for (const button of buttons) {
+          button.removeEventListener("click", onClick);
+          button.removeEventListener("keydown", onKeyDown);
+        }
+      },
+    };
+    state.mountedControls.segmentedRadios.add(control);
     return control;
   }
 
@@ -922,6 +1057,10 @@
       if (control && typeof control.dispose === "function") control.dispose();
     }
     state.mountedControls.settingsSelects.clear();
+    for (const control of state.mountedControls.segmentedRadios) {
+      if (control && typeof control.dispose === "function") control.dispose();
+    }
+    state.mountedControls.segmentedRadios.clear();
     state.mountedControls.generalSwitches.clear();
     state.mountedControls.bubblePolicyControls.clear();
     state.mountedControls.sessionCleanupControls.clear();
@@ -1540,6 +1679,7 @@
     buildSwitchRow,
     buildSection,
     buildSettingsSelect,
+    buildSegmentedRadio,
     buildCollapsibleGroup,
     createDisclosureChevron,
     attachActivation,

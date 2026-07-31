@@ -1196,14 +1196,15 @@
 
     const ctrl = document.createElement("div");
     ctrl.className = "row-control";
-    const picker = helpers.buildSettingsSelect({
+    const picker = helpers.buildSegmentedRadio({
       value: mode,
       options: ["off", "full"].map((value) => ({
         value,
         label: t("telegramApprovalCompletionOutput_" + value),
+        description: t("telegramApprovalCompletionOutput_" + value + "Desc"),
       })),
       ariaLabel: t("telegramApprovalCompletionOutput"),
-      className: "tg-approval-output-select",
+      className: "tg-approval-output-choice",
       disabled: view.configPending,
       onChange(value) {
         const nextMode = ["off", "full"].includes(value) ? value : "off";
@@ -1723,7 +1724,7 @@
         label: t("feishuApprovalConnectionTimeoutOption").replace("{seconds}", String(value)),
       })),
       ariaLabel: t("feishuApprovalConnectionTimeout"),
-      className: "tg-approval-output-select feishu-approval-timeout-select",
+      className: "feishu-approval-timeout-select",
       disabled: feishuView.configPending,
       onChange(value) {
         const nextTimeout = Number(value);
