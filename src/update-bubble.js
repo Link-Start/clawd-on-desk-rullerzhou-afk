@@ -415,6 +415,25 @@ module.exports = function initUpdateBubble(ctx) {
   function handleUpdateBubbleAction(event, actionId) {
     const senderWin = BrowserWindow.fromWebContents(event.sender);
     if (!bubble || senderWin !== bubble) return;
+    if (actionId === "copy-error") {
+      const feedback = activePayload && activePayload.copyFeedback || {};
+      let status = "ok";
+      try {
+        if (!ctx.clipboard || typeof ctx.clipboard.writeText !== "function") {
+          throw new Error("clipboard unavailable");
+        }
+        ctx.clipboard.writeText(String(activePayload && activePayload.copyText || ""));
+      } catch (_) {
+        status = "error";
+      }
+      if (bubble && !bubble.isDestroyed()) {
+        bubble.webContents.send("update-bubble-copy-result", {
+          status,
+          label: status === "ok" ? feedback.copied : feedback.failed,
+        });
+      }
+      return;
+    }
     hideUpdateBubble();
     resolveCurrentAction(actionId);
   }

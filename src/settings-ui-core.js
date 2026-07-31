@@ -81,6 +81,7 @@
       settingsSelects: new Set(),
       segmentedRadios: new Set(),
       aboutAutoUpdate: null,
+      aboutUpdateStatus: null,
     },
     shortcutRecordingActionId: null,
     shortcutRecordingError: "",
@@ -124,6 +125,7 @@
     about: {
       infoCache: null,
       clickCount: 0,
+      updateCheckSnapshot: { state: "idle" },
     },
   };
 
@@ -1079,6 +1081,7 @@
     state.mountedControls.soundVolume = null;
     state.mountedControls.textScale = null;
     state.mountedControls.aboutAutoUpdate = null;
+    state.mountedControls.aboutUpdateStatus = null;
   }
 
   function syncMountedSizeControl({ fromBroadcast = false } = {}) {
