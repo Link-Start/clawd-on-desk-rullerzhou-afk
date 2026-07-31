@@ -261,6 +261,13 @@ class FakeElement {
     this.eventListeners[type].push(cb);
   }
 
+  removeEventListener(type, cb) {
+    const listeners = this.eventListeners[type];
+    if (!listeners) return;
+    const index = listeners.indexOf(cb);
+    if (index !== -1) listeners.splice(index, 1);
+  }
+
   focus() {
     this.focused = true;
   }
@@ -853,6 +860,7 @@ function loadRemoteSshTabForTest({
   context.window = context;
   context.globalThis = context;
   vm.createContext(context);
+  vm.runInContext(fs.readFileSync(LANGUAGE_PICKER_JS, "utf8"), context);
   vm.runInContext(fs.readFileSync(SETTINGS_ANIM_OVERRIDES_MERGE, "utf8"), context);
   vm.runInContext(fs.readFileSync(SETTINGS_UI_CORE, "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-tab-remote-ssh.js"), "utf8"), context);
@@ -905,6 +913,14 @@ function getSelectedPickerValue(picker) {
   const selected = picker.querySelectorAll(".language-picker-option")
     .find((option) => option.classList.contains("selected"));
   return selected ? selected.dataset.lang : null;
+}
+
+function chooseSegmentedOption(group, value) {
+  const option = group.querySelectorAll("button")
+    .find((candidate) => candidate.dataset.value === String(value));
+  assert.ok(option, `segmented option ${value} should exist`);
+  option.dispatchEvent({ type: "click" });
+  return option;
 }
 
 function loadThemeTabForTest({
@@ -1170,6 +1186,7 @@ function loadAgentsTabForTest({
   context.window = context;
   context.globalThis = context;
   vm.createContext(context);
+  vm.runInContext(fs.readFileSync(LANGUAGE_PICKER_JS, "utf8"), context);
   vm.runInContext(fs.readFileSync(SETTINGS_ANIM_OVERRIDES_MERGE, "utf8"), context);
   vm.runInContext(fs.readFileSync(SETTINGS_UI_CORE, "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-agent-order.js"), "utf8"), context);
@@ -1397,6 +1414,66 @@ function loadTelegramApprovalTabForTest({
         core.state.mountedControls.settingsSelects.add(control);
         return control;
       },
+      buildSegmentedRadio: (config) => {
+        const element = document.createElement("div");
+        element.className = `segmented settings-segmented-radio ${config.className || ""}`.trim();
+        element.setAttribute("role", "radiogroup");
+        element.setAttribute("aria-label", config.ariaLabel || "");
+        let currentValue = String(config.value);
+        const buttons = (config.options || []).map((option) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.dataset.value = String(option.value);
+          button.setAttribute("role", "radio");
+          const label = document.createElement("span");
+          label.className = "settings-segmented-radio-label";
+          label.textContent = String(option.label);
+          button.appendChild(label);
+          if (option.description) {
+            const description = document.createElement("span");
+            description.className = "settings-segmented-radio-description";
+            description.textContent = String(option.description);
+            button.appendChild(description);
+          }
+          element.appendChild(button);
+          return button;
+        });
+        const sync = () => {
+          for (const button of buttons) {
+            const selected = button.dataset.value === currentValue;
+            button.classList.toggle("active", selected);
+            button.setAttribute("aria-checked", selected ? "true" : "false");
+            button.tabIndex = selected ? 0 : -1;
+            button.disabled = config.disabled === true;
+          }
+        };
+        for (const button of buttons) {
+          button.addEventListener("click", () => {
+            const previous = currentValue;
+            currentValue = button.dataset.value;
+            sync();
+            let result;
+            try {
+              result = typeof config.onChange === "function"
+                ? config.onChange(currentValue)
+                : true;
+            } catch (_) {
+              result = false;
+            }
+            if (result === false) {
+              currentValue = previous;
+              sync();
+              return;
+            }
+            Promise.resolve(result).then((accepted) => {
+              if (accepted === false) currentValue = previous;
+              sync();
+            });
+          });
+        }
+        sync();
+        return { element };
+      },
       // Mirror the real buildCollapsibleGroup just enough that header content,
       // title/summary, and children all end up in the DOM tree; collapsed
       // behaviour is exercised by the real component's own tests.
@@ -1456,7 +1533,14 @@ function loadTelegramApprovalTabForTest({
   return { core, content, updates, commands, render, renderRequests, timers };
 }
 
-function loadAboutTabForTest({ snapshot = {}, update } = {}) {
+function loadAboutTabForTest({
+  snapshot = {},
+  update,
+  aboutInfo = {},
+  checkForUpdates = () => Promise.resolve({ state: "up-to-date", version: "1.0.0" }),
+  clearUpdateError = () => Promise.resolve({ state: "idle" }),
+  writeClipboard = () => Promise.resolve(),
+} = {}) {
   const body = new FakeElement("body");
   const content = new FakeElement("main");
   content.id = "content";
@@ -1471,19 +1555,27 @@ function loadAboutTabForTest({ snapshot = {}, update } = {}) {
   const context = {
     console,
     document,
+    navigator: {},
     window: null,
     globalThis: null,
     settingsAPI: {
       getAboutInfo: () => Promise.resolve({
         version: "1.0.0",
         autoUpdateCheck: snapshot.autoUpdateCheck !== false,
+        updateCheckSnapshot: { state: "idle" },
+        ...aboutInfo,
       }),
       update: (key, value) => {
         updateCalls.push({ key, value });
         return update ? update(key, value) : Promise.resolve({ status: "ok" });
       },
       command: () => Promise.resolve({ status: "ok" }),
-      checkForUpdates: () => Promise.resolve({ status: "ok" }),
+      checkForUpdates,
+      clearUpdateError,
+      copyUpdateError: async (text) => {
+        await writeClipboard(text);
+        return { status: "ok" };
+      },
     },
   };
   context.window = context;
@@ -1495,9 +1587,9 @@ function loadAboutTabForTest({ snapshot = {}, update } = {}) {
     state: {
       snapshot: { autoUpdateCheck: true, ...snapshot },
       activeTab: "about",
-      mountedControls: { aboutAutoUpdate: null },
+      mountedControls: { aboutAutoUpdate: null, aboutUpdateStatus: null },
     },
-    runtime: { about: { infoCache: null, clickCount: 0 } },
+    runtime: { about: { infoCache: null, clickCount: 0, updateCheckSnapshot: { state: "idle" } } },
     helpers: {
       t: (key) => key,
       setSwitchVisual: (element, checked, options = {}) => {
@@ -1909,6 +2001,48 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(harness.content.querySelector(".remote-ssh-btn-danger").disabled, false);
   });
 
+  it("keeps the Remote SSH port and option cards in the local draft until save", async () => {
+    const harness = loadRemoteSshTabForTest({
+      snapshot: { lang: "en", remoteSsh: { profiles: [] } },
+    });
+    const addButton = harness.content.querySelectorAll("button")
+      .find((button) => button.textContent === "+ Add profile");
+    assert.ok(addButton);
+    addButton.dispatchEvent({ type: "click" });
+
+    const portPicker = harness.content.querySelector(".remote-ssh-port-select");
+    assert.ok(portPicker, "remote forward port should use the shared Settings picker");
+    assert.equal(getSelectedPickerValue(portPicker), "23333");
+    choosePickerOption(portPicker, "23336");
+
+    const cards = harness.content.querySelectorAll(".remote-ssh-option-card");
+    assert.equal(cards.length, 3);
+    assert.deepStrictEqual(cards.map((card) => card.getAttribute("role")), ["switch", "switch", "switch"]);
+    assert.deepStrictEqual(cards.map((card) => card.getAttribute("aria-checked")), ["false", "false", "false"]);
+    cards[0].dispatchEvent({ type: "click" });
+    cards[2].dispatchEvent(createKeyboardEventForTest(" "));
+    // FakeElement does not synthesize a click from keyboard activation; the
+    // native button does so in Chromium. Dispatch the resulting click here.
+    cards[2].dispatchEvent({ type: "click" });
+    assert.deepStrictEqual(cards.map((card) => card.getAttribute("aria-checked")), ["true", "false", "true"]);
+    assert.deepStrictEqual(harness.commandCalls, [], "draft edits must not persist before Save");
+
+    const inputs = harness.content.querySelectorAll("input");
+    inputs[1].value = "builder.example.com";
+    inputs[1].dispatchEvent({ type: "input" });
+    const saveButton = harness.content.querySelectorAll("button")
+      .find((button) => button.textContent === "Save");
+    saveButton.dispatchEvent({ type: "click" });
+    await Promise.resolve();
+
+    const addCall = harness.commandCalls.find((call) => call.action === "remoteSsh.add");
+    assert.ok(addCall);
+    assert.equal(addCall.payload.remoteForwardPort, 23336);
+    assert.equal(addCall.payload.autoStartCodexMonitor, true);
+    assert.equal(addCall.payload.chainStatusline, false);
+    assert.equal(addCall.payload.connectOnLaunch, true);
+  });
+
   it("keeps About contributors visible and includes verified GitHub contributors", () => {
     const aboutSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-about.js"), "utf8");
     const coreSource = fs.readFileSync(SETTINGS_UI_CORE, "utf8");
@@ -1966,6 +2100,49 @@ describe("settings renderer browser environment", () => {
     assert.equal(autoUpdateSwitch.classList.contains("pending"), false);
     assert.equal(harness.toasts.length, 1);
     assert.equal(harness.toasts[0].options.error, true);
+  });
+
+  it("shows, copies, patches, and dismisses structured update errors in About", async () => {
+    const copied = [];
+    let clearCalls = 0;
+    const report = {
+      code: "DNS_FAILED",
+      phase: "release-lookup",
+      title: "Update Error",
+      message: "The update service address could not be resolved.",
+      nextStep: "Check DNS and proxy settings.",
+      detail: "getaddrinfo ENOTFOUND api.github.com",
+      copyText: "DNS_FAILED\ngetaddrinfo ENOTFOUND api.github.com",
+    };
+    const harness = loadAboutTabForTest({
+      aboutInfo: { updateCheckSnapshot: { state: "error", error: report } },
+      writeClipboard: async (value) => copied.push(value),
+      clearUpdateError: async () => {
+        clearCalls++;
+        return { state: "idle" };
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const card = harness.content.querySelector(".about-update-error-card");
+    assert.ok(card);
+    assert.equal(card.getAttribute("role"), "alert");
+    assert.match(collectText(card), /DNS_FAILED/);
+    assert.match(collectText(card), /Check DNS and proxy settings/);
+
+    const copyButton = card.querySelector(".about-update-error-copy");
+    copyButton.dispatchEvent({ type: "click" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepStrictEqual(copied, [report.copyText]);
+    assert.equal(copyButton.textContent, "aboutUpdateErrorCopied");
+
+    assert.equal(harness.core.tabs.about.applyUpdateCheckStatus({ state: "checking" }), true);
+    assert.equal(harness.content.querySelector(".about-check-update-btn").disabled, true);
+    harness.core.tabs.about.applyUpdateCheckStatus({ state: "error", error: report });
+    harness.content.querySelector(".about-update-error-close").dispatchEvent({ type: "click" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(clearCalls, 1);
+    assert.strictEqual(harness.content.querySelector(".about-update-error-card"), null);
   });
 
   it("keeps every Telegram retirement gate string in all supported languages", () => {
@@ -2543,17 +2720,18 @@ describe("settings renderer browser environment", () => {
     await Promise.resolve();
     harness.render();
 
-    const select = harness.content.querySelector(".tg-approval-output-select");
+    const select = harness.content.querySelector(".tg-approval-output-choice");
     assert.deepStrictEqual(
-      select.querySelectorAll(".language-picker-option").map((option) => option.dataset.lang),
+      select.querySelectorAll("button").map((option) => option.dataset.value),
       ["off", "full"]
     );
-    choosePickerOption(select, "full");
+    chooseSegmentedOption(select, "full");
     await Promise.resolve();
 
     assert.deepStrictEqual(confirmCalls, ["telegramApprovalCompletionOutputFullConfirm"]);
     assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.updates)), []);
-    assert.equal(select.querySelector(".language-picker-value").textContent, "telegramApprovalCompletionOutput_off");
+    const offButton = select.querySelectorAll("button").find((button) => button.dataset.value === "off");
+    assert.equal(offButton.getAttribute("aria-checked"), "true");
 
     const confirmed = loadTelegramApprovalTabForTest({
       snapshot: {
@@ -2571,8 +2749,8 @@ describe("settings renderer browser environment", () => {
     await Promise.resolve();
     confirmed.render();
 
-    const confirmedSelect = confirmed.content.querySelector(".tg-approval-output-select");
-    choosePickerOption(confirmedSelect, "full");
+    const confirmedSelect = confirmed.content.querySelector(".tg-approval-output-choice");
+    chooseSegmentedOption(confirmedSelect, "full");
 
     assert.deepStrictEqual(JSON.parse(JSON.stringify(confirmed.updates)), [{
       key: "tgApproval",
@@ -3159,6 +3337,10 @@ describe("settings renderer browser environment", () => {
 
     const select = harness.content.querySelector(".feishu-approval-timeout-select");
     assert.ok(select, "Feishu timeout select should render");
+    const css = fs.readFileSync(SETTINGS_CSS, "utf8");
+    assert.match(css, /\.feishu-approval-timeout-row \.row-control\s*\{[^}]*margin-left:\s*auto;/s);
+    assert.match(css, /\.feishu-approval-timeout-select\s*\{[^}]*width:\s*168px;/s);
+    assert.match(css, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.feishu-approval-timeout-row \.row-control,[\s\S]*?\.feishu-approval-timeout-select\s*\{[^}]*width:\s*100%;/s);
     assert.equal(getSelectedPickerValue(select), "15");
     choosePickerOption(select, "30");
 
@@ -4394,6 +4576,61 @@ describe("settings renderer browser environment", () => {
     assert.equal(lockedTrigger.disabled, true);
   });
 
+  it("builds accessible segmented radios with keyboard navigation and rollback", async () => {
+    const body = new FakeElement("body");
+    const document = {
+      body,
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    let acceptChanges = true;
+    const changes = [];
+    const core = loadSettingsCoreForTest({}, { document });
+    const control = core.helpers.buildSegmentedRadio({
+      value: "off",
+      ariaLabel: "Completion output",
+      options: [
+        { value: "off", label: "Without answer", description: "Keep the base notification." },
+        { value: "full", label: "Full answer", description: "May contain sensitive data." },
+      ],
+      onChange: (value) => {
+        changes.push(value);
+        return Promise.resolve(acceptChanges);
+      },
+    });
+    body.appendChild(control.element);
+
+    const buttons = control.element.querySelectorAll("button");
+    assert.equal(control.element.getAttribute("role"), "radiogroup");
+    assert.equal(control.element.getAttribute("aria-label"), "Completion output");
+    assert.equal(buttons[0].getAttribute("role"), "radio");
+    assert.equal(buttons[0].getAttribute("aria-checked"), "true");
+    assert.equal(buttons[0].tabIndex, 0);
+    assert.equal(buttons[1].tabIndex, -1);
+    assert.equal(control.element.querySelectorAll(".settings-segmented-radio-description").length, 2);
+
+    buttons[0].dispatchEvent(createKeyboardEventForTest("ArrowRight"));
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepStrictEqual(changes, ["full"]);
+    assert.equal(buttons[1].focused, true);
+    assert.equal(buttons[1].getAttribute("aria-checked"), "true");
+
+    control.setValue("off");
+    acceptChanges = false;
+    buttons[0].dispatchEvent(createKeyboardEventForTest("End"));
+    assert.equal(control.element.getAttribute("aria-busy"), "true");
+    assert.equal(buttons[0].disabled, true);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(buttons[0].getAttribute("aria-checked"), "true");
+    assert.equal(buttons[1].getAttribute("aria-checked"), "false");
+
+    core.ops.clearMountedControls();
+    assert.equal(buttons[0].eventListeners.click.length, 0);
+    assert.equal(buttons[0].eventListeners.keydown.length, 0);
+  });
+
   it("rolls concurrent failed language saves back to the last committed value", async () => {
     const saves = [];
     const changes = [];
@@ -4747,10 +4984,13 @@ describe("settings renderer browser environment", () => {
     assert.ok(!/\.session-hud-collapsible \.collapsible-group-summary\s*\{[^}]*flex-wrap:\s*nowrap;/.test(css));
     assert.ok(!/\.sound-collapsible \.collapsible-group-summary\s*\{[^}]*flex-wrap:\s*nowrap;/.test(css));
     assert.ok(/\.session-hud-summary-control\s*\{[\s\S]*grid-template-columns:\s*repeat\(3,\s*max-content\);/.test(css));
+    assert.ok(/\.session-hud-summary-control\s*\{[\s\S]*width:\s*max-content;[\s\S]*justify-self:\s*end;/.test(css));
     assert.ok(/\.session-hud-summary-control\.compact\s*\{[\s\S]*display:\s*inline-flex;[\s\S]*width:\s*auto;/.test(css));
     assert.ok(/@media \(max-width:\s*720px\)\s*\{[\s\S]*\.session-hud-collapsible \.collapsible-group-header\s*\{[\s\S]*flex-wrap:\s*wrap;/.test(css));
     assert.ok(/@media \(max-width:\s*720px\)\s*\{[\s\S]*\.session-hud-collapsible \.collapsible-group-summary\s*\{[\s\S]*flex:\s*0 0 calc\(100% - 22px\);[\s\S]*margin-left:\s*22px;/.test(css));
     assert.ok(/@media \(max-width:\s*720px\)\s*\{[\s\S]*\.session-hud-summary-control\s*\{[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);[\s\S]*width:\s*min\(238px,\s*100%\);/.test(css));
+    assert.ok(/@media \(max-width:\s*720px\)\s*\{[\s\S]*\.session-hud-summary-control\s*\{[\s\S]*justify-self:\s*start;/.test(css));
+    assert.ok(/function buildFlashGroup\(\)[\s\S]*id:\s*"general:flash",[\s\S]*animateExpansion:\s*false,/.test(generalSource));
     assert.ok(/\.collapsible-group-text \.row-label\s*\{[\s\S]*text-overflow:\s*ellipsis;[\s\S]*white-space:\s*nowrap;/.test(css));
     assert.ok(/\.collapsible-group-text \.row-desc\s*\{[\s\S]*white-space:\s*normal;[\s\S]*-webkit-line-clamp:\s*2;/.test(css));
     assert.ok(/\.sound-summary-control\s*\{[\s\S]*display:\s*inline-flex;/.test(css));
@@ -6335,6 +6575,10 @@ describe("settings renderer browser environment", () => {
     assert.ok(!agentsSource.includes('toolbar.className = "agent-scan-toolbar"'));
     assert.ok(css.includes(".custom-tool-result-status"));
     assert.match(css, /\.agent-custom-tools-section \.custom-tool-discovery-row\s*\{[^}]*flex-direction:\s*row;/s);
+    assert.match(css, /\.agent-custom-tools-section \.row-text\s*\{[^}]*flex:\s*1 1 360px;[^}]*min-width:\s*0;/s);
+    assert.match(css, /\.agent-custom-tools-section \.custom-tool-discovery-control\s*\{[^}]*justify-content:\s*flex-end;[^}]*margin-left:\s*auto;/s);
+    assert.match(css, /\.agent-unavailable-group > \.collapsible-group-header\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*18px minmax\(0,\s*1fr\) minmax\(180px,\s*260px\);/s);
+    assert.match(css, /\.agent-section-summary\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto;/s);
     assert.match(css, /@media \(max-width:\s*760px\)\s*\{[\s\S]*?\.agent-custom-tools-section \.custom-tool-discovery-row\s*\{[^}]*flex-direction:\s*column;/);
     // The primary picker must keep a higher-specificity selector than the
     // generic `.soft-btn.accent` tinted rule that follows it, or the cascade
@@ -6342,6 +6586,7 @@ describe("settings renderer browser environment", () => {
     assert.match(css, /\.agent-custom-tools-section \.soft-btn\.custom-tool-path-picker\s*\{[^}]*background:\s*var\(--accent\);/s);
     assert.ok(!/\.custom-tool-path-picker\s*\{[^}]*width:\s*100%;/s.test(css));
     assert.ok(!/\.custom-tool-scan\s*\{[^}]*width:\s*100%;/s.test(css));
+    assert.match(css, /@media \(max-width:\s*760px\)\s*\{[\s\S]*?\.custom-tool-discovery-actions,[\s\S]*?\{[^}]*width:\s*100%;/s);
   });
 
   it("filters the undetected catalog from its header search box", () => {
