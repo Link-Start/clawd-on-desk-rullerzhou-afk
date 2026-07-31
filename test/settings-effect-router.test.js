@@ -261,6 +261,14 @@ describe("settings-effect-router", () => {
     ]);
 
     calls.length = 0;
+    emit({ quotaRingDisplayMode: "remaining" });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { quotaRingDisplayMode: "remaining" }],
+      ["syncSessionHudVisibility"],
+      ["repositionFloatingBubbles"],
+    ]);
+
+    calls.length = 0;
     emit({ quotaMergeSources: true });
     assert.deepStrictEqual(calls, [
       ["updateMirrors", { quotaMergeSources: true }],

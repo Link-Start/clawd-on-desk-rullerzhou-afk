@@ -326,6 +326,7 @@ const updateRegistry = {
   sessionHudShowElapsed: requireBoolean("sessionHudShowElapsed"),
   sessionHudShowContextUsage: requireBoolean("sessionHudShowContextUsage"),
   sessionHudShowQuota: requireBoolean("sessionHudShowQuota"),
+  quotaRingDisplayMode: requireEnum("quotaRingDisplayMode", ["used", "remaining"]),
   claudeQuotaCollectionEnabled: {
     validate: requireBoolean("claudeQuotaCollectionEnabled"),
     effect(value, deps = {}) {

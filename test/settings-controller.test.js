@@ -47,6 +47,22 @@ describe("createSettingsController construction", () => {
   });
 });
 
+describe("quota ring display mode persistence", () => {
+  it("accepts remaining through the controller and restores it after relaunch", async () => {
+    const p = makeTempPath();
+    const ctrl = createSettingsController({ prefsPath: p });
+
+    const result = await ctrl.applyUpdate("quotaRingDisplayMode", "remaining");
+
+    assert.deepStrictEqual(result, { status: "ok" });
+    assert.strictEqual(ctrl.get("quotaRingDisplayMode"), "remaining");
+    assert.strictEqual(prefs.load(p).snapshot.quotaRingDisplayMode, "remaining");
+
+    const relaunched = createSettingsController({ prefsPath: p });
+    assert.strictEqual(relaunched.get("quotaRingDisplayMode"), "remaining");
+  });
+});
+
 describe("permission automation safe startup persistence", () => {
   it("keeps off across a relaunch", async () => {
     const p = makeTempPath();

@@ -38,10 +38,46 @@ const AUTO_HIDE_POLL_MS = 200;
 const HIDE_GRACE_MS = 500;
 const HIDDEN_WINDOW_DESTROY_MS = 30000;
 const HUD_WIDTH_GROWTH_RATIO = 0.4;
+const QUOTA_TOOLTIP_MAX_ROWS = 2;
+const QUOTA_TOOLTIP_TEXT_MAX = 160;
 
 function clampToWorkArea(value, min, max) {
   if (max < min) return min;
   return Math.max(min, Math.min(value, max));
+}
+
+function sanitizeQuotaTooltipText(value) {
+  if (typeof value !== "string") return "";
+  return value.trim().slice(0, QUOTA_TOOLTIP_TEXT_MAX);
+}
+
+function sanitizeQuotaTooltipPayload(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const title = sanitizeQuotaTooltipText(value.title);
+  if (!title) return null;
+  const rows = (Array.isArray(value.rows) ? value.rows : [])
+    .slice(0, QUOTA_TOOLTIP_MAX_ROWS)
+    .map((row) => {
+      if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+      const label = sanitizeQuotaTooltipText(row.label);
+      const displayValue = sanitizeQuotaTooltipText(row.value);
+      if (!label && !displayValue) return null;
+      return {
+        label,
+        value: displayValue,
+        meta: sanitizeQuotaTooltipText(row.meta),
+        severity: ["ok", "warn", "hot", "reset"].includes(row.severity)
+          ? row.severity
+          : "ok",
+      };
+    })
+    .filter(Boolean);
+  return {
+    title,
+    source: sanitizeQuotaTooltipText(value.source),
+    side: value.side === "right" ? "right" : "left",
+    rows,
+  };
 }
 
 function isScreenRect(rect) {
@@ -314,6 +350,9 @@ module.exports = function initSessionHud(ctx) {
   let ringWindow = null;
   let ringDidFinishLoad = false;
   let ringSide = "left";
+  let quotaTooltipWindow = null;
+  let quotaTooltipDidFinishLoad = false;
+  let activeQuotaTooltip = null;
 
   function getTextScale() {
     return clampTextScale(typeof ctx.getTextScale === "function" ? ctx.getTextScale() : 1);
@@ -635,6 +674,7 @@ module.exports = function initSessionHud(ctx) {
         && ringWindow.webContents && !ringWindow.webContents.isDestroyed()) {
       ringWindow.webContents.send("quota-ring:lang-change", payload);
     }
+    hideQuotaTooltip();
   }
 
   function sendRingSnapshot(snapshot = latestSnapshot, side = ringSide) {
@@ -643,6 +683,7 @@ module.exports = function initSessionHud(ctx) {
     ringWindow.webContents.send("quota-ring:snapshot", {
       accountQuota: Array.isArray(snapshot.accountQuota) ? snapshot.accountQuota : [],
       quotaAgentIcons: snapshot.quotaAgentIcons || {},
+      displayMode: ctx.quotaRingDisplayMode === "remaining" ? "remaining" : "used",
       side,
     });
   }
@@ -696,6 +737,7 @@ module.exports = function initSessionHud(ctx) {
     });
     ringWindow.on("closed", () => {
       cancelHiddenDestroy("ring");
+      destroyQuotaTooltip();
       ringWindow = null;
       ringDidFinishLoad = false;
     });
@@ -704,8 +746,146 @@ module.exports = function initSessionHud(ctx) {
   }
 
   function hideQuotaRing() {
+    hideQuotaTooltip();
     if (ringWindow && !ringWindow.isDestroyed()) ringWindow.hide();
     scheduleHiddenDestroy("ring");
+  }
+
+  function quotaTooltipSize(payload, scale = getTextScale()) {
+    const rows = payload && Array.isArray(payload.rows) ? payload.rows.length : 0;
+    return {
+      width: scaleHeight(ringGeom.constants.RING_TOOLTIP_WIDTH, scale),
+      height: scaleHeight(
+        ringGeom.constants.RING_TOOLTIP_MIN_HEIGHT
+          + rows * ringGeom.constants.RING_TOOLTIP_ROW_HEIGHT,
+        scale
+      ),
+    };
+  }
+
+  function computeQuotaTooltipLayout(payload = activeQuotaTooltip, scale = getTextScale()) {
+    if (!payload || !ringWindow || ringWindow.isDestroyed() || !ringWindow.isVisible()) return null;
+    if (typeof ringWindow.getBounds !== "function") return null;
+    const petBounds = typeof ctx.getPetWindowBounds === "function" ? ctx.getPetWindowBounds() : null;
+    if (!petBounds) return null;
+    const petRect = typeof ctx.getHitRectScreen === "function"
+      ? ctx.getHitRectScreen(petBounds)
+      : petBounds;
+    const cx = petBounds.x + petBounds.width / 2;
+    const cy = petBounds.y + petBounds.height / 2;
+    const workArea = typeof ctx.getNearestWorkArea === "function"
+      ? ctx.getNearestWorkArea(cx, cy)
+      : { x: 0, y: 0, width: 1280, height: 800 };
+    return ringGeom.placeQuotaTooltip({
+      ringBounds: ringWindow.getBounds(),
+      petRect,
+      workArea,
+      side: payload.side,
+      tooltipSize: quotaTooltipSize(payload, scale),
+      gap: scaleHeight(ringGeom.constants.RING_TOOLTIP_GAP, scale),
+      margin: scaleHeight(ringGeom.constants.RING_EDGE_MARGIN, scale),
+    });
+  }
+
+  function ensureQuotaTooltip() {
+    if (quotaTooltipWindow && !quotaTooltipWindow.isDestroyed()) return quotaTooltipWindow;
+    if (!ctx.win || ctx.win.isDestroyed()) return null;
+    quotaTooltipDidFinishLoad = false;
+    const provisionalSize = quotaTooltipSize(activeQuotaTooltip);
+    quotaTooltipWindow = new BrowserWindow({
+      parent: ctx.win,
+      width: provisionalSize.width,
+      height: provisionalSize.height,
+      show: false,
+      frame: false,
+      transparent: true,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      alwaysOnTop: !isMac,
+      focusable: false,
+      hasShadow: false,
+      backgroundColor: "#00000000",
+      ...(isLinux ? { type: LINUX_WINDOW_TYPE } : {}),
+      ...(isMac ? { type: "panel" } : {}),
+      webPreferences: {
+        preload: path.join(__dirname, "preload-quota-tooltip.js"),
+        nodeIntegration: false,
+        contextIsolation: true,
+      },
+    });
+    quotaTooltipWindow.setIgnoreMouseEvents(true);
+    if (isWin) quotaTooltipWindow.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
+    if (typeof ctx.guardAlwaysOnTop === "function") ctx.guardAlwaysOnTop(quotaTooltipWindow);
+    quotaTooltipWindow.loadFile(path.join(__dirname, "quota-tooltip.html"));
+    quotaTooltipWindow.webContents.once("did-finish-load", () => {
+      quotaTooltipDidFinishLoad = true;
+      syncQuotaTooltip();
+    });
+    quotaTooltipWindow.on("closed", () => {
+      quotaTooltipWindow = null;
+      quotaTooltipDidFinishLoad = false;
+      activeQuotaTooltip = null;
+    });
+    return quotaTooltipWindow;
+  }
+
+  function syncQuotaTooltip() {
+    if (!activeQuotaTooltip) return;
+    const tooltip = ensureQuotaTooltip();
+    const scale = getTextScale();
+    const layout = computeQuotaTooltipLayout(activeQuotaTooltip, scale);
+    if (!tooltip || tooltip.isDestroyed() || !layout) return;
+    applyZoomToWindow(tooltip, scale);
+    tooltip.setBounds({ x: layout.x, y: layout.y, width: layout.width, height: layout.height });
+    if (!quotaTooltipDidFinishLoad || !tooltip.webContents || tooltip.webContents.isDestroyed()) return;
+    tooltip.webContents.send("quota-tooltip:payload", {
+      ...activeQuotaTooltip,
+      placement: layout.placement,
+    });
+    if (!tooltip.isVisible()) {
+      tooltip.showInactive();
+      keepOutOfTaskbar(tooltip);
+      if (isMac) deferMacFloatingVisibility(ctx, tooltip);
+      else if (typeof ctx.reapplyMacVisibility === "function") ctx.reapplyMacVisibility();
+    }
+  }
+
+  function hideQuotaTooltip() {
+    activeQuotaTooltip = null;
+    if (quotaTooltipWindow && !quotaTooltipWindow.isDestroyed()) quotaTooltipWindow.hide();
+  }
+
+  function destroyQuotaTooltip() {
+    activeQuotaTooltip = null;
+    if (quotaTooltipWindow && !quotaTooltipWindow.isDestroyed()) quotaTooltipWindow.destroy();
+    quotaTooltipWindow = null;
+    quotaTooltipDidFinishLoad = false;
+  }
+
+  function setQuotaRingTooltip(payload, options = {}) {
+    if (options.sender) {
+      if (!ringWindow || ringWindow.isDestroyed()
+          || !ringWindow.webContents || ringWindow.webContents.isDestroyed()
+          || options.sender !== ringWindow.webContents) {
+        return false;
+      }
+    }
+    if (payload == null) {
+      hideQuotaTooltip();
+      return true;
+    }
+    const sanitized = sanitizeQuotaTooltipPayload(payload);
+    if (!sanitized) {
+      hideQuotaTooltip();
+      return false;
+    }
+    activeQuotaTooltip = sanitized;
+    syncQuotaTooltip();
+    return true;
   }
 
   function showQuotaRing(win) {
@@ -907,6 +1087,10 @@ module.exports = function initSessionHud(ctx) {
         ringSide = ring.side;
         if (options.sendSnapshot !== false || sideChanged) sendRingSnapshot(snapshot, ring.side);
         showQuotaRing(rwin);
+        if (activeQuotaTooltip) {
+          activeQuotaTooltip.side = ring.side;
+          syncQuotaTooltip();
+        }
       }
     }
   }
@@ -948,6 +1132,7 @@ module.exports = function initSessionHud(ctx) {
     if (ringWindow && !ringWindow.isDestroyed()) ringWindow.destroy();
     ringWindow = null;
     ringDidFinishLoad = false;
+    destroyQuotaTooltip();
     lastHudHeight = HUD_ROW_HEIGHT;
     notifyReservedOffsetIfChanged();
   }
@@ -962,6 +1147,8 @@ module.exports = function initSessionHud(ctx) {
     cleanup,
     getWindow: () => hudWindow,
     getQuotaRingWindow: () => ringWindow,
+    getQuotaTooltipWindow: () => quotaTooltipWindow,
+    setQuotaRingTooltip,
     // v5 three-state API
     revealFromPet,
     handlePinnedChanged,
@@ -985,6 +1172,7 @@ module.exports.__test = {
   pointInExpandedRect,
   computeAutoHideHotZone,
   pointInHotZone,
+  sanitizeQuotaTooltipPayload,
   constants: {
     HUD_WIDTH,
     HUD_WIDTH_COMPACT,

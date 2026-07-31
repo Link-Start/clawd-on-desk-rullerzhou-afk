@@ -19,6 +19,7 @@ class FakeElement {
     this.className = "";
     this.textContent = "";
     this.title = "";
+    this.listeners = {};
   }
 
   setAttribute(name, value) {
@@ -42,11 +43,15 @@ class FakeElement {
     this.children = children;
   }
 
-  addEventListener() {}
+  addEventListener(type, listener) {
+    if (!this.listeners[type]) this.listeners[type] = [];
+    this.listeners[type].push(listener);
+  }
 }
 
 function loadRenderer() {
   const cluster = new FakeElement("div");
+  const tooltipCalls = [];
   const context = {
     document: {
       getElementById: () => cluster,
@@ -59,6 +64,8 @@ function loadRenderer() {
         onSnapshot() {},
         getI18n: async () => null,
         openDashboard() {},
+        showTooltip(payload) { tooltipCalls.push(["show", payload]); },
+        hideTooltip() { tooltipCalls.push(["hide"]); },
       },
     },
     setInterval() {},
@@ -67,12 +74,14 @@ function loadRenderer() {
     Promise,
   };
   context.globalThis = context;
+  context.__tooltipCalls = tooltipCalls;
   vm.createContext(context);
   vm.runInContext(rendererSource, context);
   vm.runInContext(`
     payload = {
       accountQuota: [],
       quotaAgentIcons: {},
+      displayMode: "used",
       side: "left",
       translations: {
         dashboardQuotaGroupGemini: "Gemini",
@@ -80,6 +89,7 @@ function loadRenderer() {
         dashboardQuotaSourceLocal: "Local",
         quotaRingReset: "reset",
         quotaRingUsedWord: "used",
+        quotaRingRemainingWord: "remaining",
         dashboardQuotaResetIn: "resets in {time}",
         dashboardQuotaResetHoursMinutes: "{h}h {m}m",
         dashboardQuotaResetMinutes: "{m}m",
@@ -252,6 +262,86 @@ describe("quota ring renderer model", () => {
     assert.strictEqual(model.displayWindow.reset, true);
     assert.strictEqual(readout.children[0].textContent, "0%");
     assert.strictEqual(readout.children[1].textContent, "reset");
+  });
+
+  it("renders remaining percentage and arc length without changing exhaustion severity", () => {
+    const context = loadRenderer();
+    const now = 1_000_000;
+    const model = modelFor(context, {
+      claudeQuota: {
+        group: {
+          claudeFiveHour: { usedPercent: 80, resetAt: now + 3_600_000, windowMinutes: 300 },
+        },
+        lastSeenAt: now,
+      },
+    }, 1, now);
+    context.__model = model;
+    context.__now = now;
+    vm.runInContext('payload.displayMode = "remaining"', context);
+
+    const row = vm.runInContext("buildCoinRow(__model, __now)", context);
+    assert.strictEqual(row.children[0].children[0].textContent, "20%");
+    const tooltip = vm.runInContext("coinTooltipPayload(__model, __now)", context);
+    assert.strictEqual(tooltip.rows[0].value, "20% remaining");
+
+    const svg = vm.runInContext("buildCoinSvg(__model)", context);
+    const fill = svg.children.find((child) =>
+      typeof child.attributes.class === "string" && child.attributes.class.includes("fill"));
+    assert.match(fill.attributes.class, /sev-warn/);
+    assert.match(fill.attributes["stroke-dasharray"], /^13\.82 /);
+  });
+
+  it("uses a styled tooltip positioned away from the pet instead of the native title popup", () => {
+    const context = loadRenderer();
+    const now = 1_000_000;
+    const model = modelFor(context, {
+      codexQuota: {
+        group: {
+          codexWeekly: { usedPercent: 46, resetAt: now + 3_600_000, windowMinutes: 10080 },
+        },
+        lastSeenAt: now,
+      },
+    }, 2, now);
+    context.__model = model;
+    context.__now = now;
+
+    const row = vm.runInContext("buildCoinRow(__model, __now)", context);
+    assert.strictEqual(row.title, "", "native title tooltips can overlap the pet and cannot be styled");
+    assert.strictEqual(row.attributes["data-tooltip-side"], "left");
+    assert.ok(row.listeners.mouseenter, "quota rows should open an app-rendered tooltip");
+    assert.ok(row.listeners.mouseleave, "quota rows should close the app-rendered tooltip");
+
+    row.listeners.mouseenter[0]();
+    assert.strictEqual(context.__tooltipCalls[0][0], "show");
+    assert.strictEqual(context.__tooltipCalls[0][1].title, "Codex");
+    assert.strictEqual(context.__tooltipCalls[0][1].side, "left");
+    assert.strictEqual(context.__tooltipCalls[0][1].rows[0].value, "46% used");
+
+    row.listeners.mouseleave[0]();
+    assert.deepStrictEqual(context.__tooltipCalls[1], ["hide"]);
+  });
+
+  it("shows a reset window as fully remaining while keeping its dim reset ring", () => {
+    const context = loadRenderer();
+    const now = 1_000_000;
+    const model = modelFor(context, {
+      codexQuota: {
+        group: {
+          codexFiveHour: { usedPercent: 90, resetAt: now - 1, windowMinutes: 300 },
+        },
+        lastSeenAt: now,
+      },
+    }, 2, now);
+    context.__model = model;
+    context.__now = now;
+    vm.runInContext('payload.displayMode = "remaining"', context);
+
+    const row = vm.runInContext("buildCoinRow(__model, __now)", context);
+    assert.strictEqual(row.children[0].children[0].textContent, "100%");
+    assert.strictEqual(row.children[0].children[1].textContent, "reset");
+    const svg = vm.runInContext("buildCoinSvg(__model)", context);
+    assert.strictEqual(svg.children.filter((child) =>
+      typeof child.attributes.class === "string" && child.attributes.class.includes("fill")).length, 0);
   });
 
   it("shows a compact source marker when more than one machine contributes quota", () => {

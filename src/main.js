@@ -1008,6 +1008,7 @@ let sessionHudShowStateLabels = _settingsController.get("sessionHudShowStateLabe
 let sessionHudShowElapsed = _settingsController.get("sessionHudShowElapsed");
 let sessionHudShowContextUsage = _settingsController.get("sessionHudShowContextUsage");
 let sessionHudShowQuota = _settingsController.get("sessionHudShowQuota");
+let quotaRingDisplayMode = _settingsController.get("quotaRingDisplayMode");
 let claudeQuotaCollectionEnabled = _settingsController.get("claudeQuotaCollectionEnabled");
 let quotaMergeSources = _settingsController.get("quotaMergeSources");
 let sessionHudCleanupDetached = _settingsController.get("sessionHudCleanupDetached");
@@ -2179,6 +2180,7 @@ const _sessionHud = require("./session-hud")({
   get sessionHudShowElapsed() { return sessionHudShowElapsed; },
   get sessionHudShowContextUsage() { return sessionHudShowContextUsage; },
   get sessionHudShowQuota() { return sessionHudShowQuota; },
+  get quotaRingDisplayMode() { return quotaRingDisplayMode; },
   get sessionHudPinned() { return sessionHudPinned; },
   get lowPowerIdleMode() { return lowPowerIdleMode; },
   getMiniMode: () => _mini.getMiniMode(),
@@ -3456,6 +3458,7 @@ const SETTINGS_MIRROR_SETTERS = {
   sessionHudShowElapsed: (v) => { sessionHudShowElapsed = v; },
   sessionHudShowContextUsage: (v) => { sessionHudShowContextUsage = v; },
   sessionHudShowQuota: (v) => { sessionHudShowQuota = v; },
+  quotaRingDisplayMode: (v) => { quotaRingDisplayMode = v; },
   claudeQuotaCollectionEnabled: (v) => { claudeQuotaCollectionEnabled = v; },
   quotaMergeSources: (v) => { quotaMergeSources = v; },
   sessionHudCleanupDetached: (v) => { sessionHudCleanupDetached = v; },
@@ -3802,6 +3805,7 @@ registerSessionIpc({
   clearSessionAutomationGrant: (payload) =>
     sessionAutomationCoordinator.clearSessionAutomationGrant(payload),
   showDashboard: (options) => showDashboard(options),
+  setQuotaRingTooltip: (payload, context) => _sessionHud.setQuotaRingTooltip(payload, context),
   setSessionHudPinned: (value) => {
     const result = _settingsController.applyUpdate("sessionHudPinned", !!value);
     if (result && typeof result.then === "function") {

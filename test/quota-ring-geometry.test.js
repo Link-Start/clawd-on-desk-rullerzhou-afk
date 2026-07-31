@@ -9,6 +9,7 @@ const {
   ringClusterContentSize,
   resolveRingSide,
   computeQuotaRingBounds,
+  placeQuotaTooltip,
   constants,
 } = ringGeom;
 
@@ -219,6 +220,56 @@ describe("quota ring — bounds placement", () => {
         `Orbit overlaps ${JSON.stringify(rect)}`
       );
     }
+  });
+});
+
+describe("quota ring — tooltip placement", () => {
+  const workArea = { x: 0, y: 0, width: 1440, height: 900 };
+  const petRect = { left: 700, top: 400, right: 850, bottom: 550 };
+
+  it("places a left-side ring tooltip farther left without covering the pet or ring", () => {
+    const ringBounds = { x: 594, y: 450, width: 94, height: 40 };
+    const result = placeQuotaTooltip({
+      ringBounds,
+      petRect,
+      workArea,
+      side: "left",
+      tooltipSize: { width: 236, height: 86 },
+    });
+
+    assert.strictEqual(result.placement, "left");
+    assert.ok(result.x + result.width < ringBounds.x);
+    assert.strictEqual(ringGeom.overlapArea(result, petRect), 0);
+    assert.strictEqual(ringGeom.overlapArea(result, ringBounds), 0);
+  });
+
+  it("mirrors the outward placement for a right-side ring", () => {
+    const ringBounds = { x: 860, y: 450, width: 94, height: 40 };
+    const result = placeQuotaTooltip({
+      ringBounds,
+      petRect,
+      workArea,
+      side: "right",
+      tooltipSize: { width: 236, height: 86 },
+    });
+
+    assert.strictEqual(result.placement, "right");
+    assert.ok(result.x > ringBounds.x + ringBounds.width);
+    assert.strictEqual(ringGeom.overlapArea(result, petRect), 0);
+  });
+
+  it("falls back above or below when the outward screen edge is too tight", () => {
+    const ringBounds = { x: 6, y: 410, width: 94, height: 40 };
+    const result = placeQuotaTooltip({
+      ringBounds,
+      petRect: { left: 108, top: 390, right: 250, bottom: 550 },
+      workArea: { x: 0, y: 0, width: 800, height: 600 },
+      side: "left",
+      tooltipSize: { width: 236, height: 86 },
+    });
+
+    assert.ok(result.placement === "above" || result.placement === "below");
+    assert.strictEqual(ringGeom.overlapArea(result, ringBounds), 0);
   });
 });
 

@@ -59,6 +59,7 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.sessionHudShowElapsed, false);
     assert.strictEqual(d.sessionHudShowContextUsage, true);
     assert.strictEqual(d.sessionHudShowQuota, true);
+    assert.strictEqual(d.quotaRingDisplayMode, "used");
     assert.strictEqual(d.claudeQuotaCollectionEnabled, false);
     assert.strictEqual(d.quotaMergeSources, false);
     assert.strictEqual(d.sessionHudCleanupDetached, true);
@@ -201,6 +202,7 @@ describe("prefs.validate", () => {
       sessionHudShowStateLabels: "yes",
       sessionHudShowElapsed: "yes",
       sessionHudShowContextUsage: "yes",
+      quotaRingDisplayMode: "available",
       sessionHudCleanupDetached: "yes",
       hideBubbles: 0,        // wrong type
       permissionBubblesEnabled: "yes",
@@ -225,6 +227,7 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.sessionHudShowStateLabels, true);
     assert.strictEqual(v.sessionHudShowElapsed, false);
     assert.strictEqual(v.sessionHudShowContextUsage, true);
+    assert.strictEqual(v.quotaRingDisplayMode, "used");
     assert.strictEqual(v.sessionHudCleanupDetached, true);
     assert.strictEqual(v.hideBubbles, false);
     assert.strictEqual(v.permissionBubblesEnabled, true);
@@ -235,6 +238,11 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.savedPixelWidth, 0);
     assert.strictEqual(v.savedPixelHeight, 0);
     assert.strictEqual(v.savedPixelWorkArea, null);
+  });
+
+  it("preserves both supported quota ring display modes", () => {
+    assert.strictEqual(prefs.validate({ quotaRingDisplayMode: "used" }).quotaRingDisplayMode, "used");
+    assert.strictEqual(prefs.validate({ quotaRingDisplayMode: "remaining" }).quotaRingDisplayMode, "remaining");
   });
 
   it("backfills split bubble prefs from legacy hideBubbles=true", () => {

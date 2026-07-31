@@ -147,6 +147,10 @@ const SCHEMA = {
   sessionHudShowElapsed: { type: "boolean", default: false },
   sessionHudShowContextUsage: { type: "boolean", default: true },
   sessionHudShowQuota: { type: "boolean", default: true },
+  // Preserve the historical used-percentage presentation for existing users;
+  // "remaining" is an explicit display-only choice and does not alter the
+  // account quota data stored by state-account-quota.js.
+  quotaRingDisplayMode: { type: "string", default: "used", enum: ["used", "remaining"] },
   // Claude Code exposes subscription limits only through its visible,
   // single-slot statusline. Keep collection opt-in so a fresh Clawd install
   // never changes the user's terminal UI without an explicit choice.

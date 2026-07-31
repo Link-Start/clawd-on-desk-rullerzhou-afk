@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self';">
+<title>Quota Tooltip</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --tooltip-bg: rgba(24, 25, 31, 0.96);
+  --tooltip-border: rgba(255, 255, 255, 0.16);
+  --tooltip-ink: #f8fafc;
+  --tooltip-muted: rgba(226, 232, 240, 0.68);
+  --tooltip-ok: #34d399;
+  --tooltip-warn: #fbbf24;
+  --tooltip-hot: #fb7185;
+  --tooltip-reset: #94a3b8;
+}
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  pointer-events: none;
+  user-select: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+body { padding: 6px; }
+.tooltip-card {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 10px 12px;
+  border: 1px solid var(--tooltip-border);
+  border-radius: 12px;
+  background: var(--tooltip-bg);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  color: var(--tooltip-ink);
+}
+.tooltip-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: linear-gradient(180deg, #60a5fa, #8b5cf6);
+}
+.tooltip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 18px;
+  gap: 10px;
+}
+.tooltip-title {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tooltip-source {
+  max-width: 108px;
+  overflow: hidden;
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--tooltip-muted);
+  font-size: 8.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tooltip-rows {
+  display: grid;
+  gap: 6px;
+  margin-top: 7px;
+}
+.tooltip-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.tooltip-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--tooltip-ok);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--tooltip-ok) 70%, transparent);
+}
+.severity-warn .tooltip-dot { background: var(--tooltip-warn); }
+.severity-hot .tooltip-dot { background: var(--tooltip-hot); }
+.severity-reset .tooltip-dot { background: var(--tooltip-reset); }
+.tooltip-copy { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; }
+.tooltip-row-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.tooltip-label { color: var(--tooltip-muted); font-size: 9.5px; white-space: nowrap; }
+.tooltip-value { font-size: 10.5px; font-weight: 650; white-space: nowrap; }
+.tooltip-meta {
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--tooltip-muted);
+  font-size: 8.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+</style>
+</head>
+<body>
+  <section id="tooltip-card" class="tooltip-card placement-left" role="tooltip" aria-live="polite">
+    <div class="tooltip-header">
+      <strong id="tooltip-title" class="tooltip-title"></strong>
+      <span id="tooltip-source" class="tooltip-source" hidden></span>
+    </div>
+    <div id="tooltip-rows" class="tooltip-rows"></div>
+  </section>
+  <script src="./quota-tooltip-renderer.js"></script>
+</body>
+</html>

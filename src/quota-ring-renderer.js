@@ -3,10 +3,12 @@
 // ── Quota "Orbit" ring cluster (renderer) ──
 // One coin per (source, provider). A coin carries up to two concentric rings:
 // the outer for the shorter/rolling window, the inner for the weekly window.
-// The arc fills with USED percent (a full ring = nearly exhausted); an empty
-// dim ring means the window reset with nothing reported since. Window labels
-// come from each bucket's windowMinutes, never a hard-coded 5h/7d. The main
-// process (session-hud.js) sizes/positions the window and passes the side.
+// The arc can present USED percent (full = nearly exhausted) or REMAINING
+// percent (full = plenty left). Severity still follows usedPercent so switching
+// the presentation never changes warning semantics. An empty dim ring means the
+// window reset with nothing reported since. Window labels come from each
+// bucket's windowMinutes, never a hard-coded 5h/7d. The main process
+// (session-hud.js) sizes/positions the window and passes the side.
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const XLINK_NS = "http://www.w3.org/1999/xlink";
@@ -59,12 +61,33 @@ const INNER_C = 2 * Math.PI * INNER_R;
 const GLYPH_ZOOM = 1.35;
 let coinClipSeq = 0;
 
-let payload = { accountQuota: [], quotaAgentIcons: {}, side: "left", translations: {} };
+let payload = {
+  accountQuota: [],
+  quotaAgentIcons: {},
+  displayMode: "used",
+  side: "left",
+  translations: {},
+};
 const clusterEl = document.getElementById("cluster");
 
 function t(key) {
   const dict = payload && payload.translations ? payload.translations : {};
   return dict[key] || key;
+}
+
+function quotaDisplayMode() {
+  return payload && payload.displayMode === "remaining" ? "remaining" : "used";
+}
+
+function quotaDisplayPercent(usedPercent) {
+  const used = Math.max(0, Math.min(100, Number(usedPercent) || 0));
+  return quotaDisplayMode() === "remaining" ? 100 - used : used;
+}
+
+function quotaDisplayWord() {
+  return quotaDisplayMode() === "remaining"
+    ? t("quotaRingRemainingWord")
+    : t("quotaRingUsedWord");
 }
 
 function formatWindowLabel(windowMinutes, fallbackLabel) {
@@ -257,14 +280,14 @@ function buildCoinSvg(model) {
   svg.appendChild(ringCircle("track", OUTER_R, OUTER_SW, null));
   if (outer && !outer.reset) {
     const outerNear = model.near && model.binding === outer;
-    const f = ringCircle(`fill ${severityClass(outer.pct)}${outerNear ? " is-near" : ""}`, OUTER_R, OUTER_SW, { pct: outer.pct });
+    const f = ringCircle(`fill ${severityClass(outer.pct)}${outerNear ? " is-near" : ""}`, OUTER_R, OUTER_SW, { pct: quotaDisplayPercent(outer.pct) });
     svg.appendChild(f);
   }
   if (dual) {
     svg.appendChild(ringCircle("track", INNER_R, INNER_SW, null));
     if (inner && !inner.reset) {
       const innerNear = model.near && model.binding === inner;
-      svg.appendChild(ringCircle(`fill ${severityClass(inner.pct)}${innerNear ? " is-near" : ""}`, INNER_R, INNER_SW, { pct: inner.pct }));
+      svg.appendChild(ringCircle(`fill ${severityClass(inner.pct)}${innerNear ? " is-near" : ""}`, INNER_R, INNER_SW, { pct: quotaDisplayPercent(inner.pct) }));
     }
   }
 
@@ -308,34 +331,66 @@ function buildCoinSvg(model) {
   return svg;
 }
 
-function coinTooltip(model, now) {
-  const parts = [model.label];
-  if (model.host) parts.push(model.host);
-  for (const w of model.windows) {
-    if (w.reset) {
-      parts.push(`${w.detailLabel} · ${t("quotaRingReset")}`);
-    } else {
-      let seg = `${w.detailLabel} · ${w.pct}% ${t("quotaRingUsedWord")}`;
-      if (Number.isFinite(w.resetAt) && w.resetAt > now) {
-        seg += ` · ${t("dashboardQuotaResetIn").replace("{time}", formatDurationHM((w.resetAt - now) / 60000))}`;
-      }
-      parts.push(seg);
+function coinTooltipPayload(model, now) {
+  const rows = model.windows.map((w) => {
+    const value = w.reset
+      ? t("quotaRingReset")
+      : `${Math.round(quotaDisplayPercent(w.pct))}% ${quotaDisplayWord()}`;
+    const meta = [];
+    if (!w.reset && Number.isFinite(w.resetAt) && w.resetAt > now) {
+      meta.push(t("dashboardQuotaResetIn").replace(
+        "{time}",
+        formatDurationHM((w.resetAt - now) / 60000)
+      ));
     }
     if (w.stale && Number.isFinite(w.seenAt)) {
-      parts.push(t("dashboardQuotaAsOf").replace("{time}", formatDurationHM((now - w.seenAt) / 60000)));
+      meta.push(t("dashboardQuotaAsOf").replace(
+        "{time}",
+        formatDurationHM((now - w.seenAt) / 60000)
+      ));
     }
+    return {
+      label: w.detailLabel,
+      value,
+      meta: meta.join(" · "),
+      severity: w.reset ? "reset" : severityClass(w.pct).replace("sev-", ""),
+    };
+  });
+  return {
+    title: model.label,
+    source: model.host || t("dashboardQuotaSourceLocal"),
+    side: payload.side === "right" ? "right" : "left",
+    rows,
+  };
+}
+
+function bindTooltip(element, tooltipPayload) {
+  element.setAttribute("data-tooltip-side", tooltipPayload.side);
+  element.addEventListener("mouseenter", () => {
+    if (window.quotaRingAPI && typeof window.quotaRingAPI.showTooltip === "function") {
+      window.quotaRingAPI.showTooltip(tooltipPayload);
+    }
+  });
+  element.addEventListener("mouseleave", hideTooltip);
+}
+
+function hideTooltip() {
+  if (window.quotaRingAPI && typeof window.quotaRingAPI.hideTooltip === "function") {
+    window.quotaRingAPI.hideTooltip();
   }
-  return parts.join(" · ");
 }
 
 function buildCoinRow(model, now) {
   const row = document.createElement("div");
   row.className = `coin-row is-${model.state}`;
-  row.title = coinTooltip(model, now);
+  bindTooltip(row, coinTooltipPayload(model, now));
   // The hosting Electron panel is intentionally non-focusable so checking
   // quota never steals focus from the terminal. Treat the ring as a decorative
   // pointer convenience; keyboard/screen-reader access remains in Dashboard.
-  row.addEventListener("click", () => window.quotaRingAPI.openDashboard());
+  row.addEventListener("click", () => {
+    hideTooltip();
+    window.quotaRingAPI.openDashboard();
+  });
 
   const readout = document.createElement("div");
   readout.className = "readout";
@@ -344,10 +399,10 @@ function buildCoinRow(model, now) {
   const win = document.createElement("span");
   win.className = "win";
   if (model.displayWindow && model.displayWindow.reset) {
-    pct.textContent = "0%";
+    pct.textContent = quotaDisplayMode() === "remaining" ? "100%" : "0%";
     win.textContent = t("quotaRingReset");
   } else if (model.displayWindow) {
-    pct.textContent = `${Math.round(model.displayWindow.pct)}%`;
+    pct.textContent = `${Math.round(quotaDisplayPercent(model.displayWindow.pct))}%`;
     win.textContent = model.displayWindow.label;
   } else {
     pct.textContent = "—";
@@ -369,8 +424,16 @@ function buildOverflow(count) {
   const el = document.createElement("div");
   el.className = "overflow";
   el.textContent = `+${count}`;
-  el.title = t("quotaRingOverflow").replace("{n}", count);
-  el.addEventListener("click", () => window.quotaRingAPI.openDashboard());
+  bindTooltip(el, {
+    title: t("quotaRingOverflow").replace("{n}", count),
+    source: "",
+    side: payload.side === "right" ? "right" : "left",
+    rows: [],
+  });
+  el.addEventListener("click", () => {
+    hideTooltip();
+    window.quotaRingAPI.openDashboard();
+  });
   return el;
 }
 
@@ -380,7 +443,7 @@ function buildOverflow(count) {
 let lastFingerprint = "";
 function fingerprint(now) {
   const coins = collectCoins(now);
-  return coins.map((m) => {
+  const digest = coins.map((m) => {
     const windows = m.windows.map((w) => {
       const resetIn = Number.isFinite(w.resetAt) && w.resetAt > now
         ? Math.ceil((w.resetAt - now) / 60000)
@@ -392,10 +455,12 @@ function fingerprint(now) {
     }).join(",");
     return `${m.providerKey}:${m.host || ""}:${m.state}:${windows}`;
   }).join("|");
+  return `${quotaDisplayMode()}|${digest}`;
 }
 
 function render() {
   const now = Date.now();
+  hideTooltip();
   lastFingerprint = fingerprint(now);
   clusterEl.className = `cluster side-${payload.side === "right" ? "right" : "left"}`;
   clusterEl.replaceChildren();
@@ -424,6 +489,7 @@ async function init() {
     payload = {
       accountQuota: Array.isArray(next && next.accountQuota) ? next.accountQuota : [],
       quotaAgentIcons: (next && next.quotaAgentIcons) || {},
+      displayMode: next && next.displayMode === "remaining" ? "remaining" : "used",
       side: next && next.side === "right" ? "right" : "left",
       translations: payload.translations,
       lang: payload.lang,

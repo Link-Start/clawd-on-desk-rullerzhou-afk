@@ -17,8 +17,34 @@ const {
   pointInExpandedRect,
   computeAutoHideHotZone,
   pointInHotZone,
+  sanitizeQuotaTooltipPayload,
   constants,
 } = sessionHud.__test;
+
+describe("quota tooltip payload boundary", () => {
+  it("bounds renderer-controlled text and rejects unsupported severity values", () => {
+    const result = sanitizeQuotaTooltipPayload({
+      title: " Codex ",
+      source: "local",
+      side: "sideways",
+      rows: [
+        { label: "7d", value: "46% used", meta: "resets soon", severity: "script" },
+        { label: "5h", value: "12% used", severity: "ok" },
+        { label: "ignored", value: "third row" },
+      ],
+    });
+    assert.deepStrictEqual(result, {
+      title: "Codex",
+      source: "local",
+      side: "left",
+      rows: [
+        { label: "7d", value: "46% used", meta: "resets soon", severity: "ok" },
+        { label: "5h", value: "12% used", meta: "", severity: "ok" },
+      ],
+    });
+    assert.strictEqual(sanitizeQuotaTooltipPayload({ title: "", rows: [] }), null);
+  });
+});
 
 function mkSession(id, overrides = {}) {
   return {
@@ -642,6 +668,22 @@ describe("session HUD v5 three-state runtime contracts (source-level)", () => {
   it("snapshot to renderer no longer includes hudAutoHide", () => {
     assert.ok(!/hudAutoHide:/.test(src),
       "session-hud must not send hudAutoHide in snapshot");
+  });
+
+  it("forwards the persisted quota presentation mode to the ring renderer", () => {
+    const sendRingFn = src.match(/function sendRingSnapshot\([\s\S]*?\n  \}/);
+    assert.ok(sendRingFn, "sendRingSnapshot function missing");
+    assert.match(
+      sendRingFn[0],
+      /displayMode:\s*ctx\.quotaRingDisplayMode === "remaining" \? "remaining" : "used"/,
+      "quota ring snapshots must sanitize and forward the display preference"
+    );
+  });
+
+  it("renders quota hover details in a pointer-transparent window placed away from the pet", () => {
+    assert.match(src, /function ensureQuotaTooltip\(\)[\s\S]*?setIgnoreMouseEvents\(true\)/);
+    assert.match(src, /ringGeom\.placeQuotaTooltip\(\{/);
+    assert.match(src, /options\.sender !== ringWindow\.webContents/);
   });
 
   it("feeds visible permission and update bubble bounds into Orbit avoidance", () => {

@@ -80,6 +80,7 @@
       textScale: null,
       settingsSelects: new Set(),
       segmentedRadios: new Set(),
+      quotaRingDisplayMode: null,
       aboutAutoUpdate: null,
       aboutUpdateStatus: null,
     },
@@ -355,6 +356,39 @@
     for (const row of rows) wrap.appendChild(row);
     section.appendChild(wrap);
     return section;
+  }
+
+  // Shared Settings button primitive. Feature tabs keep ownership of business
+  // behavior, while tone, sizing, disabled/busy semantics and accessible labels
+  // stay consistent. Specialized controls may add a class without rebuilding
+  // the base button contract.
+  function buildButton(config = {}) {
+    const button = document.createElement("button");
+    const tone = ["neutral", "accent", "danger", "quiet"].includes(config.tone)
+      ? config.tone
+      : "neutral";
+    const size = ["compact", "regular", "large"].includes(config.size)
+      ? config.size
+      : "regular";
+    button.type = config.type || "button";
+    button.className = [
+      "soft-btn",
+      "settings-button",
+      `settings-button-${size}`,
+      tone === "neutral" ? "" : tone,
+      config.className || "",
+    ].filter(Boolean).join(" ");
+    const label = config.label != null
+      ? String(config.label)
+      : (config.labelKey ? t(config.labelKey) : "");
+    button.textContent = label;
+    if (config.ariaLabel) button.setAttribute("aria-label", String(config.ariaLabel));
+    if (config.title) button.title = String(config.title);
+    if (config.disabled === true || config.pending === true) button.disabled = true;
+    button.classList.toggle("pending", config.pending === true);
+    button.setAttribute("aria-busy", config.pending === true ? "true" : "false");
+    if (typeof config.onClick === "function") button.addEventListener("click", config.onClick);
+    return button;
   }
 
   function buildSettingsSelect(config = {}) {
@@ -816,10 +850,7 @@
     setSwitchVisual(sw, visualOn, { pending: override ? override.pending : false });
     state.mountedControls.generalSwitches.set(key, { element: sw, invert, row, text, extraElement });
     if (actionButton) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "soft-btn accent";
-      btn.textContent = t(actionButton.labelKey);
+      const btn = buildButton({ labelKey: actionButton.labelKey, tone: "accent" });
       control.insertBefore(btn, sw);
       attachActivation(btn, actionButton.invoke);
     }
@@ -852,16 +883,12 @@
   }
 
   function buildShortcutButton(label, onClick, { disabled = false, accent = false } = {}) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "soft-btn" + (accent ? " accent" : "");
-    btn.textContent = label;
-    if (disabled) {
-      btn.disabled = true;
-      return btn;
-    }
-    btn.addEventListener("click", onClick);
-    return btn;
+    return buildButton({
+      label,
+      disabled,
+      tone: accent ? "accent" : "neutral",
+      onClick: disabled ? null : onClick,
+    });
   }
 
   // Generic number-input row used by the Session cleanup group. Mirrors the
@@ -1080,6 +1107,7 @@
     state.mountedControls.soundSummary = null;
     state.mountedControls.soundVolume = null;
     state.mountedControls.textScale = null;
+    state.mountedControls.quotaRingDisplayMode = null;
     state.mountedControls.aboutAutoUpdate = null;
     state.mountedControls.aboutUpdateStatus = null;
   }
@@ -1576,35 +1604,53 @@
     hasAnyThemeOverride,
   };
 
-  function showSettingsConfirmModal({
+  let settingsDialogSequence = 0;
+  let dismissActiveSettingsDialog = null;
+
+  function showSettingsDialog({
     title,
     detail,
     actions,
+    iconText = "",
+    className = "",
     checkboxLabel = "",
     checkboxChecked = false,
     returnDetails = false,
+    dismissOnBackdrop = true,
+    dismissOnEscape = true,
   }) {
     const rootNode = document.getElementById("modalRoot");
     if (!rootNode) return Promise.resolve(null);
+    if (typeof dismissActiveSettingsDialog === "function") dismissActiveSettingsDialog();
     return new Promise((resolve) => {
       let settled = false;
+      const previousFocus = document.activeElement;
+      const dialogId = `settings-dialog-${++settingsDialogSequence}`;
       const overlay = document.createElement("div");
-      overlay.className = "modal-backdrop settings-confirm-backdrop";
+      overlay.className = "modal-backdrop settings-dialog-backdrop settings-confirm-backdrop";
 
       const modal = document.createElement("div");
-      modal.className = "settings-confirm-modal";
+      modal.className = ["settings-dialog", "settings-confirm-modal", className].filter(Boolean).join(" ");
       modal.setAttribute("role", "dialog");
       modal.setAttribute("aria-modal", "true");
 
-      const icon = document.createElement("div");
-      icon.className = "settings-confirm-icon";
-      icon.textContent = "!";
+      let icon = null;
+      if (iconText) {
+        icon = document.createElement("div");
+        icon.className = "settings-confirm-icon";
+        icon.setAttribute("aria-hidden", "true");
+        icon.textContent = String(iconText);
+      }
 
       const titleNode = document.createElement("h2");
-      titleNode.textContent = title;
+      titleNode.id = `${dialogId}-title`;
+      titleNode.textContent = title || "";
+      modal.setAttribute("aria-labelledby", titleNode.id);
 
       const detailNode = document.createElement("p");
-      detailNode.textContent = detail;
+      detailNode.id = `${dialogId}-detail`;
+      detailNode.textContent = detail || "";
+      modal.setAttribute("aria-describedby", detailNode.id);
 
       let checkboxInput = null;
       let checkboxRow = null;
@@ -1626,8 +1672,10 @@
       function close(actionId) {
         if (settled) return;
         settled = true;
+        if (dismissActiveSettingsDialog === close) dismissActiveSettingsDialog = null;
         document.removeEventListener("keydown", onKeyDown, true);
         rootNode.innerHTML = "";
+        if (previousFocus && typeof previousFocus.focus === "function") previousFocus.focus();
         resolve(returnDetails
           ? {
             actionId,
@@ -1637,27 +1685,41 @@
       }
 
       function onKeyDown(ev) {
-        if (ev.key === "Escape") close(null);
+        if (ev.key === "Escape" && dismissOnEscape) {
+          ev.preventDefault();
+          close(null);
+          return;
+        }
+        if (ev.key !== "Tab") return;
+        const focusable = [checkboxInput, ...buttons.map((entry) => entry.button)]
+          .filter((element) => element && element.disabled !== true);
+        if (focusable.length === 0) return;
+        const currentIndex = focusable.indexOf(document.activeElement);
+        let nextIndex;
+        if (ev.shiftKey) nextIndex = currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1;
+        else nextIndex = currentIndex < 0 || currentIndex === focusable.length - 1 ? 0 : currentIndex + 1;
+        ev.preventDefault();
+        focusable[nextIndex].focus();
       }
 
       overlay.addEventListener("click", (ev) => {
-        if (ev.target === overlay) close(null);
+        if (dismissOnBackdrop && ev.target === overlay) close(null);
       });
       const buttons = (Array.isArray(actions) ? actions : []).map((action) => {
-        const button = document.createElement("button");
         const tone = action && typeof action.tone === "string" ? action.tone : "neutral";
-        const toneClass = tone === "accent"
-          ? "accent"
-          : (tone === "danger" ? "settings-confirm-danger" : "");
-        button.type = "button";
-        button.className = `soft-btn${toneClass ? ` ${toneClass}` : ""}`;
-        button.textContent = action && action.label ? action.label : "";
-        button.addEventListener("click", () => close(action && action.id ? action.id : null));
+        const button = buildButton({
+          label: action && action.label ? action.label : "",
+          tone,
+          size: "large",
+          className: tone === "danger" ? "settings-confirm-danger" : "",
+          onClick: () => close(action && action.id ? action.id : null),
+        });
         actionsNode.appendChild(button);
         return { action, button };
       });
+      dismissActiveSettingsDialog = close;
       document.addEventListener("keydown", onKeyDown, true);
-      modal.appendChild(icon);
+      if (icon) modal.appendChild(icon);
       modal.appendChild(titleNode);
       modal.appendChild(detailNode);
       if (checkboxRow) modal.appendChild(checkboxRow);
@@ -1673,8 +1735,14 @@
     });
   }
 
+  function showSettingsConfirmModal(options = {}) {
+    return showSettingsDialog({ iconText: "!", ...options });
+  }
+
   core.helpers = {
     t,
+    buildButton,
+    showSettingsDialog,
     showSettingsConfirmModal,
     escapeHtml,
     setSwitchVisual,

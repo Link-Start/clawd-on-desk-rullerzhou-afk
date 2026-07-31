@@ -159,6 +159,13 @@ describe("updateRegistry pure-data validators", () => {
     assert.strictEqual(entry.effect(false, {}).status, "error");
   });
 
+  it("accepts only supported quota ring display modes", () => {
+    assert.strictEqual(updateRegistry.quotaRingDisplayMode("used").status, "ok");
+    assert.strictEqual(updateRegistry.quotaRingDisplayMode("remaining").status, "ok");
+    assert.strictEqual(updateRegistry.quotaRingDisplayMode("available").status, "error");
+    assert.strictEqual(updateRegistry.quotaRingDisplayMode(true).status, "error");
+  });
+
   it("bubble auto-close seconds require integers in range", () => {
     const deps = { snapshot: baseSnapshot };
     for (const key of [

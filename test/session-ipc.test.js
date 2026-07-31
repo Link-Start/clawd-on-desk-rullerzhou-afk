@@ -66,6 +66,9 @@ function createHarness(overrides = {}) {
     setSessionHudPinned: overrides.setSessionHudPinned || ((value) => {
       calls.push(["setSessionHudPinned", value]);
     }),
+    setQuotaRingTooltip: overrides.setQuotaRingTooltip || ((payload, context) => {
+      calls.push(["setQuotaRingTooltip", payload, context]);
+    }),
     ackSessionCompletion: overrides.ackSessionCompletion || ((sessionId) => {
       calls.push(["ackSessionCompletion", sessionId]);
       return true;
@@ -103,6 +106,7 @@ test("session IPC registers owned channels and disposes them", () => {
   ]);
   assert.deepStrictEqual([...ipcMain.listeners.keys()].sort(), [
     "dashboard:focus-session",
+    "quota-ring:set-tooltip",
     "session-hud:focus-session",
     "session-hud:open-dashboard",
     "session-hud:set-pinned",
@@ -134,6 +138,8 @@ test("session IPC delegates dashboard and HUD behavior", async () => {
   ipcMain.send("session-hud:focus-session", "hud-session");
   ipcMain.send("session-hud:set-pinned", true);
   ipcMain.send("session-hud:set-pinned", 0);
+  ipcMain.send("quota-ring:set-tooltip", { title: "Codex", rows: [] });
+  ipcMain.send("quota-ring:set-tooltip", null);
   assert.deepStrictEqual(await ipcMain.invoke("dashboard:hide-session", "hidden-session"), {
     status: "ok",
     hidden: "hidden-session",
@@ -156,6 +162,8 @@ test("session IPC delegates dashboard and HUD behavior", async () => {
     ["focusSession", "hud-session", { requestSource: "hud" }],
     ["setSessionHudPinned", true],
     ["setSessionHudPinned", false],
+    ["setQuotaRingTooltip", { title: "Codex", rows: [] }, { sender: "sender-web-contents" }],
+    ["setQuotaRingTooltip", null, { sender: "sender-web-contents" }],
     ["hideSession", "hidden-session"],
     ["setSessionAlias", { sessionId: "s1", alias: "Frontend" }],
     ["openSessionFolder", "folder-session"],
@@ -276,6 +284,7 @@ test("registerSessionIpc requires ackSessionCompletion dep", () => {
       setSessionAlias: () => {},
       showDashboard: () => {},
       setSessionHudPinned: () => {},
+      setQuotaRingTooltip: () => {},
       openSessionFolder: () => {},
       setSessionAutomationOverride: () => {},
       clearSessionAutomationGrant: () => {},

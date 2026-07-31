@@ -43,6 +43,10 @@ const OVERFLOW_H = 20; // "+N" pill row
 const RING_PET_GAP = 8; // gap between the pet body and the cluster
 const RING_EDGE_MARGIN = 8; // keep the cluster this far from the work-area edge
 const RING_MAX_COINS = 4; // visible coins before overflow collapses to "+N"
+const RING_TOOLTIP_WIDTH = 236;
+const RING_TOOLTIP_MIN_HEIGHT = 58;
+const RING_TOOLTIP_ROW_HEIGHT = 28;
+const RING_TOOLTIP_GAP = 8;
 
 // Transparent window shell (room for the coin drop shadows), mirrors HUD.
 const RING_SHELL = Object.freeze({ top: 6, right: 6, bottom: 8, left: 6 });
@@ -79,11 +83,99 @@ function normalizeAvoidRect(rect) {
 }
 
 function overlapArea(a, b, gap = 0) {
-  const left = Math.max(a.x, b.x - gap);
-  const top = Math.max(a.y, b.y - gap);
-  const right = Math.min(a.x + a.width, b.x + b.width + gap);
-  const bottom = Math.min(a.y + a.height, b.y + b.height + gap);
+  const first = normalizeAvoidRect(a);
+  const second = normalizeAvoidRect(b);
+  if (!first || !second) return 0;
+  const left = Math.max(first.x, second.x - gap);
+  const top = Math.max(first.y, second.y - gap);
+  const right = Math.min(first.x + first.width, second.x + second.width + gap);
+  const bottom = Math.min(first.y + first.height, second.y + second.height + gap);
   return Math.max(0, right - left) * Math.max(0, bottom - top);
+}
+
+// The styled tooltip lives in its own pointer-transparent BrowserWindow. Try
+// the ring's outward side first (away from the pet); when a screen edge makes
+// that impossible, move above/below the combined pet + ring footprint rather
+// than covering either surface.
+function placeQuotaTooltip({
+  ringBounds,
+  petRect,
+  workArea,
+  side,
+  tooltipSize,
+  gap = RING_TOOLTIP_GAP,
+  margin = RING_EDGE_MARGIN,
+}) {
+  const ring = normalizeAvoidRect(ringBounds);
+  const pet = normalizeAvoidRect(petRect);
+  const area = normalizeAvoidRect(workArea);
+  if (!ring || !area) return null;
+
+  const safeMargin = Math.max(0, Number(margin) || 0);
+  const safeGap = Math.max(0, Number(gap) || 0);
+  const availableWidth = Math.max(1, area.width - safeMargin * 2);
+  const availableHeight = Math.max(1, area.height - safeMargin * 2);
+  const width = Math.min(
+    availableWidth,
+    Math.max(1, Math.round(Number(tooltipSize && tooltipSize.width) || RING_TOOLTIP_WIDTH))
+  );
+  const height = Math.min(
+    availableHeight,
+    Math.max(1, Math.round(Number(tooltipSize && tooltipSize.height) || RING_TOOLTIP_MIN_HEIGHT))
+  );
+  const minX = area.x + safeMargin;
+  const minY = area.y + safeMargin;
+  const maxX = area.x + area.width - safeMargin - width;
+  const maxY = area.y + area.height - safeMargin - height;
+  const centerY = ring.y + (ring.height - height) / 2;
+  const topEdge = Math.min(ring.y, pet ? pet.y : ring.y);
+  const bottomEdge = Math.max(ring.y + ring.height, pet ? pet.y + pet.height : ring.y + ring.height);
+  const outward = side === "right" ? "right" : "left";
+  const inward = outward === "left" ? "right" : "left";
+
+  const rawCandidates = [
+    {
+      placement: outward,
+      x: outward === "left" ? ring.x - safeGap - width : ring.x + ring.width + safeGap,
+      y: centerY,
+    },
+    {
+      placement: "above",
+      x: ring.x + (ring.width - width) / 2,
+      y: topEdge - safeGap - height,
+    },
+    {
+      placement: "below",
+      x: ring.x + (ring.width - width) / 2,
+      y: bottomEdge + safeGap,
+    },
+    {
+      placement: inward,
+      x: inward === "left" ? ring.x - safeGap - width : ring.x + ring.width + safeGap,
+      y: centerY,
+    },
+  ];
+
+  const candidates = rawCandidates.map((candidate, priority) => {
+    const placed = {
+      x: clamp(Math.round(candidate.x), minX, maxX),
+      y: clamp(Math.round(candidate.y), minY, maxY),
+      width,
+      height,
+      placement: candidate.placement,
+    };
+    return {
+      placed,
+      priority,
+      petOverlap: pet ? overlapArea(placed, pet, 2) : 0,
+      ringOverlap: overlapArea(placed, ring, Math.min(4, safeGap)),
+    };
+  });
+  candidates.sort((a, b) =>
+    a.petOverlap - b.petOverlap
+    || a.ringOverlap - b.ringOverlap
+    || a.priority - b.priority);
+  return candidates[0].placed;
 }
 
 function resolveAvoidingY({ initialY, minY, maxY, width, height, x, avoidRects, gap }) {
@@ -263,6 +355,7 @@ module.exports = {
   ringClusterContentSize,
   resolveRingSide,
   computeQuotaRingBounds,
+  placeQuotaTooltip,
   providerHasDrawableQuota,
   overlapArea,
   resolveAvoidingY,
@@ -277,6 +370,10 @@ module.exports = {
     RING_PET_GAP,
     RING_EDGE_MARGIN,
     RING_MAX_COINS,
+    RING_TOOLTIP_WIDTH,
+    RING_TOOLTIP_MIN_HEIGHT,
+    RING_TOOLTIP_ROW_HEIGHT,
+    RING_TOOLTIP_GAP,
     RING_SHELL,
   },
 };

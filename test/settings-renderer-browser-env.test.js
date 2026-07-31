@@ -219,6 +219,10 @@ class FakeElement {
     return child;
   }
 
+  append(...children) {
+    for (const child of children) this.appendChild(child);
+  }
+
   insertBefore(child, reference) {
     child.parentNode = this;
     const index = this.children.indexOf(reference);
@@ -740,6 +744,9 @@ function makeGeneralSnapshot(overrides = {}) {
     sessionHudEnabled: true,
     sessionHudShowStateLabels: true,
     sessionHudShowElapsed: true,
+    sessionHudShowContextUsage: true,
+    sessionHudShowQuota: true,
+    quotaRingDisplayMode: "used",
     sessionHudCleanupDetached: true,
     soundMuted: false,
     soundVolume: 0.5,
@@ -4631,6 +4638,71 @@ describe("settings renderer browser environment", () => {
     assert.equal(buttons[0].eventListeners.keydown.length, 0);
   });
 
+  it("builds Settings buttons from one tone, size, and pending-state contract", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const button = core.helpers.buildButton({
+      label: "Delete",
+      tone: "danger",
+      size: "compact",
+      pending: true,
+      ariaLabel: "Delete profile",
+    });
+
+    assert.equal(button.textContent, "Delete");
+    assert.equal(button.type, "button");
+    assert.equal(button.classList.contains("settings-button"), true);
+    assert.equal(button.classList.contains("settings-button-compact"), true);
+    assert.equal(button.classList.contains("danger"), true);
+    assert.equal(button.classList.contains("pending"), true);
+    assert.equal(button.disabled, true);
+    assert.equal(button.getAttribute("aria-busy"), "true");
+    assert.equal(button.getAttribute("aria-label"), "Delete profile");
+  });
+
+  it("uses the shared Settings dialog shell with ARIA links and focus restoration", async () => {
+    const body = new FakeElement("body");
+    const modalRoot = new FakeElement("div");
+    const launchButton = new FakeElement("button");
+    body.append(launchButton, modalRoot);
+    const listeners = new Map();
+    const document = {
+      body,
+      activeElement: launchButton,
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: (id) => (id === "modalRoot" ? modalRoot : null),
+      addEventListener(type, listener) { listeners.set(type, listener); },
+      removeEventListener(type) { listeners.delete(type); },
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const resultPromise = core.helpers.showSettingsDialog({
+      title: "Remove profile?",
+      detail: "This cannot be undone.",
+      actions: [
+        { id: "cancel", label: "Cancel", tone: "neutral", defaultFocus: true },
+        { id: "remove", label: "Remove", tone: "danger" },
+      ],
+    });
+
+    const dialog = modalRoot.querySelector(".settings-dialog");
+    assert.ok(dialog);
+    assert.equal(dialog.getAttribute("role"), "dialog");
+    assert.equal(dialog.getAttribute("aria-modal"), "true");
+    assert.match(dialog.getAttribute("aria-labelledby"), /^settings-dialog-\d+-title$/);
+    assert.match(dialog.getAttribute("aria-describedby"), /^settings-dialog-\d+-detail$/);
+    assert.equal(listeners.has("keydown"), true);
+    dialog.querySelectorAll("button")[1].dispatchEvent({ type: "click" });
+
+    assert.equal(await resultPromise, "remove");
+    assert.equal(modalRoot.children.length, 0);
+    assert.equal(launchButton.focused, true);
+    assert.equal(listeners.has("keydown"), false);
+  });
+
   it("rolls concurrent failed language saves back to the last committed value", async () => {
     const saves = [];
     const changes = [];
@@ -5052,7 +5124,7 @@ describe("settings renderer browser environment", () => {
     assert.ok(generalSource.includes('{ id: "confirm", label: t("updateBubbleDisableConfirmAction"), tone: "danger" }'));
     assert.ok(generalSource.includes('{ id: "cancel", label: t("updateBubbleDisableConfirmCancel"), tone: "accent", defaultFocus: true }'));
     assert.ok(generalSource.includes('if (actionId === "confirm") runToggleCommit(nextEnabled);'));
-    assert.ok(uiCoreSource.includes('tone === "accent"'));
+    assert.ok(uiCoreSource.includes("function buildButton(config = {})"));
     assert.ok(uiCoreSource.includes('tone === "danger"'));
   });
 
@@ -5070,8 +5142,8 @@ describe("settings renderer browser environment", () => {
     assert.ok(agentsSource.includes("claudeHooksDisableConfirmTitle"));
     assert.ok(agentsSource.includes("claudeHooksDisconnectConfirmTitle"));
     assert.ok(uiCoreSource.includes("buttons.find((action) => action.action && action.action.defaultFocus)"));
-    assert.ok(uiCoreSource.includes('button.className = `soft-btn${toneClass ? ` ${toneClass}` : ""}`;'));
-    assert.ok(uiCoreSource.includes('tone === "accent"'));
+    assert.ok(uiCoreSource.includes("const button = buildButton({"));
+    assert.ok(uiCoreSource.includes('"accent", "danger", "quiet"'));
     assert.ok(uiCoreSource.includes('tone === "danger"'));
     assert.ok(css.includes(".settings-confirm-danger"));
     assert.ok(!preloadSource.includes("confirmDisableClaudeHooks"));
@@ -5293,6 +5365,43 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(harness.getSwitchMeta("quotaMergeSources").row.style.display, "");
     assert.strictEqual(summary.children.length, 1);
     assert.strictEqual(summary.children[0].textContent, "HUD: off");
+  });
+
+  it("lets users choose used or remaining quota without rebuilding General", async () => {
+    const updateCalls = [];
+    const initialSnapshot = makeGeneralSnapshot({ quotaRingDisplayMode: "used" });
+    const harness = loadGeneralTabForTest({
+      snapshot: initialSnapshot,
+      settingsAPI: {
+        getQuotaSourceCount: async () => 1,
+        update: (key, value) => {
+          updateCalls.push({ key, value });
+          return Promise.resolve({ status: "ok" });
+        },
+      },
+    });
+    harness.renderContent();
+
+    const control = harness.content.querySelector(".quota-ring-display-mode-choice");
+    const buttons = control.querySelectorAll("button");
+    assert.equal(control.getAttribute("role"), "radiogroup");
+    assert.deepStrictEqual(buttons.map((button) => button.dataset.value), ["used", "remaining"]);
+    assert.equal(buttons[0].getAttribute("aria-checked"), "true");
+
+    buttons[1].dispatchEvent({ type: "click" });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepStrictEqual(updateCalls, [{ key: "quotaRingDisplayMode", value: "remaining" }]);
+    assert.equal(buttons[1].getAttribute("aria-checked"), "true");
+
+    const beforeRenderCount = harness.getContentRenderCount();
+    harness.core.ops.applyChanges({
+      changes: { quotaRingDisplayMode: "remaining" },
+      snapshot: { ...initialSnapshot, quotaRingDisplayMode: "remaining" },
+    });
+    assert.equal(harness.getContentRenderCount(), beforeRenderCount);
+    assert.strictEqual(harness.content.querySelector(".quota-ring-display-mode-choice"), control);
+    assert.equal(buttons[1].getAttribute("aria-checked"), "true");
   });
 
   it("reveals existing quota options immediately and absorbs async sources without a second expansion", async () => {
