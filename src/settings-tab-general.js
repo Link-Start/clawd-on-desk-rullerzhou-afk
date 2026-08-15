@@ -717,7 +717,6 @@
       desc: t("rowQuotaRingGroupDesc"),
       defaultCollapsed: true,
       className: "quota-ring-collapsible",
-      animateExpansion: false,
       children: [optionList],
     });
     if (window.settingsAPI && typeof window.settingsAPI.getQuotaSourceCount === "function") {
@@ -726,12 +725,11 @@
           if (Number(count) <= 1) return;
           const revealMergeRow = () => {
             mergeRow.style.display = "";
-          };
-          if (typeof group.mutateCollapsibleBody === "function") {
-            group.mutateCollapsibleBody(revealMergeRow);
-          } else {
-            revealMergeRow();
+            if (!group.classList.contains("collapsed")) {
+              mergeRow.classList.add("collapsible-content-enter");
+            }
           }
+          revealMergeRow();
         })
         .catch(() => {});
     }
@@ -940,7 +938,6 @@
       desc: t("rowFlashDesc"),
       defaultCollapsed: true,
       className: "flash-collapsible",
-      animateExpansion: false,
       children: [buildOptionList("flash-option-list", [
         helpers.buildSwitchRow({
           key: "flashTaskbarOnComplete",

@@ -86,6 +86,10 @@ function loadSettingsCoreForTest(settingsAPI, {
     cb();
     return 1;
   },
+  matchMedia = () => ({ matches: false }),
+  setTimeout: setTimeoutOverride = globalThis.setTimeout,
+  clearTimeout: clearTimeoutOverride = globalThis.clearTimeout,
+  getComputedStyle: getComputedStyleOverride = null,
 } = {}) {
   const document = documentOverride || {
     body: { contains: () => false },
@@ -100,6 +104,10 @@ function loadSettingsCoreForTest(settingsAPI, {
     },
     document,
     requestAnimationFrame,
+    matchMedia,
+    setTimeout: setTimeoutOverride,
+    clearTimeout: clearTimeoutOverride,
+    getComputedStyle: getComputedStyleOverride,
     window: null,
     globalThis: null,
     settingsAPI,
@@ -5576,7 +5584,8 @@ describe("settings renderer browser environment", () => {
     assert.ok(/@media \(max-width:\s*720px\)\s*\{[\s\S]*\.session-hud-collapsible \.collapsible-group-summary\s*\{[\s\S]*flex:\s*0 0 calc\(100% - 22px\);[\s\S]*margin-left:\s*22px;/.test(css));
     assert.ok(/@media \(max-width:\s*720px\)\s*\{[\s\S]*\.session-hud-summary-control\s*\{[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);[\s\S]*width:\s*min\(238px,\s*100%\);/.test(css));
     assert.ok(/@media \(max-width:\s*720px\)\s*\{[\s\S]*\.session-hud-summary-control\s*\{[\s\S]*justify-self:\s*start;/.test(css));
-    assert.ok(/function buildFlashGroup\(\)[\s\S]*id:\s*"general:flash",[\s\S]*animateExpansion:\s*false,/.test(generalSource));
+    assert.ok(/function buildFlashGroup\(\)[\s\S]*id:\s*"general:flash",/.test(generalSource));
+    assert.ok(!generalSource.includes("animateExpansion"));
     assert.ok(/\.collapsible-group-text \.row-label\s*\{[\s\S]*text-overflow:\s*ellipsis;[\s\S]*white-space:\s*nowrap;/.test(css));
     assert.ok(/\.collapsible-group-text \.row-desc\s*\{[\s\S]*white-space:\s*normal;[\s\S]*-webkit-line-clamp:\s*2;/.test(css));
     assert.ok(/\.sound-summary-control\s*\{[\s\S]*display:\s*inline-flex;/.test(css));
@@ -6146,53 +6155,26 @@ describe("settings renderer browser environment", () => {
 
   it("reveals existing quota options immediately and absorbs async sources without a second expansion", async () => {
     const sourceCount = createDeferred();
-    const animationFrames = [];
-    const flushAnimationFrame = () => {
-      const callbacks = animationFrames.splice(0);
-      for (const callback of callbacks) callback();
-    };
     const harness = loadGeneralTabForTest({
       snapshot: makeGeneralSnapshot({ quotaMergeSources: false }),
       settingsAPI: { getQuotaSourceCount: () => sourceCount.promise },
-      requestAnimationFrame: (callback) => {
-        animationFrames.push(callback);
-        return animationFrames.length;
-      },
     });
     harness.renderContent();
-    flushAnimationFrame();
     const group = harness.content.querySelector(".quota-ring-collapsible");
     const header = group.querySelector(".collapsible-group-header");
     const body = group.querySelector(".collapsible-group-body");
+    const bodyInner = body.querySelector(".collapsible-group-body-inner");
     const mergeRow = harness.getSwitchMeta("quotaMergeSources").row;
-    Object.defineProperty(body, "scrollHeight", {
-      configurable: true,
-      get: () => (mergeRow.style.display === "none" ? 80 : 120),
-    });
+    assert.ok(bodyInner, "collapsible groups should wrap children in a Grid inner");
     header.dispatchEvent({ type: "click" });
-    assert.equal(group.classList.contains("expanding"), false);
     assert.equal(group.classList.contains("collapsed"), false);
-    assert.equal(body.style.getPropertyValue("--collapsible-body-height"), "none");
     assert.equal(body.attributes["aria-hidden"], "false");
-    flushAnimationFrame();
 
     sourceCount.resolve(2);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(group.classList.contains("expanding"), false);
-    assert.equal(group.classList.contains("resizing"), true);
-    assert.equal(body.style.getPropertyValue("--collapsible-body-height"), "80px");
     assert.equal(mergeRow.style.display, "");
-
-    flushAnimationFrame();
-    assert.equal(body.style.getPropertyValue("--collapsible-body-height"), "120px");
-
-    body.dispatchEvent({
-      type: "transitionend",
-      propertyName: "max-height",
-      bubbles: false,
-    });
-    assert.equal(group.classList.contains("resizing"), false);
-    assert.equal(body.style.getPropertyValue("--collapsible-body-height"), "none");
+    assert.equal(mergeRow.classList.contains("collapsible-content-enter"), true);
+    assert.equal(body.style.getPropertyValue("--collapsible-body-height"), "");
   });
 
   it("groups sound and volume into one collapsible control with in-place summary updates", () => {
@@ -7276,23 +7258,388 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(harness.content.querySelector(".theme-detail-hero"), null);
   });
 
-  it("animates collapsible Settings groups with measured height instead of instant hidden jumps", () => {
+  it("animates collapsible Settings groups with Grid intrinsic sizing", () => {
     const coreSource = fs.readFileSync(SETTINGS_UI_CORE, "utf8");
     const css = fs.readFileSync(SETTINGS_CSS, "utf8");
-    assert.ok(coreSource.includes("function measureCollapsibleBodyHeight("));
-    assert.ok(coreSource.includes("function preserveScrollAnchor("));
-    assert.ok(coreSource.includes('body.style.setProperty("--collapsible-body-height"'));
-    assert.ok(coreSource.includes("requestAnimationFrame(() => {"));
-    assert.ok(coreSource.includes("collapsing"));
-    assert.ok(coreSource.includes("expanding"));
-    assert.ok(coreSource.includes("function setBodyInteractivity(isCollapsed)"));
-    assert.ok(coreSource.includes('body.setAttribute("aria-hidden"'));
-    assert.ok(coreSource.includes("body.inert = isCollapsed"));
-    assert.ok(!coreSource.includes("body.hidden = collapsed;"));
-    assert.ok(/\.collapsible-group-body\s*\{[\s\S]*max-height:\s*var\(--collapsible-body-height,\s*0px\);/.test(css));
-    assert.ok(/\.collapsible-group-body\s*\{[\s\S]*transition:\s*max-height 0\.22s cubic-bezier\(0\.22,\s*1,\s*0\.36,\s*1\),\s*opacity 0\.16s ease,\s*transform 0\.18s ease,\s*padding 0\.18s ease,\s*border-color 0\.18s ease;/.test(css));
-    assert.ok(/\.collapsible-group\.collapsed\s*>\s*\.collapsible-group-body\s*\{[\s\S]*opacity:\s*0;[\s\S]*transform:\s*translateY\(-4px\);/.test(css));
-    assert.ok(/@media \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*\.collapsible-group-body/.test(css));
+    const groupSource = coreSource.slice(
+      coreSource.indexOf("function buildCollapsibleGroup("),
+      coreSource.indexOf("function attachActivation(")
+    );
+    assert.ok(groupSource.includes("function preserveScrollAnchor("));
+    assert.ok(groupSource.includes("collapsible-group-body-inner"));
+    assert.ok(groupSource.includes("function setBodyInteractivity(isCollapsed,"));
+    assert.ok(groupSource.includes('body.setAttribute("aria-hidden"'));
+    assert.ok(groupSource.includes("body.inert = blocked"));
+    assert.ok(!groupSource.includes("scrollHeight"));
+    assert.ok(!groupSource.includes("animateExpansion"));
+    assert.ok(!groupSource.includes("collapsing"));
+    assert.ok(!groupSource.includes("expanding"));
+    assert.ok(!groupSource.includes("resizing"));
+    assert.ok(groupSource.includes("getComputedStyle(body)"));
+    assert.ok(groupSource.includes("parseCssTimeMs"));
+    assert.ok(/\.collapsible-group-body\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-rows:\s*1fr;/.test(css));
+    assert.ok(/--collapsible-grid-transition-duration:\s*0\.22s;/.test(css));
+    assert.ok(/transition:\s*grid-template-rows\s+var\(--collapsible-grid-transition-duration\)/.test(css));
+    assert.ok(/\.collapsible-group-body-inner\s*\{[\s\S]*min-height:\s*0;[\s\S]*overflow:\s*hidden;/.test(css));
+    assert.ok(/\.collapsible-group\.collapsed\s*>\s*\.collapsible-group-body\s*\{[\s\S]*grid-template-rows:\s*0fr;[\s\S]*opacity:\s*0;[\s\S]*transform:\s*translateY\(-4px\);/.test(css));
+    assert.ok(/\.collapsible-group\.collapsed\s*>\s*\.collapsible-group-body\s*>\s*\.collapsible-group-body-inner\s*\{[\s\S]*padding-top:\s*0;[\s\S]*padding-bottom:\s*0;/.test(css));
+    assert.ok(/\.collapsible-group-body\.collapsible-group-body-interaction-locked\s*\{[\s\S]*pointer-events:\s*none;/.test(css));
+    assert.ok(/\.collapsible-group:not\(\.collapsed\):has\(\.language-picker\.open\)\s*>\s*\.collapsible-group-body\s*>\s*\.collapsible-group-body-inner\s*\{[\s\S]*overflow:\s*visible;/.test(css));
+    assert.ok(/\.collapsible-group:not\(\.collapsed\):has\(\.language-picker\.menu-mounted\)\s*>\s*\.collapsible-group-body\s*>\s*\.collapsible-group-body-inner\s*\{[\s\S]*overflow:\s*visible;/.test(css));
+    assert.ok(/@media \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*\.collapsible-group-body-inner[\s\S]*animation:\s*none;/.test(css));
+  });
+
+  it("keeps an opened language picker interactive inside an expanded collapsible group", () => {
+    const pickerHarness = loadSharedLanguagePickerForTest({
+      options: ["en", "zh", "ja"],
+    });
+    const boundary = pickerHarness.boundary;
+    const body = boundary.parentNode;
+    const localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+    };
+    const document = {
+      body,
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document, localStorage });
+
+    // Move the real picker created by language-picker.js into the shared
+    // collapsible body so both components exercise their actual DOM contract.
+    pickerHarness.picker.remove();
+    const group = core.helpers.buildCollapsibleGroup({
+      id: "test:language-picker-group",
+      title: "Language",
+      defaultCollapsed: true,
+      children: [pickerHarness.picker],
+    });
+    boundary.appendChild(group);
+
+    const groupBody = group.querySelector(".collapsible-group-body");
+    const disclosure = group.querySelector(".collapsible-group-header");
+    assert.strictEqual(groupBody.getAttribute("aria-hidden"), "true");
+    assert.strictEqual(groupBody.getAttribute("inert"), "");
+    assert.strictEqual(pickerHarness.trigger.getAttribute("aria-expanded"), "false");
+
+    disclosure.dispatchEvent(createKeyboardEventForTest("Enter"));
+    assert.strictEqual(groupBody.getAttribute("aria-hidden"), "false");
+    assert.strictEqual(groupBody.getAttribute("inert"), "");
+    assert.strictEqual(groupBody.classList.contains("collapsible-group-body-interaction-locked"), true);
+
+    groupBody.dispatchEvent({
+      type: "transitionend",
+      propertyName: "grid-template-rows",
+      bubbles: false,
+    });
+    assert.strictEqual(groupBody.getAttribute("inert"), undefined);
+    assert.strictEqual(groupBody.classList.contains("collapsible-group-body-interaction-locked"), false);
+
+    pickerHarness.trigger.dispatchEvent({ type: "click", bubbles: false });
+    assert.strictEqual(pickerHarness.picker.classList.contains("open"), true);
+    assert.strictEqual(pickerHarness.trigger.getAttribute("aria-expanded"), "true");
+    assert.strictEqual(pickerHarness.menu.getAttribute("aria-hidden"), "false");
+    assert.strictEqual(groupBody.getAttribute("aria-hidden"), "false");
+    assert.strictEqual(groupBody.getAttribute("inert"), undefined);
+    assert.strictEqual(groupBody.contains(pickerHarness.menu), true);
+  });
+
+  it("drives collapsible groups through keyboard, persistence, inert, nesting, and scroll-anchor behavior", () => {
+    const storageData = {};
+    const localStorage = {
+      getItem: (key) => Object.prototype.hasOwnProperty.call(storageData, key)
+        ? storageData[key]
+        : null,
+      setItem: (key, value) => {
+        storageData[key] = String(value);
+      },
+    };
+    const raf = createQueuedRaf();
+    const body = new FakeElement("body");
+    const content = new FakeElement("main");
+    content.id = "content";
+    content.scrollTop = 200;
+    body.appendChild(content);
+    const document = {
+      body,
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: (id) => (id === "content" ? content : null),
+    };
+    const core = loadSettingsCoreForTest({}, {
+      document,
+      localStorage,
+      requestAnimationFrame: raf.requestAnimationFrame,
+    });
+    const child = new FakeElement("div");
+    child.textContent = "Initial detail";
+    const group = core.helpers.buildCollapsibleGroup({
+      id: "test:behavior",
+      title: "Behavior",
+      disclosureLabel: "Behavior",
+      defaultCollapsed: true,
+      children: [child],
+    });
+    content.appendChild(group);
+    const disclosure = group.querySelector(".collapsible-group-disclosure")
+      || group.querySelector(".collapsible-group-header");
+    const bodyNode = group.querySelector(".collapsible-group-body");
+    const bodyInner = group.querySelector(".collapsible-group-body-inner");
+    disclosure.getBoundingClientRect = () => ({
+      top: group.classList.contains("collapsed") ? 100 : 140,
+    });
+
+    assert.strictEqual(group.classList.contains("collapsed"), true);
+    assert.strictEqual(disclosure.getAttribute("aria-expanded"), "false");
+    assert.strictEqual(bodyNode.getAttribute("aria-hidden"), "true");
+    assert.strictEqual(bodyNode.getAttribute("inert"), "");
+
+    const expandEvent = createKeyboardEventForTest("Enter");
+    disclosure.dispatchEvent(expandEvent);
+    assert.strictEqual(expandEvent.defaultPrevented, true);
+    assert.strictEqual(group.classList.contains("collapsed"), false);
+    assert.strictEqual(disclosure.getAttribute("aria-expanded"), "true");
+    assert.strictEqual(bodyNode.getAttribute("aria-hidden"), "false");
+    assert.strictEqual(bodyNode.getAttribute("inert"), "");
+    assert.strictEqual(bodyNode.classList.contains("collapsible-group-body-interaction-locked"), true);
+    assert.strictEqual(content.scrollTop, 200, "anchor correction waits for the layout frame");
+    raf.flush();
+    assert.strictEqual(content.scrollTop, 240, "expansion preserves the header's scroll anchor");
+    bodyNode.dispatchEvent({
+      type: "transitionend",
+      propertyName: "grid-template-rows",
+      bubbles: false,
+    });
+    assert.strictEqual(bodyNode.getAttribute("inert"), undefined);
+    assert.strictEqual(bodyNode.classList.contains("collapsible-group-body-interaction-locked"), false);
+    assert.deepStrictEqual(JSON.parse(storageData["clawd.settings.collapsedGroups.v1"]), {
+      "test:behavior": false,
+    });
+
+    let asyncClicks = 0;
+    const asyncChild = new FakeElement("button");
+    asyncChild.type = "button";
+    asyncChild.tabIndex = 0;
+    asyncChild.textContent = "Async detail";
+    asyncChild.addEventListener("click", () => {
+      asyncClicks++;
+    });
+    bodyInner.appendChild(asyncChild);
+    assert.strictEqual(bodyInner.contains(asyncChild), true);
+    assert.strictEqual(asyncChild.disabled, false);
+    assert.strictEqual(asyncChild.tabIndex, 0);
+    asyncChild.dispatchEvent({ type: "click", bubbles: false });
+    assert.strictEqual(asyncClicks, 1, "async content remains interactive while expanded");
+
+    const collapseEvent = createKeyboardEventForTest(" ");
+    disclosure.dispatchEvent(collapseEvent);
+    assert.strictEqual(collapseEvent.defaultPrevented, true);
+    assert.strictEqual(group.classList.contains("collapsed"), true);
+    assert.strictEqual(bodyNode.getAttribute("inert"), "");
+    assert.strictEqual(bodyNode.classList.contains("collapsible-group-body-interaction-locked"), true);
+    bodyNode.dispatchEvent({
+      type: "transitionend",
+      propertyName: "grid-template-rows",
+      bubbles: false,
+    });
+    assert.strictEqual(bodyNode.classList.contains("collapsible-group-body-interaction-locked"), false);
+    raf.flush();
+
+    const inner = core.helpers.buildCollapsibleGroup({
+      id: "test:inner",
+      title: "Inner",
+      defaultCollapsed: true,
+      children: [new FakeElement("div")],
+    });
+    const outer = core.helpers.buildCollapsibleGroup({
+      id: "test:outer",
+      title: "Outer",
+      children: [inner],
+    });
+    content.appendChild(outer);
+    const outerDisclosure = outer.querySelector(".collapsible-group-header");
+    const innerDisclosure = inner.querySelector(".collapsible-group-header");
+    assert.strictEqual(outer.classList.contains("collapsed"), false);
+    assert.strictEqual(inner.classList.contains("collapsed"), true);
+
+    innerDisclosure.dispatchEvent({ type: "click" });
+    assert.strictEqual(inner.classList.contains("collapsed"), false);
+    assert.strictEqual(outer.classList.contains("collapsed"), false,
+      "opening the inner group must not toggle its expanded parent");
+    inner.querySelector(".collapsible-group-body").dispatchEvent({
+      type: "transitionend",
+      propertyName: "grid-template-rows",
+      bubbles: false,
+    });
+
+    outerDisclosure.dispatchEvent({ type: "click" });
+    assert.strictEqual(outer.classList.contains("collapsed"), true);
+    assert.strictEqual(inner.classList.contains("collapsed"), false);
+    assert.strictEqual(innerDisclosure.getAttribute("aria-expanded"), "true");
+    outer.querySelector(".collapsible-group-body").dispatchEvent({
+      type: "transitionend",
+      propertyName: "grid-template-rows",
+      bubbles: false,
+    });
+
+    innerDisclosure.dispatchEvent({ type: "click" });
+    assert.strictEqual(inner.classList.contains("collapsed"), true);
+    assert.strictEqual(outer.classList.contains("collapsed"), true,
+      "toggling the inner group must not toggle its collapsed parent");
+    inner.querySelector(".collapsible-group-body").dispatchEvent({
+      type: "transitionend",
+      propertyName: "grid-template-rows",
+      bubbles: false,
+    });
+
+    const reducedMotionBody = new FakeElement("body");
+    const reducedMotionContent = new FakeElement("main");
+    reducedMotionContent.id = "content";
+    reducedMotionBody.appendChild(reducedMotionContent);
+    const reducedMotionCore = loadSettingsCoreForTest({}, {
+      document: {
+        body: reducedMotionBody,
+        createElement: (tagName) => new FakeElement(tagName),
+        getElementById: (id) => (id === "content" ? reducedMotionContent : null),
+      },
+      localStorage: {
+        getItem: () => null,
+        setItem: () => {},
+      },
+      matchMedia: () => ({ matches: true }),
+    });
+    const reducedMotionGroup = reducedMotionCore.helpers.buildCollapsibleGroup({
+      id: "test:reduced-motion",
+      title: "Reduced motion",
+      defaultCollapsed: true,
+      children: [new FakeElement("button")],
+    });
+    reducedMotionContent.appendChild(reducedMotionGroup);
+    const reducedMotionDisclosure = reducedMotionGroup.querySelector(".collapsible-group-header");
+    const reducedMotionBodyNode = reducedMotionGroup.querySelector(".collapsible-group-body");
+    reducedMotionDisclosure.dispatchEvent({ type: "click" });
+    assert.strictEqual(reducedMotionBodyNode.getAttribute("inert"), undefined);
+    assert.strictEqual(reducedMotionBodyNode.classList.contains("collapsible-group-body-interaction-locked"), false);
+
+    const restoredBody = new FakeElement("body");
+    const restoredContent = new FakeElement("main");
+    restoredContent.id = "content";
+    restoredBody.appendChild(restoredContent);
+    const restoredCore = loadSettingsCoreForTest({}, {
+      document: {
+        body: restoredBody,
+        createElement: (tagName) => new FakeElement(tagName),
+        getElementById: (id) => (id === "content" ? restoredContent : null),
+      },
+      localStorage,
+    });
+    const restored = restoredCore.helpers.buildCollapsibleGroup({
+      id: "test:behavior",
+      title: "Behavior",
+      defaultCollapsed: true,
+      children: [new FakeElement("div")],
+    });
+    restoredContent.appendChild(restored);
+    assert.strictEqual(restored.classList.contains("collapsed"), true,
+      "the later collapse should be persisted for a new renderer instance");
+    assert.strictEqual(restored.querySelector(".collapsible-group-body").getAttribute("inert"), "");
+  });
+
+  it("does not leave collapsible content locked across cancelled or missing transitions", () => {
+    const timers = [];
+    const cssTransitionDuration = fs.readFileSync(SETTINGS_CSS, "utf8")
+      .match(/--collapsible-grid-transition-duration:\s*([^;]+);/)[1]
+      .trim();
+    const cssTransitionDurationMs = cssTransitionDuration.endsWith("ms")
+      ? Number.parseFloat(cssTransitionDuration)
+      : Number.parseFloat(cssTransitionDuration) * 1000;
+    const timerApi = {
+      setTimeout(callback, ms) {
+        timers.push({ callback, ms, cleared: false });
+        return timers.length;
+      },
+      clearTimeout(id) {
+        if (timers[id - 1]) timers[id - 1].cleared = true;
+      },
+    };
+    const body = new FakeElement("body");
+    const content = new FakeElement("main");
+    content.id = "content";
+    body.appendChild(content);
+    const document = {
+      body,
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: (id) => (id === "content" ? content : null),
+    };
+    let reducedMotion = false;
+    const core = loadSettingsCoreForTest({}, {
+      document,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      matchMedia: () => ({ matches: reducedMotion }),
+      setTimeout: timerApi.setTimeout,
+      clearTimeout: timerApi.clearTimeout,
+      getComputedStyle: () => ({
+        getPropertyValue: (name) => name === "--collapsible-grid-transition-duration"
+          ? cssTransitionDuration
+          : "",
+      }),
+    });
+    const group = core.helpers.buildCollapsibleGroup({
+      id: "test:transition-watch",
+      title: "Transition watch",
+      defaultCollapsed: true,
+      children: [new FakeElement("button")],
+    });
+    content.appendChild(group);
+    const disclosure = group.querySelector(".collapsible-group-header");
+    const bodyNode = group.querySelector(".collapsible-group-body");
+
+    disclosure.dispatchEvent({ type: "click" });
+    assert.strictEqual(bodyNode.getAttribute("inert"), "");
+    assert.strictEqual(timers.length, 1);
+    assert.ok(timers[0].ms > cssTransitionDurationMs,
+      "the fallback must outlast the CSS grid transition");
+    const firstTransitionEnd = bodyNode.eventListeners.transitionend[0];
+
+    // A rapid reverse invalidates the old callback and keeps the new target locked.
+    disclosure.dispatchEvent({ type: "click" });
+    assert.strictEqual(group.classList.contains("collapsed"), true);
+    assert.strictEqual(bodyNode.getAttribute("inert"), "");
+    firstTransitionEnd({ target: bodyNode, propertyName: "grid-template-rows" });
+    assert.strictEqual(bodyNode.getAttribute("inert"), "");
+    assert.strictEqual(timers.length, 2);
+    assert.strictEqual(timers[0].cleared, true, "reversing the transition clears the stale fallback");
+
+    // transitioncancel does not unlock a normal-motion transition immediately;
+    // the generation's fallback still owns the final unlock.
+    bodyNode.dispatchEvent({
+      type: "transitioncancel",
+      propertyName: "grid-template-rows",
+      bubbles: false,
+    });
+    assert.strictEqual(bodyNode.getAttribute("inert"), "");
+    assert.strictEqual(timers[1].cleared, true, "cancelling the transition replaces its fallback");
+    const cancelFallback = timers.find((timer) => !timer.cleared);
+    assert.ok(cancelFallback, "a cancelled normal-motion transition keeps a live fallback");
+    cancelFallback.callback();
+    assert.strictEqual(bodyNode.getAttribute("inert"), "", "collapsed content remains inert after its fallback settles");
+    assert.strictEqual(bodyNode.classList.contains("collapsible-group-body-interaction-locked"), false);
+
+    // If reduced motion changes while a transition is active, cancel settles
+    // immediately even when no transitionend event can be emitted.
+    reducedMotion = false;
+    disclosure.dispatchEvent({ type: "click" });
+    assert.strictEqual(bodyNode.getAttribute("inert"), "");
+    reducedMotion = true;
+    bodyNode.dispatchEvent({
+      type: "transitioncancel",
+      propertyName: "grid-template-rows",
+      bubbles: false,
+    });
+    assert.strictEqual(bodyNode.getAttribute("inert"), undefined);
+    assert.strictEqual(bodyNode.classList.contains("collapsible-group-body-interaction-locked"), false);
+    assert.strictEqual(timers.every((timer) => timer.cleared), true,
+      "reduced-motion cancellation clears the active fallback");
   });
 
   it("collapses only the detailed bubble policy controls while keeping primary bubble rows visible", () => {
@@ -8841,10 +9188,14 @@ describe("settings renderer browser environment", () => {
     harness.core.ops.requestRender({ content: true });
     const expandedBody = harness.content.querySelector(".collapsible-group-body");
     assert.ok(expandedBody, "agent group body should render");
-    assert.notStrictEqual(
+    assert.ok(
+      expandedBody.querySelector(".collapsible-group-body-inner"),
+      "expanded groups should render children inside the intrinsic Grid track"
+    );
+    assert.equal(
       expandedBody.style.getPropertyValue("--collapsible-body-height"),
-      "0px",
-      "expanded groups should not paint one frame at 0px height before the next animation frame runs"
+      "",
+      "expanded groups should not pin a measured body height"
     );
   });
 

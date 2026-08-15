@@ -47,6 +47,10 @@
   const COLLAPSED_GROUPS_STORAGE_KEY = "clawd.settings.collapsedGroups.v1";
   const NAVIGATION_STORAGE_KEY = "clawd.settings.navigation.v1";
   const MAX_PERSISTED_SCROLL_TOP = 10_000_000;
+  // Keep the watchdog tied to the CSS transition rather than duplicating its
+  // duration here. The buffer only covers a transitionend event that is
+  // dropped by Chromium during a rapid state change.
+  const COLLAPSIBLE_TRANSITION_FALLBACK_BUFFER_MS = 80;
   // Runtime-only geometry belongs in the snapshot for consistency, but has no
   // mounted Settings control. Re-rendering for it would destroy focused inputs
   // and reset the active tab's scroll position after every window move/resize.
@@ -559,7 +563,6 @@
     children = [],
     defaultCollapsed = false,
     className = "",
-    animateExpansion = true,
   }) {
     const storedState = readCollapsedGroupState();
     let collapsed = Object.prototype.hasOwnProperty.call(storedState, id)
@@ -622,63 +625,105 @@
 
     const body = document.createElement("div");
     body.className = "collapsible-group-body";
-    for (const child of children) body.appendChild(child);
+    const bodyInner = document.createElement("div");
+    bodyInner.className = "collapsible-group-body-inner";
+    for (const child of children) bodyInner.appendChild(child);
+    body.appendChild(bodyInner);
 
-    function measureCollapsibleBodyHeight() {
-      return `${body.scrollHeight}px`;
+    let interactionLocked = false;
+    let interactionTransitionGeneration = 0;
+    let interactionUnlockTimer = null;
+    let interactionTransitionCleanup = null;
+
+    function prefersReducedMotion() {
+      return typeof root.matchMedia === "function"
+        && root.matchMedia("(prefers-reduced-motion: reduce)").matches;
     }
 
-    function setExpandedBodyHeight() {
-      body.style.setProperty("--collapsible-body-height", measureCollapsibleBodyHeight());
+    function parseCssTimeMs(value) {
+      const match = String(value || "").trim().match(/^([\d.]+)(ms|s)$/i);
+      if (!match) return null;
+      const amount = Number(match[1]);
+      if (!Number.isFinite(amount)) return null;
+      return match[2].toLowerCase() === "s" ? amount * 1000 : amount;
     }
 
-    function refreshCollapsibleHeight() {
-      if (collapsed || !group.classList.contains("expanding")) return;
-      requestAnimationFrame(() => {
-        if (!collapsed && group.classList.contains("expanding")) setExpandedBodyHeight();
-      });
-    }
-
-    function mutateCollapsibleBody(mutate) {
-      if (typeof mutate !== "function") return;
-      if (collapsed || group.classList.contains("collapsing")) {
-        mutate();
-        return;
+    function getInteractionFallbackMs() {
+      if (typeof root.getComputedStyle === "function") {
+        const computedStyle = root.getComputedStyle(body);
+        const duration = computedStyle && typeof computedStyle.getPropertyValue === "function"
+          ? parseCssTimeMs(computedStyle.getPropertyValue("--collapsible-grid-transition-duration"))
+          : null;
+        if (duration !== null) return duration + COLLAPSIBLE_TRANSITION_FALLBACK_BUFFER_MS;
       }
-      if (group.classList.contains("expanding")) {
-        mutate();
-        refreshCollapsibleHeight();
-        return;
-      }
-
-      const beforeHeight = body.scrollHeight;
-      mutate();
-      const afterHeight = body.scrollHeight;
-      const prefersReducedMotion = typeof window.matchMedia === "function"
-        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (beforeHeight === afterHeight || prefersReducedMotion) return;
-
-      // The settled-open body normally uses max-height:none so reflow can grow
-      // freely. Pin its pre-mutation height for one frame, then animate to the
-      // new measured height instead of letting async rows cause a layout jump.
-      body.style.setProperty("--collapsible-body-height", `${beforeHeight}px`);
-      group.classList.add("resizing");
-      void body.offsetHeight;
-      requestAnimationFrame(() => {
-        if (collapsed || !group.classList.contains("resizing")) return;
-        body.style.setProperty("--collapsible-body-height", `${afterHeight}px`);
-      });
+      return COLLAPSIBLE_TRANSITION_FALLBACK_BUFFER_MS;
     }
 
-    function setBodyInteractivity(isCollapsed) {
+    function setBodyInteractivity(isCollapsed, { locked = false } = {}) {
+      const blocked = isCollapsed || locked;
       body.setAttribute("aria-hidden", isCollapsed ? "true" : "false");
       if ("inert" in body) {
-        body.inert = isCollapsed;
-      } else if (isCollapsed) {
+        body.inert = blocked;
+      } else if (blocked) {
         body.setAttribute("inert", "");
       } else {
         body.removeAttribute("inert");
       }
+      body.classList.toggle("collapsible-group-body-interaction-locked", locked);
+    }
+
+    function clearInteractionTransitionWatch() {
+      if (interactionUnlockTimer !== null && typeof root.clearTimeout === "function") {
+        root.clearTimeout(interactionUnlockTimer);
+      }
+      interactionUnlockTimer = null;
+      if (interactionTransitionCleanup) {
+        interactionTransitionCleanup();
+        interactionTransitionCleanup = null;
+      }
+    }
+
+    function invalidateInteractionTransition() {
+      interactionTransitionGeneration += 1;
+      clearInteractionTransitionWatch();
+    }
+
+    function finishBodyTransition(generation) {
+      if (generation !== interactionTransitionGeneration || !interactionLocked) return;
+      clearInteractionTransitionWatch();
+      interactionLocked = false;
+      setBodyInteractivity(collapsed);
+    }
+
+    function scheduleInteractionFallback(generation) {
+      if (typeof root.setTimeout !== "function") return;
+      if (interactionUnlockTimer !== null && typeof root.clearTimeout === "function") {
+        root.clearTimeout(interactionUnlockTimer);
+      }
+      interactionUnlockTimer = root.setTimeout(() => {
+        finishBodyTransition(generation);
+      }, getInteractionFallbackMs());
+    }
+
+    function watchBodyTransition() {
+      const generation = interactionTransitionGeneration;
+      const onTransitionEnd = (ev) => {
+        if (ev.target !== body || ev.propertyName !== "grid-template-rows") return;
+        finishBodyTransition(generation);
+      };
+      const onTransitionCancel = (ev) => {
+        if (ev.target !== body || ev.propertyName !== "grid-template-rows") return;
+        if (generation !== interactionTransitionGeneration || !interactionLocked) return;
+        if (prefersReducedMotion()) finishBodyTransition(generation);
+        else scheduleInteractionFallback(generation);
+      };
+      body.addEventListener("transitionend", onTransitionEnd);
+      body.addEventListener("transitioncancel", onTransitionCancel);
+      interactionTransitionCleanup = () => {
+        body.removeEventListener("transitionend", onTransitionEnd);
+        body.removeEventListener("transitioncancel", onTransitionCancel);
+      };
+      scheduleInteractionFallback(generation);
     }
 
     function preserveScrollAnchor(invoke) {
@@ -699,43 +744,14 @@
     }
 
     function applyCollapsedState({ animate = false } = {}) {
+      invalidateInteractionTransition();
       disclosure.setAttribute("aria-expanded", collapsed ? "false" : "true");
       const actionLabel = collapsed ? t("collapsibleExpand") : t("collapsibleCollapse");
       disclosure.setAttribute("aria-label", disclosureLabel ? `${actionLabel}: ${disclosureLabel}` : actionLabel);
-      group.classList.remove("expanding", "collapsing", "resizing");
-      if (!animate) {
-        group.classList.toggle("collapsed", collapsed);
-        setBodyInteractivity(collapsed);
-        if (collapsed) {
-          body.style.setProperty("--collapsible-body-height", "0px");
-        } else {
-          // Settled-open groups must NOT keep a pinned max-height: text zoom
-          // or window-width changes rewrap descriptions and grow the content,
-          // and a stale pinned height clips the bottom rows (overflow:
-          // hidden). A measured height is only needed while animating.
-          body.style.setProperty("--collapsible-body-height", "none");
-        }
-        return;
-      }
-
-      if (collapsed) {
-        group.classList.add("collapsing");
-        setBodyInteractivity(true);
-        setExpandedBodyHeight();
-        requestAnimationFrame(() => {
-          group.classList.add("collapsed");
-          body.style.setProperty("--collapsible-body-height", "0px");
-        });
-        return;
-      }
-
-      group.classList.add("expanding", "collapsed");
-      setBodyInteractivity(false);
-      body.style.setProperty("--collapsible-body-height", "0px");
-      requestAnimationFrame(() => {
-        group.classList.remove("collapsed");
-        setExpandedBodyHeight();
-      });
+      group.classList.toggle("collapsed", collapsed);
+      interactionLocked = animate && !prefersReducedMotion();
+      setBodyInteractivity(collapsed, { locked: interactionLocked });
+      if (interactionLocked) watchBodyTransition();
     }
 
     function toggleCollapsed() {
@@ -743,7 +759,7 @@
       const nextState = readCollapsedGroupState();
       nextState[id] = collapsed;
       writeCollapsedGroupState(nextState);
-      preserveScrollAnchor(() => applyCollapsedState({ animate: animateExpansion }));
+      preserveScrollAnchor(() => applyCollapsedState({ animate: true }));
     }
 
     disclosure.addEventListener("click", toggleCollapsed);
@@ -756,19 +772,7 @@
 
     group.appendChild(header);
     group.appendChild(body);
-    body.addEventListener("transitionend", (ev) => {
-      if (ev.target !== body || ev.propertyName !== "max-height") return;
-      group.classList.remove("expanding", "collapsing", "resizing");
-      // Release the pinned height once settled so later reflows (text zoom,
-      // window resize) can grow the body instead of clipping at the bottom.
-      if (!collapsed) body.style.setProperty("--collapsible-body-height", "none");
-    });
-    applyCollapsedState();
-    requestAnimationFrame(() => {
-      if (!collapsed) body.style.setProperty("--collapsible-body-height", "none");
-    });
-    group.refreshCollapsibleHeight = refreshCollapsibleHeight;
-    group.mutateCollapsibleBody = mutateCollapsibleBody;
+    applyCollapsedState({ animate: false });
     return group;
   }
 
