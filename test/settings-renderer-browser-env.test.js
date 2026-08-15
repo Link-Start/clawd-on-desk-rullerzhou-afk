@@ -402,6 +402,10 @@ class FakeElement {
   }
 }
 
+function loadSharedButtonHelpersForTest(document, settingsAPI = {}) {
+  return loadSettingsCoreForTest(settingsAPI, { document }).helpers;
+}
+
 function loadSharedLanguagePickerForTest({
   value = "en",
   options = ["en", "zh", "ja"],
@@ -831,6 +835,7 @@ function createKeyboardEventForTest(key) {
 function loadRemoteSshTabForTest({
   snapshot,
   cleanup = () => Promise.resolve({ status: "ok", uninstalled: true }),
+  deploy = () => Promise.resolve({ status: "ok" }),
   command = () => Promise.resolve({ status: "ok" }),
   confirm = () => true,
   listStatuses = null,
@@ -869,7 +874,7 @@ function loadRemoteSshTabForTest({
     disconnect: () => Promise.resolve({ status: "ok" }),
     authenticate: () => Promise.resolve({ status: "ok" }),
     openTerminal: () => Promise.resolve({ status: "ok" }),
-    deploy: () => Promise.resolve({ status: "ok" }),
+    deploy: (profileId, options) => deploy(profileId, options),
   };
   if (typeof listStatuses === "function") remoteSsh.listStatuses = listStatuses;
   const context = {
@@ -1112,6 +1117,7 @@ function loadAgentsTabForTest({
   collapsedGroups = {},
   settingsAPI = {},
   doctor = null,
+  confirm = () => true,
 } = {}) {
   const raf = createQueuedRaf();
   const body = new FakeElement("body");
@@ -1144,6 +1150,7 @@ function loadAgentsTabForTest({
     document,
     requestAnimationFrame: (cb) => raf.requestAnimationFrame(cb),
     setTimeout,
+    confirm,
     window: null,
     globalThis: null,
     settingsAPI: {
@@ -1430,6 +1437,7 @@ function loadTelegramApprovalTabForTest({
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(LANGUAGE_PICKER_JS, "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-tab-telegram-approval.js"), "utf8"), context);
+  const buttonHelpers = loadSharedButtonHelpersForTest(document, api);
 
   const core = {
     state: {
@@ -1454,6 +1462,8 @@ function loadTelegramApprovalTabForTest({
     runtime: {},
     helpers: {
       t: (key) => key,
+      buildButton: buttonHelpers.buildButton,
+      setButtonState: buttonHelpers.setButtonState,
       showSettingsConfirmModal: showConfirmModal,
       buildSection: (_title, rows) => {
         const section = document.createElement("section");
@@ -1619,6 +1629,7 @@ function loadDiscordPresenceTabForTest({ snapshot, update } = {}) {
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(SETTINGS_TAB_DISCORD_PRESENCE, "utf8"), context);
+  const buttonHelpers = loadSharedButtonHelpersForTest(document, settingsAPI);
 
   const core = {
     state: {
@@ -1634,6 +1645,8 @@ function loadDiscordPresenceTabForTest({ snapshot, update } = {}) {
     },
     helpers: {
       t: (key) => key,
+      buildButton: buttonHelpers.buildButton,
+      setButtonState: buttonHelpers.setButtonState,
       buildSection: (_title, rows) => {
         const section = document.createElement("section");
         for (const row of rows) section.appendChild(row);
@@ -1715,6 +1728,7 @@ function loadAboutTabForTest({
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-tab-about.js"), "utf8"), context);
+  const buttonHelpers = loadSharedButtonHelpersForTest(document, context.settingsAPI);
 
   const core = {
     state: {
@@ -1725,6 +1739,8 @@ function loadAboutTabForTest({
     runtime: { about: { infoCache: null, clickCount: 0, updateCheckSnapshot: { state: "idle" } } },
     helpers: {
       t: (key) => key,
+      buildButton: buttonHelpers.buildButton,
+      setButtonState: buttonHelpers.setButtonState,
       setSwitchVisual: (element, checked, options = {}) => {
         element.classList.toggle("on", !!checked);
         element.classList.toggle("pending", !!options.pending);
@@ -2189,11 +2205,15 @@ describe("settings renderer browser environment", () => {
     const pendingDelete = harness.content.querySelector(".remote-ssh-btn-danger");
     assert.notStrictEqual(pendingDelete, originalDelete, "starting cleanup rebuilds the detail view");
     assert.strictEqual(pendingDelete.disabled, true);
+    assert.strictEqual(pendingDelete.classList.contains("pending"), true);
+    assert.strictEqual(pendingDelete.getAttribute("aria-busy"), "true");
 
     harness.emitStatus({ profileId: profile.id, status: "idle" });
     const afterStatusRerender = harness.content.querySelector(".remote-ssh-btn-danger");
     assert.notStrictEqual(afterStatusRerender, pendingDelete);
     assert.strictEqual(afterStatusRerender.disabled, true, "runtime status repaint preserves pending state");
+    assert.strictEqual(afterStatusRerender.classList.contains("pending"), true);
+    assert.strictEqual(afterStatusRerender.getAttribute("aria-busy"), "true");
 
     // FakeElement permits dispatching a disabled button, unlike the browser.
     // The handler guard must still prevent duplicate destructive IPC work.
@@ -2205,6 +2225,43 @@ describe("settings renderer browser environment", () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepStrictEqual(harness.commandCalls, [{ action: "remoteSsh.delete", payload: profile.id }]);
     assert.strictEqual(harness.content.querySelector(".remote-ssh-detail"), null);
+  });
+
+  it("exposes Remote SSH deployment as a pending shared action and clears it after failure", async () => {
+    const deployDeferred = createDeferred();
+    const profile = {
+      id: "remote-deploy",
+      label: "Deploy host",
+      host: "deploy.example.com",
+      remoteForwardPort: 23335,
+      lastDeployedAt: Date.now(),
+    };
+    const harness = loadRemoteSshTabForTest({
+      snapshot: { lang: "en", remoteSsh: { profiles: [profile] } },
+      deploy: () => deployDeferred.promise,
+    });
+
+    harness.content.querySelector(".remote-ssh-card").dispatchEvent({ type: "click" });
+    const deployButton = harness.content.querySelectorAll("button")
+      .find((button) => button.textContent === "Deploy / Repair Hooks");
+    assert.ok(deployButton);
+
+    deployButton.dispatchEvent({ type: "click" });
+    const pendingButton = harness.content.querySelectorAll("button")
+      .find((button) => button.textContent === "Deploying…");
+    assert.ok(pendingButton, "deployment rerender should keep the action mounted");
+    assert.strictEqual(pendingButton.disabled, true);
+    assert.strictEqual(pendingButton.classList.contains("pending"), true);
+    assert.strictEqual(pendingButton.getAttribute("aria-busy"), "true");
+
+    deployDeferred.resolve({ status: "error", message: "deploy failed" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const recoveredButton = harness.content.querySelectorAll("button")
+      .find((button) => button.textContent === "Deploy / Repair Hooks");
+    assert.ok(recoveredButton);
+    assert.strictEqual(recoveredButton.disabled, false);
+    assert.strictEqual(recoveredButton.classList.contains("pending"), false);
+    assert.strictEqual(recoveredButton.getAttribute("aria-busy"), "false");
   });
 
   it("re-enables remote profile deletion when incomplete cleanup is kept for retry", async () => {
@@ -5049,6 +5106,53 @@ describe("settings renderer browser environment", () => {
     assert.equal(button.getAttribute("aria-label"), "Delete profile");
   });
 
+  it("updates shared button state without losing business disabled state", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const button = core.helpers.buildButton({
+      label: "Install",
+      disabled: true,
+    });
+
+    assert.equal(button.textContent, "Install");
+    assert.equal(button.disabled, true);
+
+    core.helpers.setButtonState(button, { pending: true, label: "Installing" });
+    assert.equal(button.disabled, true);
+    assert.equal(button.classList.contains("pending"), true);
+    assert.equal(button.getAttribute("aria-busy"), "true");
+    assert.equal(button.textContent, "Installing");
+
+    core.helpers.setButtonState(button, { pending: false, disabled: false });
+    assert.equal(button.disabled, false);
+    assert.equal(button.classList.contains("pending"), false);
+    assert.equal(button.getAttribute("aria-busy"), "false");
+  });
+
+  it("rejects state updates for buttons outside the shared primitive", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const rawButton = document.createElement("button");
+    rawButton.textContent = "Specialized";
+
+    assert.throws(
+      () => core.helpers.setButtonState(rawButton, { pending: true, label: "Changed" }),
+      /requires a button built by buildButton/
+    );
+    assert.equal(rawButton.textContent, "Specialized");
+    assert.equal(rawButton.disabled, false);
+    assert.equal(rawButton.classList.contains("pending"), false);
+    assert.equal(rawButton.getAttribute("aria-busy"), undefined);
+  });
+
   it("uses the shared Settings dialog shell with ARIA links and focus restoration", async () => {
     const body = new FakeElement("body");
     const modalRoot = new FakeElement("div");
@@ -5086,8 +5190,13 @@ describe("settings renderer browser environment", () => {
     assert.equal(icon.children[0].tagName, "SVG");
     assert.equal(icon.children[0].getAttribute("viewBox"), "0 0 20 20");
     assert.equal(icon.children[0].children[0].getAttribute("d"), "M10 4.2v7.4m0 3.1v.1");
+    const dialogButtons = dialog.querySelectorAll("button");
+    assert.equal(dialogButtons.length, 2);
+    assert.ok(dialogButtons.every((button) => button.classList.contains("settings-button")));
+    assert.ok(dialogButtons.every((button) => button.classList.contains("settings-button-large")));
+    assert.equal(dialogButtons[1].classList.contains("danger"), true);
     assert.equal(listeners.has("keydown"), true);
-    dialog.querySelectorAll("button")[1].dispatchEvent({ type: "click" });
+    dialogButtons[1].dispatchEvent({ type: "click" });
 
     assert.equal(await resultPromise, "remove");
     assert.equal(modalRoot.children.length, 0);
@@ -5912,6 +6021,33 @@ describe("settings renderer browser environment", () => {
       assert.strictEqual(matchCount, SUPPORTED_LANGS.length,
         `${key} should appear in all ${SUPPORTED_LANGS.length} supported language tables (saw ${matchCount})`);
     }
+  });
+
+  it("integrates the General reset action with shared pending state and failure recovery", async () => {
+    const commandDeferred = createDeferred();
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot(),
+      settingsAPI: {
+        command: () => commandDeferred.promise,
+      },
+    });
+    harness.renderContent();
+
+    const button = harness.content.querySelector(".session-cleanup-reset-row button");
+    assert.ok(button);
+    assert.ok(button.classList.contains("settings-button"));
+    assert.strictEqual(button.disabled, false);
+
+    button.dispatchEvent({ type: "click", bubbles: false });
+    assert.strictEqual(button.disabled, true);
+    assert.strictEqual(button.classList.contains("pending"), true);
+    assert.strictEqual(button.getAttribute("aria-busy"), "true");
+
+    commandDeferred.resolve({ status: "error", message: "reset failed" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(button.disabled, false);
+    assert.strictEqual(button.classList.contains("pending"), false);
+    assert.strictEqual(button.getAttribute("aria-busy"), "false");
   });
 
   it("uses collapsible option lists for Session HUD and sound controls", () => {
@@ -8397,6 +8533,61 @@ describe("settings renderer browser environment", () => {
     assert.ok(!agentsSource.includes("if (disabled || btn.classList.contains(\"active\")) return;"));
     assert.ok(agentsSource.includes("if (btn.disabled || btn.classList.contains(\"active\")) return;"));
     assert.ok(!agentsSource.includes("codex-permission-mode-transitioning"));
+  });
+
+  it("integrates Agent install and uninstall actions with pending and confirmation", async () => {
+    const installDeferred = createDeferred();
+    const installHarness = loadAgentsTabForTest({
+      snapshot: {
+        agents: {
+          "qwen-code": { integrationInstalled: false, enabled: false },
+        },
+      },
+      agentMetadata: [{ id: "qwen-code", name: "Qwen Code", eventSource: "hook", capabilities: {} }],
+      settingsAPI: {
+        command: () => installDeferred.promise,
+      },
+    });
+    installHarness.core.ops.requestRender({ content: true });
+
+    const installButton = installHarness.content.querySelector(".agent-integration-action");
+    assert.ok(installButton);
+    assert.ok(installButton.classList.contains("settings-button"));
+    assert.strictEqual(installButton.textContent, "Install");
+    installButton.dispatchEvent({ type: "click", bubbles: false });
+    assert.strictEqual(installButton.disabled, true);
+    assert.strictEqual(installButton.classList.contains("pending"), true);
+    assert.strictEqual(installButton.getAttribute("aria-busy"), "true");
+
+    installDeferred.resolve({ status: "error", message: "install failed" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(installButton.disabled, false);
+    assert.strictEqual(installButton.classList.contains("pending"), false);
+    assert.strictEqual(installButton.getAttribute("aria-busy"), "false");
+    assert.strictEqual(installButton.textContent, "Install");
+
+    const uninstallCalls = [];
+    const uninstallHarness = loadAgentsTabForTest({
+      snapshot: {
+        agents: {
+          "qwen-code": { integrationInstalled: true, enabled: true },
+        },
+      },
+      agentMetadata: [{ id: "qwen-code", name: "Qwen Code", eventSource: "hook", capabilities: {} }],
+      confirm: () => false,
+      settingsAPI: {
+        command: (...args) => {
+          uninstallCalls.push(args);
+          return Promise.resolve({ status: "ok" });
+        },
+      },
+    });
+    uninstallHarness.core.ops.requestRender({ content: true });
+    const uninstallButton = uninstallHarness.content.querySelector(".agent-integration-action");
+    assert.ok(uninstallButton);
+    uninstallButton.dispatchEvent({ type: "click", bubbles: false });
+    assert.deepStrictEqual(uninstallCalls, []);
+    assert.strictEqual(uninstallButton.classList.contains("pending"), false);
   });
 
   it("confirms before uninstalling an agent integration", () => {

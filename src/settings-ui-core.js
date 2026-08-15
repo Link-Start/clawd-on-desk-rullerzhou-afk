@@ -98,6 +98,11 @@
     nextTransientUiSeq: 1,
   };
 
+  // Button state is kept separate from the native `disabled` property so a
+  // pending operation can be cleared without losing a business-level disable
+  // decision supplied by the feature tab.
+  const settingsButtonStates = new WeakMap();
+
   const runtime = {
     agentMetadata: null,
     agentInstallationHints: null,
@@ -366,9 +371,43 @@
     return section;
   }
 
+  function applyButtonState(button, buttonState) {
+    button.textContent = buttonState.label;
+    button.disabled = buttonState.disabled || buttonState.pending;
+    button.classList.toggle("pending", buttonState.pending);
+    button.setAttribute("aria-busy", buttonState.pending ? "true" : "false");
+  }
+
   // Shared Settings button primitive. Feature tabs keep ownership of business
   // behavior while tone, sizing and pending/accessibility semantics stay
-  // consistent across the Settings window.
+  // consistent across the Settings window. `setButtonState` is intentionally
+  // small: it updates presentation state without moving business logic into
+  // this shared layer.
+  function setButtonState(button, patch = {}) {
+    if (!button || typeof button !== "object") return button;
+    const current = settingsButtonStates.get(button);
+    if (!current) {
+      throw new TypeError("setButtonState requires a button built by buildButton");
+    }
+    const next = { ...current };
+    if (Object.prototype.hasOwnProperty.call(patch, "label")) {
+      next.label = patch.label == null ? "" : String(patch.label);
+      next.labelKey = null;
+    } else if (Object.prototype.hasOwnProperty.call(patch, "labelKey")) {
+      next.labelKey = patch.labelKey == null ? null : String(patch.labelKey);
+      next.label = next.labelKey ? t(next.labelKey) : "";
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "disabled")) {
+      next.disabled = patch.disabled === true;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "pending")) {
+      next.pending = patch.pending === true;
+    }
+    settingsButtonStates.set(button, next);
+    applyButtonState(button, next);
+    return button;
+  }
+
   function buildButton(config = {}) {
     const button = document.createElement("button");
     const tone = ["neutral", "accent", "danger", "quiet"].includes(config.tone)
@@ -385,15 +424,19 @@
       tone === "neutral" ? "" : tone,
       config.className || "",
     ].filter(Boolean).join(" ");
-    button.textContent = config.label != null
-      ? String(config.label)
-      : (config.labelKey ? t(config.labelKey) : "");
+    const buttonState = {
+      disabled: config.disabled === true,
+      pending: config.pending === true,
+      label: config.label != null
+        ? String(config.label)
+        : (config.labelKey ? t(config.labelKey) : ""),
+      labelKey: config.labelKey ? String(config.labelKey) : null,
+    };
+    settingsButtonStates.set(button, buttonState);
     if (config.ariaLabel) button.setAttribute("aria-label", String(config.ariaLabel));
     if (config.title) button.title = String(config.title);
-    if (config.disabled === true || config.pending === true) button.disabled = true;
-    button.classList.toggle("pending", config.pending === true);
-    button.setAttribute("aria-busy", config.pending === true ? "true" : "false");
     if (typeof config.onClick === "function") button.addEventListener("click", config.onClick);
+    applyButtonState(button, buttonState);
     return button;
   }
 
@@ -1856,6 +1899,7 @@
   core.helpers = {
     t,
     buildButton,
+    setButtonState,
     showSettingsDialog,
     showSettingsConfirmModal,
     escapeHtml,

@@ -634,27 +634,29 @@
 
     const actions = document.createElement("div");
     actions.className = "tg-native-migration-gate-actions";
-    const verify = document.createElement("button");
-    verify.type = "button";
-    verify.className = "soft-btn accent";
-    verify.textContent = testingFromRequired
-      ? t("telegramNativeMigrationWaiting")
-      : t("telegramNativeMigrationVerify");
-    verify.disabled = migrationPending || testingFromRequired;
+    const verify = helpers.buildButton({
+      label: testingFromRequired
+        ? t("telegramNativeMigrationWaiting")
+        : t("telegramNativeMigrationVerify"),
+      tone: "accent",
+      size: "compact",
+      disabled: migrationPending || testingFromRequired,
+      pending: testingFromRequired,
+    });
     verify.addEventListener("click", () => {
       if (verify.disabled) return;
       migrationDispatch("USER_TEST_NATIVE");
     });
-    const disable = document.createElement("button");
-    disable.type = "button";
-    disable.className = "soft-btn";
-    disable.textContent = t("telegramNativeMigrationDisable");
-    disable.disabled = migrationPending;
+    const disable = helpers.buildButton({
+      label: t("telegramNativeMigrationDisable"),
+      size: "compact",
+      disabled: migrationPending,
+    });
     disable.addEventListener("click", () => migrationDispatch("USER_DISABLE"));
-    const guide = document.createElement("button");
-    guide.type = "button";
-    guide.className = "soft-btn";
-    guide.textContent = t("telegramNativeMigrationGuide");
+    const guide = helpers.buildButton({
+      label: t("telegramNativeMigrationGuide"),
+      size: "compact",
+    });
     guide.addEventListener("click", () => {
       helpers.openExternalSafe(
         "https://github.com/rullerzhou-afk/clawd-on-desk/blob/main/docs/guides/telegram-approval.md"
@@ -858,10 +860,10 @@
 
     const ctrl = document.createElement("div");
     ctrl.className = "row-control";
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "soft-btn";
-    btn.textContent = t("telegramApprovalReplaceToken");
+    const btn = helpers.buildButton({
+      label: t("telegramApprovalReplaceToken"),
+      size: "compact",
+    });
     btn.addEventListener("click", () => {
       view.tokenEditing = true;
       ops.requestRender({ content: true });
@@ -905,11 +907,12 @@
     input.placeholder = t("telegramApprovalBotTokenPlaceholder");
     input.className = "tg-approval-input";
 
-    const saveBtn = document.createElement("button");
-    saveBtn.type = "button";
-    saveBtn.className = "soft-btn accent";
-    saveBtn.textContent = view.tokenPending ? t("telegramApprovalSaving") : t("telegramApprovalSaveToken");
-    saveBtn.disabled = view.tokenPending;
+    const saveBtn = helpers.buildButton({
+      label: view.tokenPending ? t("telegramApprovalSaving") : t("telegramApprovalSaveToken"),
+      tone: "accent",
+      disabled: view.tokenPending,
+      pending: view.tokenPending,
+    });
     saveBtn.addEventListener("click", () => {
       const token = input.value.trim();
       if (!token) {
@@ -939,11 +942,11 @@
     ctrl.appendChild(saveBtn);
 
     if (configured) {
-      const cancelBtn = document.createElement("button");
-      cancelBtn.type = "button";
-      cancelBtn.className = "soft-btn";
-      cancelBtn.textContent = t("telegramApprovalCancel");
-      cancelBtn.disabled = view.tokenPending;
+      const cancelBtn = helpers.buildButton({
+        label: t("telegramApprovalCancel"),
+        size: "compact",
+        disabled: view.tokenPending,
+      });
       cancelBtn.addEventListener("click", () => {
         view.tokenEditing = false;
         ops.requestRender({ content: true });
@@ -986,11 +989,12 @@
     input.value = draft.allowedTgUserId || "";
     input.addEventListener("input", () => setFormDraftValue("allowedTgUserId", input.value));
 
-    const saveBtn = document.createElement("button");
-    saveBtn.type = "button";
-    saveBtn.className = "soft-btn accent";
-    saveBtn.textContent = view.configPending ? t("telegramApprovalSaving") : t("telegramApprovalSaveRecipient");
-    saveBtn.disabled = view.configPending;
+    const saveBtn = helpers.buildButton({
+      label: view.configPending ? t("telegramApprovalSaving") : t("telegramApprovalSaveRecipient"),
+      tone: "accent",
+      disabled: view.configPending,
+      pending: view.configPending,
+    });
     saveBtn.addEventListener("click", () => {
       const raw = String(getFormDraft().allowedTgUserId || "").trim();
       if (!raw) {
@@ -1267,11 +1271,13 @@
 
     const ctrl = document.createElement("div");
     ctrl.className = "row-control";
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "soft-btn accent";
-    btn.textContent = view.testPending ? t("telegramApprovalTesting") : t("telegramApprovalSendTest");
-    btn.disabled = testDisabled;
+    const btn = helpers.buildButton({
+      label: view.testPending ? t("telegramApprovalTesting") : t("telegramApprovalSendTest"),
+      tone: "accent",
+      size: "compact",
+      disabled: testDisabled,
+      pending: view.testPending,
+    });
     if (testDisabled && !view.testPending) {
       btn.title = (s.message && String(s.message)) || t("telegramApprovalCardMissingBoth");
     }
@@ -1378,10 +1384,10 @@
 
     const ctrl = document.createElement("div");
     ctrl.className = "row-control";
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "soft-btn";
-    btn.textContent = t("feishuApprovalReplaceSecrets");
+    const btn = helpers.buildButton({
+      label: t("feishuApprovalReplaceSecrets"),
+      size: "compact",
+    });
     btn.addEventListener("click", () => {
       feishuView.secretEditing = true;
       ops.requestRender({ content: true });
@@ -1423,11 +1429,12 @@
     const verificationInput = buildFeishuSecretInput("feishuApprovalVerificationTokenPlaceholder", true);
     const encryptInput = buildFeishuSecretInput("feishuApprovalEncryptKeyPlaceholder", true);
 
-    const saveBtn = document.createElement("button");
-    saveBtn.type = "button";
-    saveBtn.className = "soft-btn accent";
-    saveBtn.textContent = feishuView.secretPending ? t("feishuApprovalSaving") : t("feishuApprovalSaveSecrets");
-    saveBtn.disabled = feishuView.secretPending;
+    const saveBtn = helpers.buildButton({
+      label: feishuView.secretPending ? t("feishuApprovalSaving") : t("feishuApprovalSaveSecrets"),
+      tone: "accent",
+      disabled: feishuView.secretPending,
+      pending: feishuView.secretPending,
+    });
     saveBtn.addEventListener("click", () => {
       const payload = {
         appId: appIdInput.value.trim(),
@@ -1473,11 +1480,11 @@
     ctrl.appendChild(encryptInput);
     ctrl.appendChild(saveBtn);
     if (configured) {
-      const cancelBtn = document.createElement("button");
-      cancelBtn.type = "button";
-      cancelBtn.className = "soft-btn";
-      cancelBtn.textContent = t("telegramApprovalCancel");
-      cancelBtn.disabled = feishuView.secretPending;
+      const cancelBtn = helpers.buildButton({
+        label: t("telegramApprovalCancel"),
+        size: "compact",
+        disabled: feishuView.secretPending,
+      });
       cancelBtn.addEventListener("click", () => {
         feishuView.secretEditing = false;
         ops.requestRender({ content: true });
@@ -1591,11 +1598,12 @@
     input.value = draft.approverId || "";
     input.addEventListener("input", () => setFeishuFormDraftValue("approverId", input.value));
 
-    const saveBtn = document.createElement("button");
-    saveBtn.type = "button";
-    saveBtn.className = "soft-btn accent";
-    saveBtn.textContent = feishuView.configPending ? t("feishuApprovalSaving") : t("feishuApprovalSaveApprover");
-    saveBtn.disabled = feishuView.configPending;
+    const saveBtn = helpers.buildButton({
+      label: feishuView.configPending ? t("feishuApprovalSaving") : t("feishuApprovalSaveApprover"),
+      tone: "accent",
+      disabled: feishuView.configPending,
+      pending: feishuView.configPending,
+    });
     saveBtn.addEventListener("click", () => {
       const nextDraft = getFeishuFormDraft();
       const approverId = String(nextDraft.approverId || "").trim();
@@ -1781,11 +1789,13 @@
 
     const ctrl = document.createElement("div");
     ctrl.className = "row-control";
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "soft-btn accent";
-    btn.textContent = feishuView.testPending ? t("feishuApprovalTesting") : t("feishuApprovalSendTest");
-    btn.disabled = testDisabled;
+    const btn = helpers.buildButton({
+      label: feishuView.testPending ? t("feishuApprovalTesting") : t("feishuApprovalSendTest"),
+      tone: "accent",
+      size: "compact",
+      disabled: testDisabled,
+      pending: feishuView.testPending,
+    });
     if (testDisabled && !feishuView.testPending) {
       // Prefer the translated reason the button is dead; the raw English
       // s.message is the last resort, not the first choice.

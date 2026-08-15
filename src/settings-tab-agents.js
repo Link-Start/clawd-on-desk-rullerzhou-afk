@@ -365,19 +365,22 @@
 
     const control = document.createElement("div");
     control.className = "custom-tool-discovery-control custom-tool-discovery-actions";
-    const addButton = document.createElement("button");
-    addButton.type = "button";
-    addButton.className = "soft-btn accent custom-tool-path-picker";
-    addButton.textContent = t("customToolManualAdd");
+    const addButton = helpers.buildButton({
+      label: t("customToolManualAdd"),
+      tone: "accent",
+      size: "compact",
+      className: "custom-tool-path-picker",
+    });
     addButton.addEventListener("click", () => addPickedCustomDiscoveryPath(addButton));
     control.appendChild(addButton);
-    const scanButton = document.createElement("button");
-    scanButton.type = "button";
-    scanButton.className = "soft-btn custom-tool-scan";
-    scanButton.textContent = t("customToolRescan");
+    const scanButton = helpers.buildButton({
+      label: t("customToolRescan"),
+      size: "compact",
+      className: "custom-tool-scan",
+    });
     scanButton.addEventListener("click", async () => {
       const scanStartedAt = Date.now();
-      scanButton.disabled = true;
+      helpers.setButtonState(scanButton, { pending: true });
       scanStatus.classList.remove("failed");
       scanStatus.classList.add("pending");
       scanStatus.textContent = t("customToolScanStatusScanning");
@@ -395,7 +398,7 @@
         scanStatus.textContent = t("customToolScanStatusFailed");
       } finally {
         scanStatus.classList.remove("pending");
-        scanButton.disabled = false;
+        helpers.setButtonState(scanButton, { pending: false });
       }
     });
     control.appendChild(scanButton);
@@ -416,14 +419,17 @@
 
     const control = document.createElement("div");
     control.className = "custom-tool-wsl-scan";
-    const scanButton = document.createElement("button");
-    scanButton.type = "button";
-    scanButton.className = "soft-btn agent-instance-scan-btn";
-    scanButton.textContent = t("agentInstanceScanWsl");
-    scanButton.title = t("agentInstanceScanWslDesc");
+    const scanButton = helpers.buildButton({
+      label: t("agentInstanceScanWsl"),
+      size: "compact",
+      className: "agent-instance-scan-btn",
+      title: t("agentInstanceScanWslDesc"),
+    });
     scanButton.addEventListener("click", async () => {
-      scanButton.disabled = true;
-      scanButton.textContent = t("agentInstanceScanning");
+      helpers.setButtonState(scanButton, {
+        pending: true,
+        labelKey: "agentInstanceScanning",
+      });
       try {
         if (ops && typeof ops.fetchAgentInstallationHints === "function") {
           await ops.fetchAgentInstallationHints({ refreshWsl: true });
@@ -432,8 +438,10 @@
       } catch (err) {
         console.warn("WSL scan failed:", err && err.message);
       } finally {
-        scanButton.disabled = false;
-        scanButton.textContent = t("agentInstanceScanWsl");
+        helpers.setButtonState(scanButton, {
+          pending: false,
+          labelKey: "agentInstanceScanWsl",
+        });
       }
     });
     control.appendChild(scanButton);
@@ -471,8 +479,10 @@
       return;
     }
     const originalLabel = button.textContent;
-    button.disabled = true;
-    button.textContent = t("customToolScanStatusScanning");
+    helpers.setButtonState(button, {
+      pending: true,
+      labelKey: "customToolScanStatusScanning",
+    });
     try {
       const result = await window.settingsAPI.pickAgentDiscoveryPath("directory");
       if (!result || result.status === "cancel") return;
@@ -496,8 +506,10 @@
     } catch (err) {
       ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
     } finally {
-      button.disabled = false;
-      button.textContent = originalLabel;
+      helpers.setButtonState(button, {
+        pending: false,
+        label: originalLabel,
+      });
     }
   }
 
@@ -554,22 +566,29 @@
     row.appendChild(text);
 
     if (result.application) {
-      const status = document.createElement(result.application.added ? "span" : "button");
-      status.className = result.application.added
-        ? "custom-tool-result-status"
-        : "soft-btn accent custom-tool-add";
-      status.textContent = result.application.added ? t("customToolAdded") : t("customToolAdd");
-      if (!result.application.added) {
-        status.type = "button";
+      const status = result.application.added
+        ? document.createElement("span")
+        : helpers.buildButton({
+          label: t("customToolAdd"),
+          tone: "accent",
+          size: "compact",
+          className: "custom-tool-add",
+        });
+      if (result.application.added) {
+        status.className = "custom-tool-result-status";
+        status.textContent = t("customToolAdded");
+      } else {
         status.addEventListener("click", () => addCustomApplication(result, status));
       }
       row.appendChild(status);
     }
     if (result.path) {
-      const removePathButton = document.createElement("button");
-      removePathButton.type = "button";
-      removePathButton.className = "soft-btn danger custom-tool-remove-path";
-      removePathButton.textContent = t("customToolRemovePath");
+      const removePathButton = helpers.buildButton({
+        label: t("customToolRemovePath"),
+        tone: "danger",
+        size: "compact",
+        className: "custom-tool-remove-path",
+      });
       removePathButton.addEventListener("click", () => removeCustomDiscoveryPath(result.path, removePathButton));
       row.appendChild(removePathButton);
     }
@@ -578,7 +597,7 @@
 
   async function removeCustomDiscoveryPath(pathToRemove, button) {
     if (!window.settingsAPI || typeof window.settingsAPI.command !== "function") return;
-    button.disabled = true;
+    helpers.setButtonState(button, { pending: true });
     try {
       const paths = readers.readAgentCustomDiscoveryPaths("custom")
         .filter((entry) => entry !== pathToRemove);
@@ -594,7 +613,7 @@
       }
       ops.requestRender({ content: true });
     } catch (err) {
-      button.disabled = false;
+      helpers.setButtonState(button, { pending: false });
       ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
     }
   }
@@ -612,7 +631,7 @@
   }
 
   async function addCustomApplication(result, button) {
-    button.disabled = true;
+    helpers.setButtonState(button, { pending: true });
     try {
       const response = await window.settingsAPI.command("addCustomApplication", { path: result.path });
       if (!response || response.status !== "ok") throw new Error((response && response.message) || "add failed");
@@ -623,7 +642,7 @@
       await refreshCustomAgentUi();
     } catch (err) {
       ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
-      button.disabled = false;
+      helpers.setButtonState(button, { pending: false });
     }
   }
 
@@ -702,20 +721,24 @@
 
     const actions = document.createElement("div");
     actions.className = "agent-hint-actions agent-install-hint-actions";
-    const installBtn = document.createElement("button");
-    installBtn.type = "button";
-    installBtn.className = "soft-btn accent agent-install-hint-install";
-    installBtn.textContent = agentHintActionPending
-      ? t("agentIntegrationWorking")
-      : t("agentInstallHintInstallRecommended");
-    installBtn.disabled = !!agentHintActionPending;
+    const installBtn = helpers.buildButton({
+      label: agentHintActionPending
+        ? t("agentIntegrationWorking")
+        : t("agentInstallHintInstallRecommended"),
+      tone: "accent",
+      size: "compact",
+      className: "agent-install-hint-install",
+      disabled: !!agentHintActionPending,
+      pending: !!agentHintActionPending,
+    });
     installBtn.addEventListener("click", () => installRecommendedHints(agentIds));
 
-    const dismissBtn = document.createElement("button");
-    dismissBtn.type = "button";
-    dismissBtn.className = "soft-btn agent-install-hint-dismiss";
-    dismissBtn.textContent = t("agentInstallHintDismiss");
-    dismissBtn.disabled = !!agentHintActionPending;
+    const dismissBtn = helpers.buildButton({
+      label: t("agentInstallHintDismiss"),
+      size: "compact",
+      className: "agent-install-hint-dismiss",
+      disabled: !!agentHintActionPending,
+    });
     dismissBtn.addEventListener("click", () => dismissInstallHints(agentIds));
 
     actions.appendChild(installBtn);
@@ -743,20 +766,24 @@
 
     const actions = document.createElement("div");
     actions.className = "agent-hint-actions agent-cleanup-hint-actions";
-    const removeBtn = document.createElement("button");
-    removeBtn.type = "button";
-    removeBtn.className = "soft-btn accent agent-cleanup-hint-remove";
-    removeBtn.textContent = agentHintActionPending
-      ? t("agentIntegrationWorking")
-      : t("agentCleanupHintRemove");
-    removeBtn.disabled = !!agentHintActionPending;
+    const removeBtn = helpers.buildButton({
+      label: agentHintActionPending
+        ? t("agentIntegrationWorking")
+        : t("agentCleanupHintRemove"),
+      tone: "accent",
+      size: "compact",
+      className: "agent-cleanup-hint-remove",
+      disabled: !!agentHintActionPending,
+      pending: !!agentHintActionPending,
+    });
     removeBtn.addEventListener("click", () => removeCleanupHints(agentIds));
 
-    const dismissBtn = document.createElement("button");
-    dismissBtn.type = "button";
-    dismissBtn.className = "soft-btn agent-cleanup-hint-dismiss";
-    dismissBtn.textContent = t("agentCleanupHintDismiss");
-    dismissBtn.disabled = !!agentHintActionPending;
+    const dismissBtn = helpers.buildButton({
+      label: t("agentCleanupHintDismiss"),
+      size: "compact",
+      className: "agent-cleanup-hint-dismiss",
+      disabled: !!agentHintActionPending,
+    });
     dismissBtn.addEventListener("click", () => dismissCleanupHints(agentIds));
 
     actions.appendChild(removeBtn);
@@ -1055,19 +1082,21 @@
       },
       buildExtraControls: (ctrl) => {
         if (agent.custom) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "soft-btn danger custom-agent-remove";
-          button.textContent = t("customToolRemove");
+          const button = helpers.buildButton({
+            label: t("customToolRemove"),
+            tone: "danger",
+            size: "compact",
+            className: "custom-agent-remove",
+          });
           button.addEventListener("click", async () => {
-            button.disabled = true;
+            helpers.setButtonState(button, { pending: true });
             try {
               const result = await window.settingsAPI.command("removeCustomApplication", { id: agent.id });
               if (!result || result.status !== "ok") throw new Error((result && result.message) || "remove failed");
               await refreshCustomAgentUi();
             } catch (err) {
               ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
-              button.disabled = false;
+              helpers.setButtonState(button, { pending: false });
             }
           });
           ctrl.appendChild(button);
@@ -1126,10 +1155,11 @@
         text.appendChild(desc);
         row.appendChild(text);
         if (["customToolAgentId", "customAgentStateEndpoint", "customAgentPayloadExample"].includes(labelKey)) {
-          const copyButton = document.createElement("button");
-          copyButton.type = "button";
-          copyButton.className = "soft-btn custom-agent-copy";
-          copyButton.textContent = t("customAgentCopy");
+          const copyButton = helpers.buildButton({
+            label: t("customAgentCopy"),
+            size: "compact",
+            className: "custom-agent-copy",
+          });
           copyButton.addEventListener("click", async () => {
             try {
               if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
@@ -1362,13 +1392,17 @@
     const ctrl = document.createElement("div");
     ctrl.className = "row-control";
 
-    const button = document.createElement("button");
-    button.className = "soft-btn agent-instance-action";
-    button.textContent = t("agentInstancePair");
-    button.title = `WSL: ${wslEntry.distro}`;
+    const button = helpers.buildButton({
+      label: t("agentInstancePair"),
+      size: "compact",
+      className: "agent-instance-action",
+      title: `WSL: ${wslEntry.distro}`,
+    });
     button.addEventListener("click", async () => {
-      button.disabled = true;
-      button.textContent = t("agentInstancePairing");
+      helpers.setButtonState(button, {
+        pending: true,
+        labelKey: "agentInstancePairing",
+      });
       try {
         if (window.settingsAPI && typeof window.settingsAPI.command === "function") {
           const result = await window.settingsAPI.command("deployToWsl", {
@@ -1402,8 +1436,10 @@
         // Refresh after both success and failure: an installer can leave
         // managed files that the user must be able to Unpair/repair.
         refreshWslHints();
-        button.disabled = false;
-        button.textContent = t("agentInstancePair");
+        helpers.setButtonState(button, {
+          pending: false,
+          labelKey: "agentInstancePair",
+        });
       }
     });
     ctrl.appendChild(button);
@@ -1416,13 +1452,17 @@
       ? wslEntry.integrationFilesPresent === true
       : wslEntry.hooksFilesPresent === true;
     if (canUnpair) {
-      const unpairBtn = document.createElement("button");
-      unpairBtn.className = "soft-btn agent-instance-action";
-      unpairBtn.textContent = t("agentInstanceUnpair");
-      unpairBtn.title = `WSL: ${wslEntry.distro}`;
+      const unpairBtn = helpers.buildButton({
+        label: t("agentInstanceUnpair"),
+        size: "compact",
+        className: "agent-instance-action",
+        title: `WSL: ${wslEntry.distro}`,
+      });
       unpairBtn.addEventListener("click", async () => {
-        unpairBtn.disabled = true;
-        unpairBtn.textContent = t("agentInstanceUnpairing");
+        helpers.setButtonState(unpairBtn, {
+          pending: true,
+          labelKey: "agentInstanceUnpairing",
+        });
         try {
           if (window.settingsAPI && typeof window.settingsAPI.command === "function") {
             const result = await window.settingsAPI.command("removeFromWsl", {
@@ -1442,8 +1482,10 @@
           ops.showToast(String(err && err.message ? err.message : err), { error: true });
         } finally {
           refreshWslHints();
-          unpairBtn.disabled = false;
-          unpairBtn.textContent = t("agentInstanceUnpair");
+          helpers.setButtonState(unpairBtn, {
+            pending: false,
+            labelKey: "agentInstanceUnpair",
+          });
         }
       });
       ctrl.appendChild(unpairBtn);
@@ -1604,9 +1646,11 @@
   function syncAgentIntegrationAction(meta) {
     if (!meta || !meta.button) return;
     const installed = readers.readAgentIntegrationInstalled(meta.agentId);
-    meta.button.disabled = false;
-    meta.button.classList.remove("pending");
-    meta.button.textContent = t(installed ? "agentIntegrationUninstall" : "agentIntegrationInstall");
+    helpers.setButtonState(meta.button, {
+      disabled: false,
+      pending: false,
+      labelKey: installed ? "agentIntegrationUninstall" : "agentIntegrationInstall",
+    });
     meta.button.setAttribute(
       "aria-label",
       t(installed ? "agentIntegrationUninstall" : "agentIntegrationInstall")
@@ -1615,9 +1659,10 @@
   }
 
   function buildAgentIntegrationActionButton(agent) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "soft-btn agent-integration-action";
+    const button = helpers.buildButton({
+      size: "compact",
+      className: "agent-integration-action",
+    });
     const meta = {
       button,
       agentId: agent.id,
@@ -1633,9 +1678,10 @@
       if (installed && typeof window.confirm === "function" && !window.confirm(t("agentIntegrationUninstallConfirm"))) {
         return;
       }
-      button.disabled = true;
-      button.classList.add("pending");
-      button.textContent = t("agentIntegrationWorking");
+      helpers.setButtonState(button, {
+        pending: true,
+        labelKey: "agentIntegrationWorking",
+      });
       window.settingsAPI.command(command, { agentId: agent.id }).then((result) => {
         if (result && result.status === "skipped") {
           ops.showToast(formatHintResult(t("agentIntegrationInstallSkipped"), {
