@@ -9,6 +9,7 @@ const systemActions = require("../src/settings-actions-system");
 test("settings system actions expose the command surface", () => {
   assert.deepStrictEqual(Object.keys(systemActions).sort(), [
     "autoStartWithClaude",
+    "autoStartWithCodex",
     "createRepairDoctorIssue",
     "installHooks",
     "manageClaudeHooksAutomatically",
@@ -18,7 +19,38 @@ test("settings system actions expose the command surface", () => {
     "uninstallHooks",
   ]);
   assert.strictEqual(systemActions.autoStartWithClaude.lockKey, systemActions.manageClaudeHooksAutomatically.lockKey);
+  assert.strictEqual(systemActions.autoStartWithCodex.lockKey, "agentIntegration");
   assert.strictEqual(systemActions.installHooks.lockKey, systemActions.uninstallHooks.lockKey);
+});
+
+test("Codex auto-start preference prewrites only fail-closed gate values", () => {
+  const writes = [];
+  const base = prefs.getDefaults();
+  assert.deepStrictEqual(systemActions.autoStartWithCodex.effect(true, {
+    snapshot: base,
+    writeCodexAutoStartGate: (value) => { writes.push(value); return true; },
+  }), { status: "ok" });
+  assert.deepStrictEqual(systemActions.autoStartWithCodex.effect(false, {
+    snapshot: base,
+    writeCodexAutoStartGate: (value) => { writes.push(value); return true; },
+  }), { status: "ok" });
+  assert.deepStrictEqual(systemActions.autoStartWithCodex.effect(true, {
+    snapshot: {
+      ...base,
+      agents: { ...base.agents, codex: { ...base.agents.codex, integrationInstalled: false } },
+    },
+    writeCodexAutoStartGate: (value) => { writes.push(value); return true; },
+  }), { status: "ok" });
+  assert.deepStrictEqual(writes, [false, false]);
+});
+
+test("Codex auto-start preference rejects a failed gate write before commit", () => {
+  const result = systemActions.autoStartWithCodex.effect(false, {
+    snapshot: prefs.getDefaults(),
+    writeCodexAutoStartGate: () => false,
+  });
+  assert.strictEqual(result.status, "error");
+  assert.match(result.message, /failed to persist/);
 });
 
 test("settings system actions keep auto-start inert when hook management is disabled", () => {

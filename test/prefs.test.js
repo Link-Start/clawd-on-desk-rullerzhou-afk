@@ -44,10 +44,11 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.version, prefs.CURRENT_VERSION);
   });
 
-  it("defaults Claude hook management on and Start with Claude off", () => {
+  it("preserves the shipped Claude and Codex auto-start defaults", () => {
     const d = prefs.getDefaults();
     assert.strictEqual(d.manageClaudeHooksAutomatically, true);
     assert.strictEqual(d.autoStartWithClaude, false);
+    assert.strictEqual(d.autoStartWithCodex, true);
     assert.deepStrictEqual(d.petTint, {});
     assert.deepStrictEqual(d.petAccessory, {});
     assert.strictEqual(d.testReactionsEnabled, false);
@@ -1683,6 +1684,8 @@ describe("prefs.load", () => {
       { version: prefs.CURRENT_VERSION, agents: { codex: null } },
       { version: prefs.CURRENT_VERSION, agents: { codex: [] } },
       { version: prefs.CURRENT_VERSION, agents: { codex: { enabled: "yes" } } },
+      { version: prefs.CURRENT_VERSION, agents: { codex: { integrationInstalled: "yes" } } },
+      { version: prefs.CURRENT_VERSION, autoStartWithCodex: "yes" },
     ]) {
       const p = makeTempPath();
       fs.writeFileSync(p, JSON.stringify(raw), "utf8");
@@ -1706,6 +1709,7 @@ describe("prefs.load", () => {
       const result = prefs.load(p);
       assert.strictEqual(result.codexAutoStartAuthoritative, undefined);
       assert.strictEqual(result.snapshot.agents.codex.enabled, true);
+      assert.strictEqual(result.snapshot.autoStartWithCodex, true);
     }
   });
 

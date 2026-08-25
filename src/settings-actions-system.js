@@ -1,9 +1,38 @@
 "use strict";
 
-const { isAgentEnabled } = require("./agent-gate");
+const { isAgentEnabled, shouldAutoStartWithCodex } = require("./agent-gate");
 const { requireBoolean } = require("./settings-validators");
 
 const CLAUDE_HOOKS_LOCK_KEY = "claude-hooks";
+const AGENT_INTEGRATION_LOCK_KEY = "agentIntegration";
+
+// Codex reads this lightweight gate before Clawd is running. Disabling is
+// persisted before the preference commit so failure cannot leave cold launch
+// active. Enabling is published only by main.js after the preference commit;
+// writing true here would let a failed prefs save enable an unauthorized gate.
+const autoStartWithCodex = {
+  lockKey: AGENT_INTEGRATION_LOCK_KEY,
+  validate: requireBoolean("autoStartWithCodex"),
+  effect(value, deps) {
+    if (!deps || typeof deps.writeCodexAutoStartGate !== "function") {
+      return {
+        status: "error",
+        message: "autoStartWithCodex effect requires writeCodexAutoStartGate dep",
+      };
+    }
+    const nextSnapshot = { ...(deps.snapshot || {}), autoStartWithCodex: value };
+    const effective = shouldAutoStartWithCodex(nextSnapshot);
+    if (effective) return { status: "ok" };
+    try {
+      if (deps.writeCodexAutoStartGate(false) !== true) {
+        return { status: "error", message: "autoStartWithCodex: failed to persist Codex auto-start gate" };
+      }
+      return { status: "ok" };
+    } catch (err) {
+      return { status: "error", message: `autoStartWithCodex: ${err && err.message}` };
+    }
+  },
+};
 
 // autoStartWithClaude: writes/removes a SessionStart hook in
 // ~/.claude/settings.json via hooks/install.js. Failure to write the file must
@@ -246,6 +275,7 @@ uninstallHooks.lockKey = CLAUDE_HOOKS_LOCK_KEY;
 
 module.exports = {
   autoStartWithClaude,
+  autoStartWithCodex,
   createRepairDoctorIssue,
   installHooks,
   manageClaudeHooksAutomatically,

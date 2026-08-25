@@ -16,6 +16,7 @@ const {
   isAgentNotificationHookEnabled,
   isCodexNativeNotificationSoundEnabled,
   isCodexPermissionInterceptEnabled,
+  shouldAutoStartWithCodex,
   shouldSyncAgentIntegration,
 } = require("../src/agent-gate");
 const { commandRegistry } = require("../src/settings-actions");
@@ -91,6 +92,36 @@ describe("isAgentIntegrationInstalled", () => {
       shouldSyncAgentIntegration({ agents: { codex: { integrationInstalled: true, enabled: false } } }, "codex"),
       false
     );
+  });
+});
+
+describe("shouldAutoStartWithCodex", () => {
+  it("requires installed, enabled, and the independent preference", () => {
+    const enabled = {
+      autoStartWithCodex: true,
+      agents: { codex: { integrationInstalled: true, enabled: true } },
+    };
+    assert.strictEqual(shouldAutoStartWithCodex(enabled), true);
+    assert.strictEqual(shouldAutoStartWithCodex({ ...enabled, autoStartWithCodex: false }), false);
+    assert.strictEqual(shouldAutoStartWithCodex({
+      ...enabled,
+      agents: { codex: { integrationInstalled: false, enabled: true } },
+    }), false);
+    assert.strictEqual(shouldAutoStartWithCodex({
+      ...enabled,
+      agents: { codex: { integrationInstalled: true, enabled: false } },
+    }), false);
+  });
+
+  it("preserves the shipped behavior for legacy snapshots with no preference", () => {
+    assert.strictEqual(shouldAutoStartWithCodex({
+      agents: { codex: { integrationInstalled: true, enabled: true } },
+    }), true);
+  });
+
+  it("fails closed without a snapshot", () => {
+    assert.strictEqual(shouldAutoStartWithCodex(null), false);
+    assert.strictEqual(shouldAutoStartWithCodex(undefined), false);
   });
 });
 

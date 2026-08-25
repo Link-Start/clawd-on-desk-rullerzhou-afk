@@ -24,6 +24,13 @@ const isAgentIntegrationInstalled = (snapshot, agentId) => (
 const shouldSyncAgentIntegration = (snapshot, agentId) => (
   isAgentEnabled(snapshot, agentId) && isAgentIntegrationInstalled(snapshot, agentId)
 );
+function shouldAutoStartWithCodex(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return false;
+  const preference = typeof snapshot.autoStartWithCodex === "boolean"
+    ? snapshot.autoStartWithCodex
+    : true;
+  return preference && shouldSyncAgentIntegration(snapshot, "codex");
+}
 const isAgentPermissionsEnabled = (snapshot, agentId) => readFlag(snapshot, agentId, "permissionsEnabled");
 // #451 sub-gate under permissionsEnabled: bubbles for PermissionRequests that
 // fire from inside a Claude Code subagent (Task tool). Only claude-code's
@@ -115,5 +122,6 @@ module.exports = {
   isAgentNotificationHookEnabled,
   isCodexNativeNotificationSoundEnabled,
   isCodexPermissionInterceptEnabled,
+  shouldAutoStartWithCodex,
   shouldSyncAgentIntegration,
 };

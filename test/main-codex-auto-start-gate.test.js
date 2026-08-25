@@ -65,23 +65,37 @@ test("non-authoritative startup prefs publish a fail-closed Codex gate", () => {
 
 test("future-version locked settings cannot publish an ephemeral Codex gate", () => {
   const source = fs.readFileSync(MAIN_PATH, "utf8").replace(/\r\n/g, "\n");
-  const subscriptionIndex = source.indexOf(
-    '_settingsController.subscribeKey("agents", (_agents, snapshot) => {'
-  );
+  const callbackIndex = source.indexOf("function syncCodexAutoStartGateFromSettings(_value, snapshot) {");
   const lockedGuardIndex = source.indexOf(
     "if (_settingsController.isLocked()) return;",
-    subscriptionIndex
+    callbackIndex
   );
   const settingsSyncIndex = source.indexOf(
     '_syncCodexAutoStartGate(snapshot, "settings")',
-    subscriptionIndex
+    callbackIndex
   );
 
-  assert.ok(subscriptionIndex >= 0, "main.js should subscribe to agents changes");
+  assert.ok(callbackIndex >= 0, "main.js should centralize Settings-driven gate sync");
   assert.ok(
-    lockedGuardIndex > subscriptionIndex && lockedGuardIndex < settingsSyncIndex,
+    lockedGuardIndex > callbackIndex && lockedGuardIndex < settingsSyncIndex,
     "locked settings must return before publishing the settings gate"
   );
+  assert.ok(source.includes(
+    '_settingsController.subscribeKey("agents", syncCodexAutoStartGateFromSettings)'
+  ));
+  assert.ok(source.includes(
+    '_settingsController.subscribeKey("autoStartWithCodex", syncCodexAutoStartGateFromSettings)'
+  ));
+});
+
+test("Codex gate sync uses the installed, enabled, and preference contract", () => {
+  const source = fs.readFileSync(MAIN_PATH, "utf8").replace(/\r\n/g, "\n");
+  const syncIndex = source.indexOf("function _syncCodexAutoStartGate(snapshot, source) {");
+  const effectiveIndex = source.indexOf(
+    "_persistCodexAutoStartGate(shouldAutoStartWithCodex(snapshot))",
+    syncIndex
+  );
+  assert.ok(syncIndex >= 0 && effectiveIndex > syncIndex);
 });
 
 test("unreadable or recovered prefs fail every prefs-backed agent runtime gate closed", () => {

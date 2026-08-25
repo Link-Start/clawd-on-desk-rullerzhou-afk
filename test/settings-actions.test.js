@@ -307,7 +307,7 @@ describe("updateRegistry pure-data validators", () => {
 
   it("object-form boolean fields validate via entry.validate", () => {
     const deps = { snapshot: baseSnapshot };
-    for (const key of ["autoStartWithClaude", "manageClaudeHooksAutomatically", "openAtLogin"]) {
+    for (const key of ["autoStartWithClaude", "autoStartWithCodex", "manageClaudeHooksAutomatically", "openAtLogin"]) {
       const entry = updateRegistry[key];
       assert.strictEqual(typeof entry, "object", `${key} should be object-form`);
       assert.strictEqual(typeof entry.validate, "function", `${key} should expose validate`);

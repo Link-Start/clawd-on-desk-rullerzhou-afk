@@ -313,8 +313,7 @@ function _persistCodexAutoStartGate(enabled) {
 }
 
 function _syncCodexAutoStartGate(snapshot, source) {
-  const codex = snapshot && snapshot.agents && snapshot.agents.codex;
-  if (_persistCodexAutoStartGate(!!(codex && codex.enabled === true))) return true;
+  if (_persistCodexAutoStartGate(shouldAutoStartWithCodex(snapshot))) return true;
   console.warn(`Clawd: failed to sync Codex auto-start gate (${source})`);
   return false;
 }
@@ -555,14 +554,16 @@ const _settingsController = createSettingsController({
     },
   },
 });
-_settingsController.subscribeKey("agents", (_agents, snapshot) => {
+function syncCodexAutoStartGateFromSettings(_value, snapshot) {
   // A readable future-version prefs file may still change in memory for the
   // current process. An unreadable prefs file rejects mutations earlier in the
   // controller. In both locked cases, publishing ephemeral values would let a
   // retained hook cold-launch Clawd against a different durable prefs truth.
   if (_settingsController.isLocked()) return;
   _syncCodexAutoStartGate(snapshot, "settings");
-});
+}
+_settingsController.subscribeKey("agents", syncCodexAutoStartGateFromSettings);
+_settingsController.subscribeKey("autoStartWithCodex", syncCodexAutoStartGateFromSettings);
 let _remoteSshInstallationIdentity = null;
 let _remoteSshInstallationIdentityPromise = null;
 
@@ -1689,6 +1690,7 @@ const {
 // ── Permission bubble — delegated to src/permission.js ──
 const {
   createRuntimeAgentGate,
+  shouldAutoStartWithCodex,
 } = require("./agent-gate");
 const _runtimeAgentGate = createRuntimeAgentGate({
   getSnapshot: () => _settingsController.getSnapshot(),

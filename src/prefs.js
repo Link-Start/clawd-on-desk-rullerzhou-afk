@@ -150,6 +150,9 @@ const SCHEMA = {
   showDock: { type: "boolean", default: false },
   manageClaudeHooksAutomatically: { type: "boolean", default: true },
   autoStartWithClaude: { type: "boolean", default: false },
+  // Codex cold-launch support already shipped behind the master Agent gate.
+  // Default on preserves that behavior while exposing an independent opt-out.
+  autoStartWithCodex: { type: "boolean", default: true },
   // Codex approval awareness depends entirely on the official PermissionRequest
   // hook (JSONL no longer infers approvals). These surface its health: the
   // toggle gates the startup nudge, and LastNotified is the edge-trigger dedup
@@ -1341,9 +1344,9 @@ function backupInvalidPrefs(prefsPath, reason) {
 //                and the snapshot is only a fail-safe defaults fallback. Callers
 //                must not publish permissive external gates from that snapshot.
 //   - codexAutoStartAuthoritative: false when the prefs root is otherwise
-//                recoverable but an explicitly-present Codex gate field has an
-//                invalid type. Missing legacy fields retain their historical
-//                default/migration behavior.
+  //                recoverable but an explicitly-present Codex gate field has an
+  //                invalid type. Missing legacy fields retain their historical
+  //                default/migration behavior.
 function load(prefsPath) {
   // Read and parse are separated on purpose. "We could not read the bytes" and
   // "we read the bytes and they are not valid prefs" are different states, and
@@ -1399,17 +1402,24 @@ function load(prefsPath) {
   const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
   const isObjectRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
   let codexAutoStartAuthoritative = true;
+  if (
+    hasOwn(raw, "autoStartWithCodex")
+    && typeof raw.autoStartWithCodex !== "boolean"
+  ) {
+    codexAutoStartAuthoritative = false;
+  }
   if (hasOwn(raw, "agents")) {
     if (!isObjectRecord(raw.agents)) {
       codexAutoStartAuthoritative = false;
     } else if (hasOwn(raw.agents, "codex")) {
       if (!isObjectRecord(raw.agents.codex)) {
         codexAutoStartAuthoritative = false;
-      } else if (
-        hasOwn(raw.agents.codex, "enabled")
-        && typeof raw.agents.codex.enabled !== "boolean"
-      ) {
-        codexAutoStartAuthoritative = false;
+      } else {
+        for (const key of ["integrationInstalled", "enabled"]) {
+          if (hasOwn(raw.agents.codex, key) && typeof raw.agents.codex[key] !== "boolean") {
+            codexAutoStartAuthoritative = false;
+          }
+        }
       }
     }
   }

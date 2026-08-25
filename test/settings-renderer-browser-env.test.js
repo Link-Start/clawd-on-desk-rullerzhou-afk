@@ -1239,6 +1239,8 @@ function loadAgentsTabForTest({
           codexPermissionModeIntercept: "Intercept",
           rowCodexNativeNotificationSound: "Native sound",
           rowCodexNativeNotificationSoundDesc: "Native sound desc",
+          rowStartWithCodex: "Start with Codex",
+          rowStartWithCodexDesc: "Auto-launch Clawd with Codex CLI.",
           badgePermissionBubble: "Permission bubble",
           eventSourceHook: "Hook",
           eventSourceLogPoll: "Log poll",
@@ -12779,6 +12781,43 @@ describe("settings renderer browser environment", () => {
       before,
       "Codex agent broadcasts should patch mounted switches instead of rebuilding and truncating switch motion"
     );
+  });
+
+  it("renders and persists the independent Codex auto-start switch", async () => {
+    const updates = [];
+    const harness = loadAgentsTabForTest({
+      snapshot: {
+        autoStartWithCodex: true,
+        agents: {
+          codex: {
+            integrationInstalled: true,
+            enabled: true,
+            permissionMode: "intercept",
+          },
+        },
+      },
+      agentMetadata: [{
+        id: "codex",
+        name: "Codex",
+        eventSource: "hook",
+        capabilities: {},
+      }],
+      settingsAPI: {
+        update: (key, value) => {
+          updates.push({ key, value });
+          return Promise.resolve({ status: "ok" });
+        },
+      },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    const meta = harness.core.state.mountedControls.generalSwitches.get("autoStartWithCodex");
+    assert.ok(meta, "Codex card should mount its independent auto-start preference");
+    assert.strictEqual(meta.element.classList.contains("on"), true);
+
+    meta.element.dispatchEvent({ type: "click", bubbles: false });
+    await Promise.resolve();
+    assert.deepStrictEqual(updates, [{ key: "autoStartWithCodex", value: false }]);
   });
 
   it("disables the Codex Permissions switch in place when Permission mode changes to Native", () => {

@@ -7,6 +7,7 @@ const path = require("path");
 const os = require("os");
 
 const prefs = require("../src/prefs");
+const { shouldAutoStartWithCodex } = require("../src/agent-gate");
 const { createSettingsController } = require("../src/settings-controller");
 const { commandRegistry } = require("../src/settings-actions");
 
@@ -231,11 +232,39 @@ describe("Codex auto-start gate commit ordering", () => {
     });
     // Mirrors main.js: an enabled gate is published only from the agents
     // subscriber, after the controller has persisted and committed the store.
-    ctrl.subscribeKey("agents", (_agents, nextSnapshot) => {
-      writeCodexAutoStartGate(nextSnapshot.agents.codex.enabled === true);
-    });
+    const publishGate = (_value, nextSnapshot) => {
+      writeCodexAutoStartGate(shouldAutoStartWithCodex(nextSnapshot));
+    };
+    ctrl.subscribeKey("agents", publishGate);
+    ctrl.subscribeKey("autoStartWithCodex", publishGate);
     return ctrl;
   }
+
+  it("publishes an enabled preference only after a successful commit", async () => {
+    const gateWrites = [];
+    const ctrl = createSettingsController({
+      prefsPath: makeTempPath(),
+      injectedDeps: {
+        writeCodexAutoStartGate(enabled) {
+          gateWrites.push(enabled);
+          return true;
+        },
+      },
+    });
+    const publishGate = (_value, nextSnapshot) => {
+      gateWrites.push(shouldAutoStartWithCodex(nextSnapshot));
+    };
+    ctrl.subscribeKey("autoStartWithCodex", publishGate);
+
+    const disabled = await ctrl.applyUpdate("autoStartWithCodex", false);
+    assert.strictEqual(disabled.status, "ok");
+    assert.deepStrictEqual(gateWrites, [false, false]);
+
+    gateWrites.length = 0;
+    const enabled = await ctrl.applyUpdate("autoStartWithCodex", true);
+    assert.strictEqual(enabled.status, "ok");
+    assert.deepStrictEqual(gateWrites, [true]);
+  });
 
   it("does not enable the external gate when enabling Codex cannot persist", async () => {
     const snapshot = prefs.getDefaults();
@@ -280,6 +309,32 @@ describe("Codex auto-start gate commit ordering", () => {
     assert.deepStrictEqual(gateWrites, []);
   });
 
+  it("does not enable the external gate when the preference cannot persist", async () => {
+    const snapshot = { ...prefs.getDefaults(), autoStartWithCodex: false };
+    const gateWrites = [];
+    const ctrl = createFailingController(snapshot, gateWrites);
+
+    const result = await ctrl.applyUpdate("autoStartWithCodex", true);
+
+    assert.strictEqual(result.status, "error");
+    assert.match(result.message, /prefs read only/);
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), false);
+    assert.deepStrictEqual(gateWrites, []);
+  });
+
+  it("fails closed before reporting a preference disable persistence error", async () => {
+    const snapshot = { ...prefs.getDefaults(), autoStartWithCodex: true };
+    const gateWrites = [];
+    const ctrl = createFailingController(snapshot, gateWrites);
+
+    const result = await ctrl.applyUpdate("autoStartWithCodex", false);
+
+    assert.strictEqual(result.status, "error");
+    assert.match(result.message, /prefs read only/);
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), true);
+    assert.deepStrictEqual(gateWrites, [false]);
+  });
+
   it("does not publish an enabled gate from future-version locked prefs", async () => {
     const snapshot = prefs.getDefaults();
     snapshot.agents.codex = {
@@ -307,7 +362,7 @@ describe("Codex auto-start gate commit ordering", () => {
     });
     ctrl.subscribeKey("agents", (_agents, nextSnapshot) => {
       if (ctrl.isLocked()) return;
-      gateWrites.push(nextSnapshot.agents.codex.enabled === true);
+      gateWrites.push(shouldAutoStartWithCodex(nextSnapshot));
     });
 
     const result = await ctrl.applyCommand("setAgentFlag", {
@@ -348,7 +403,7 @@ describe("Codex auto-start gate commit ordering", () => {
     });
     ctrl.subscribeKey("agents", (_agents, nextSnapshot) => {
       if (ctrl.isLocked()) return;
-      gateWrites.push(nextSnapshot.agents.codex.enabled === true);
+      gateWrites.push(shouldAutoStartWithCodex(nextSnapshot));
     });
 
     const result = await ctrl.applyCommand("installAgentIntegration", {
