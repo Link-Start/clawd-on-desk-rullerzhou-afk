@@ -106,6 +106,7 @@ function translations() {
     sessionAutomationAsk: "Always ask",
     sessionAutomationAutoTools: "Auto-allow tools",
     sessionAutomationUnavailable: "Unavailable",
+    sessionAutomationUnavailableCodexDesktop: "Codex Desktop does not support per-session permission settings yet.",
     sessionAutomationChangeFailed: "Could not update session automation.",
     sessionAutomationOrphansTitle: "Ended or hidden sessions",
     sessionAutomationOrphansHint: "These overrides remain active until revoked.",
@@ -427,6 +428,28 @@ test("Dashboard session automation sends only sessionId/mode and exact grantId",
     ["set", { sessionId: "configurable", mode: "off" }],
     ["clear", { grantId: "grant-current" }],
   ]);
+});
+
+test("Dashboard renders unsupported Codex Desktop automation as an explained read-only value", async () => {
+  const { root } = await loadDashboard([
+    session("desktop", {
+      agentId: "codex",
+      canConfigureSessionAutomation: false,
+      sessionAutomationMode: null,
+      sessionAutomationGrantId: null,
+      sessionAutomationDisabledReason: "unsupported-codex-originator",
+    }),
+  ]);
+
+  assert.strictEqual(byClass(root, "session-automation-select").length, 0);
+  assert.strictEqual(
+    byClass(root, "session-automation-readonly")[0].textContent,
+    "Follow global"
+  );
+  assert.strictEqual(
+    byClass(root, "session-automation-unavailable")[0].textContent,
+    "Codex Desktop does not support per-session permission settings yet."
+  );
 });
 
 test("Dashboard renders and revokes an orphan grant by exact grantId", async () => {
