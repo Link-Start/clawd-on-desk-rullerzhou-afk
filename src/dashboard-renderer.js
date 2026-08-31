@@ -951,11 +951,53 @@ function automationActionState(key) {
     : { pending: false, feedbackText: "" };
 }
 
+function sessionAutomationUnavailableText(session) {
+  const reason = session && session.sessionAutomationDisabledReason;
+  if (
+    session
+    && session.agentId === "codex"
+    && (
+      reason === "unsupported-codex-originator"
+      || reason === "unsupported-codex-session-source"
+    )
+  ) {
+    return t("sessionAutomationUnavailableCodexDesktop");
+  }
+  return t("sessionAutomationUnavailable");
+}
+
 function appendSessionAutomation(container, session) {
   if (!container || !session) return;
   const row = document.createElement("div");
   row.className = "session-automation-row";
   const label = createText("span", "session-automation-label", t("sessionAutomationLabel"));
+  const canConfigure = session.canConfigureSessionAutomation === true;
+  const hasGrant = !!session.sessionAutomationGrantId;
+  const unavailableText = canConfigure ? "" : sessionAutomationUnavailableText(session);
+
+  if (!canConfigure && !hasGrant) {
+    const readonlyValue = createText(
+      "span",
+      "session-automation-readonly",
+      t("sessionAutomationFollowGlobal")
+    );
+    readonlyValue.setAttribute(
+      "aria-label",
+      `${t("sessionAutomationLabel")}: ${t("sessionAutomationFollowGlobal")}`
+    );
+    const unavailable = createText(
+      "span",
+      "session-automation-unavailable",
+      unavailableText
+    );
+    unavailable.setAttribute("role", "note");
+    row.appendChild(label);
+    row.appendChild(readonlyValue);
+    row.appendChild(unavailable);
+    container.appendChild(row);
+    return;
+  }
+
   const select = document.createElement("select");
   select.className = "session-automation-select";
   select.setAttribute("aria-label", t("sessionAutomationLabel"));
@@ -970,7 +1012,7 @@ function appendSessionAutomation(container, session) {
     option.value = value;
     option.textContent = text;
     if (
-      session.canConfigureSessionAutomation !== true
+      !canConfigure
       && value !== "inherit"
     ) {
       option.disabled = true;
@@ -982,11 +1024,11 @@ function appendSessionAutomation(container, session) {
   const actionState = automationActionState(key);
   select.disabled = actionState.pending === true
     || (
-      session.canConfigureSessionAutomation !== true
-      && !session.sessionAutomationGrantId
+      !canConfigure
+      && !hasGrant
     );
-  if (session.canConfigureSessionAutomation !== true) {
-    select.title = t("sessionAutomationUnavailable");
+  if (!canConfigure) {
+    select.title = unavailableText;
   }
   const feedback = createText(
     "span",
@@ -1037,6 +1079,15 @@ function appendSessionAutomation(container, session) {
   });
   row.appendChild(label);
   row.appendChild(select);
+  if (!canConfigure) {
+    const unavailable = createText(
+      "span",
+      "session-automation-unavailable",
+      unavailableText
+    );
+    unavailable.setAttribute("role", "note");
+    row.appendChild(unavailable);
+  }
   row.appendChild(feedback);
   container.appendChild(row);
 }
