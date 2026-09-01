@@ -189,9 +189,10 @@ async function loadDashboard(
   const automationCalls = [];
   const kimiRefreshCalls = [];
   let renderInterval = null;
+  let snapshotListener = null;
   const api = {
     onLangChange: () => {},
-    onSessionSnapshot: () => {},
+    onSessionSnapshot: (listener) => { snapshotListener = listener; },
     getI18n: async () => ({ lang: "en", translations: translations() }),
     getSnapshot: async () => ({
       sessions,
@@ -247,6 +248,10 @@ async function loadDashboard(
     automationCalls,
     kimiRefreshCalls,
     tickRender: () => { if (renderInterval) renderInterval(); },
+    pushSnapshot: (nextSnapshot) => {
+      if (snapshotListener) snapshotListener(nextSnapshot);
+    },
+    document,
   };
 }
 
@@ -473,6 +478,47 @@ test("Dashboard session automation sends only sessionId/mode and exact grantId",
   assert.deepStrictEqual(JSON.parse(JSON.stringify(automationCalls)), [
     ["set", { sessionId: "configurable", mode: "off" }],
     ["clear", { grantId: "grant-current" }],
+  ]);
+});
+
+test("Dashboard refreshes a closed focused automation picker before an immediate revoke", async () => {
+  const initial = session("configurable", {
+    canConfigureSessionAutomation: true,
+    sessionAutomationMode: "inherit",
+    sessionAutomationGrantId: null,
+  });
+  const harness = await loadDashboard([initial]);
+  const firstPicker = byClass(harness.root, "session-automation-picker")[0];
+  const firstTrigger = byClass(firstPicker, "language-picker-trigger")[0];
+  const autoToolsOption = byClass(firstPicker, "language-picker-option")
+    .find((option) => option.textContent === "Auto-allow tools");
+
+  await firstTrigger.dispatch("click");
+  await autoToolsOption.dispatch("click");
+  await flush();
+  harness.document.activeElement = firstTrigger;
+
+  const updated = session("configurable", {
+    canConfigureSessionAutomation: true,
+    sessionAutomationMode: "auto-tools",
+    sessionAutomationGrantId: "grant-new",
+  });
+  harness.pushSnapshot({
+    sessions: [updated],
+    groups: [{ host: "", ids: [updated.id] }],
+  });
+
+  const refreshedPicker = byClass(harness.root, "session-automation-picker")[0];
+  const refreshedTrigger = byClass(refreshedPicker, "language-picker-trigger")[0];
+  const inheritOption = byClass(refreshedPicker, "language-picker-option")
+    .find((option) => option.textContent === "Follow global");
+  await refreshedTrigger.dispatch("click");
+  await inheritOption.dispatch("click");
+  await flush();
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.automationCalls)), [
+    ["set", { sessionId: "configurable", mode: "auto-tools" }],
+    ["clear", { grantId: "grant-new" }],
   ]);
 });
 

@@ -1176,16 +1176,16 @@ describe("dashboard window", () => {
     assert.match(rendererSource, /resetDateFormatterLang !== lang/);
   });
 
-  it("does not replace a focused session automation picker on the one-second render tick", () => {
+  it("does not replace an open session automation picker on the one-second render tick", () => {
     const rendererSource = fs.readFileSync(path.join(__dirname, "..", "src", "dashboard-renderer.js"), "utf8");
     const dashboardHtml = fs.readFileSync(path.join(__dirname, "..", "src", "dashboard.html"), "utf8");
 
-    assert.match(rendererSource, /function hasFocusedSessionAutomationPicker\(\)/);
-    assert.match(rendererSource, /active\.closest\("\.session-automation-picker"\)/);
+    assert.match(rendererSource, /function hasOpenSessionAutomationPicker\(\)/);
+    assert.match(rendererSource, /element\.classList\.contains\("open"\)/);
     assert.match(rendererSource, /disposeSessionAutomationPickers\(\);/);
     assert.match(
       rendererSource,
-      /\(activeEdit \|\| hasFocusedSessionAutomationPicker\(\)\) && !options\.force/
+      /\(activeEdit \|\| hasOpenSessionAutomationPicker\(\)\) && !options\.force/
     );
     assert.match(dashboardHtml, /style-src 'self' 'unsafe-inline'/);
     assert.match(dashboardHtml, /<link rel="stylesheet" href="language-picker\.css">/);

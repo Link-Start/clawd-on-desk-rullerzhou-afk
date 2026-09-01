@@ -1203,12 +1203,16 @@ function appendSessionAutomationOrphans(fragment) {
   fragment.appendChild(section);
 }
 
-function hasFocusedSessionAutomationPicker() {
-  const active = document.activeElement;
-  const picker = active && typeof active.closest === "function"
-    ? active.closest(".session-automation-picker")
-    : null;
-  return !!(picker && contentEl.contains(picker));
+function hasOpenSessionAutomationPicker() {
+  return sessionAutomationPickers.some((picker) => {
+    const element = picker && picker.element;
+    return !!(
+      element
+      && element.classList
+      && element.classList.contains("open")
+      && contentEl.contains(element)
+    );
+  });
 }
 
 function disposeSessionAutomationPickers() {
@@ -1218,9 +1222,9 @@ function disposeSessionAutomationPickers() {
 
 function render(options = {}) {
   // The one-second elapsed-time tick normally rebuilds the entire card tree.
-  // Replacing a focused picker closes its menu, so defer ordinary
-  // snapshot/timer renders until the user finishes choosing.
-  if ((activeEdit || hasFocusedSessionAutomationPicker()) && !options.force) return;
+  // Replacing an open picker closes its menu, but focus alone must not block an
+  // authoritative snapshot that carries a newly created automation grant.
+  if ((activeEdit || hasOpenSessionAutomationPicker()) && !options.force) return;
   disposeSessionAutomationPickers();
   const sessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
   const count = sessions.length;
