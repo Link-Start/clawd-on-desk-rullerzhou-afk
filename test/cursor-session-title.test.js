@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const {
   SESSION_TITLE_MAX,
   PROMPT_TITLE_MAX,
@@ -113,6 +114,24 @@ describe("Cursor title normalization and prompt fallback", () => {
     for (const id of [null, undefined, "", "default", 123]) assert.equal(readComposerSessionTitle(id, options), null);
     assert.equal(attempts, 1);
   });
+
+  it("keeps stderr free of the optional SQLite notice without disabling other warnings", () => {
+    const dbPath = path.join(makeHome(), "state.vscdb");
+    fs.writeFileSync(dbPath, "fixture");
+    const result = spawnSync(process.execPath, [
+      ...process.execArgv.filter((arg) => arg === "--experimental-sqlite"),
+      "-e", `
+        const before = process.emitWarning;
+        require(process.argv[1]).readComposerSessionTitle("one", { dbPath: process.argv[2] });
+        if (process.emitWarning !== before) process.exit(2);
+        process.emitWarning("unrelated experimental feature", "ExperimentalWarning");
+      `,
+      path.resolve(__dirname, "..", "hooks", "cursor-session-title.js"), dbPath,
+    ], { encoding: "utf8", env: { ...process.env, NODE_NO_WARNINGS: "", NODE_OPTIONS: "" } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /SQLite is an experimental feature/);
+    assert.match(result.stderr, /ExperimentalWarning: unrelated experimental feature/);
+  });
 });
 
 describe("Cursor SQLite title layouts", { skip: sqliteUnavailable }, () => {
@@ -208,6 +227,7 @@ describe("Cursor hook title delivery", () => {
       },
     });
     assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, "", "Cursor reports stderr output as a hook execution error");
     const post = result.attempts.find((attempt) => attempt.kind === "request" && attempt.path === "/state");
     assert.ok(post);
     return { body: JSON.parse(post.body), stdout: result.stdout };

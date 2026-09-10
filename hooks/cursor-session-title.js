@@ -60,6 +60,23 @@ function readJsonRow(db, sql, key) {
   }
 }
 
+function loadSqlite() {
+  // Cursor treats any stderr as a hook error, even with exit 0 and valid
+  // stdout. Silence only Node's known SQLite notice during this synchronous
+  // optional import; preserve every other warning and restore the handler.
+  const emitWarning = process.emitWarning;
+  process.emitWarning = function (warning, type, ...args) {
+    if (type === "ExperimentalWarning"
+      && warning === "SQLite is an experimental feature and might change at any time") return;
+    return emitWarning.call(this, warning, type, ...args);
+  };
+  try {
+    return require("node:sqlite");
+  } finally {
+    process.emitWarning = emitWarning;
+  }
+}
+
 function readComposerSessionTitle(composerId, options = {}) {
   if (typeof composerId !== "string" || !composerId || composerId === "default") return null;
   const dbPath = options.dbPath || composerHeadersDbPath(options);
@@ -69,7 +86,7 @@ function readComposerSessionTitle(composerId, options = {}) {
     const openDatabase = options.openDatabase || ((filePath) => {
       // Optional: unflagged since Node 22.13 / 23.4. On the project's Node
       // 22.12 floor this throws and prompt fallback remains available.
-      const { DatabaseSync } = require("node:sqlite");
+      const { DatabaseSync } = loadSqlite();
       return new DatabaseSync(filePath, { readOnly: true });
     });
     db = openDatabase(dbPath);
