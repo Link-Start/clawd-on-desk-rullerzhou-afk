@@ -270,7 +270,7 @@ describe("Cursor hook installer", () => {
     fs.mkdirSync(appDir, { recursive: true });
     const script = path.join(appDir, "cursor-hook.js");
     const helper = path.resolve(__dirname, "..", "hooks", "shared-process.js");
-    fs.writeFileSync(script, `require(${JSON.stringify(helper)}).readStdinJson().then(payload => console.log(JSON.stringify(payload)));`);
+    fs.writeFileSync(script, `require(${JSON.stringify(helper)}).readStdinJsonDetailed().then(result => console.log(JSON.stringify(result)));`);
     const payload = { hook_event_name: "beforeSubmitPrompt", prompt: "check paths and stdin" };
     const input = path.join(root, "payload.json");
     fs.writeFileSync(input, JSON.stringify(payload));
@@ -281,7 +281,7 @@ describe("Cursor hook installer", () => {
       `$OutputEncoding = [System.Text.Encoding]::UTF8; Get-Content -LiteralPath '${input.replace(/'/g, "''")}' -Raw | & { $input | ${command} }`,
     ];
     const launcherFile = path.join(root, "launcher.ps1");
-    for (const launcher of launchers) {
+    for (const [index, launcher] of launchers.entries()) {
       fs.writeFileSync(launcherFile, "\ufeff" + launcher);
       const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-File", launcherFile], {
         encoding: "utf8", windowsHide: true, timeout: 10000,
@@ -289,7 +289,8 @@ describe("Cursor hook installer", () => {
       assert.ifError(result.error);
       assert.strictEqual(result.status, 0, result.stderr);
       assert.strictEqual(result.stderr, "");
-      assert.deepStrictEqual(JSON.parse(result.stdout.trim()), payload);
+      const received = JSON.parse(result.stdout.trim());
+      assert.deepStrictEqual(received.payload, payload, `Cursor stdin bridge ${index + 1}: ${JSON.stringify(received)}`);
     }
   });
 });
