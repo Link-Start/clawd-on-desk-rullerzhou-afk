@@ -263,14 +263,17 @@ describe("Cursor hook installer", () => {
     assert.strictEqual(unregisterCursorHooks({ silent: true, hooksPath }).changed, false);
   });
 
-  it("executes spaced Windows paths through both observed Cursor stdin bridges", { skip: process.platform !== "win32" }, () => {
+  it("executes spaced Windows paths through both observed Cursor stdin bridges", { skip: process.platform !== "win32" }, (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-cursor-launch-"));
     tempDirs.push(root);
     const appDir = path.join(root, "Clawd on Desk", "中文 hooks");
     fs.mkdirSync(appDir, { recursive: true });
     const script = path.join(appDir, "cursor-hook.js");
     const helper = path.resolve(__dirname, "..", "hooks", "shared-process.js");
-    fs.writeFileSync(script, `require(${JSON.stringify(helper)}).readStdinJsonDetailed().then(result => console.log(JSON.stringify(result)));`);
+    // Test command quoting and pipe integrity independently of the production
+    // 400ms deadline: hosted Windows runners can deliver the first byte later.
+    // shared-process.test.js separately checks the reader's timeout contract.
+    fs.writeFileSync(script, `require(${JSON.stringify(helper)}).readStdinJsonDetailed({ timeoutMs: 5000 }).then(result => console.log(JSON.stringify(result)));`);
     const payload = { hook_event_name: "beforeSubmitPrompt", prompt: "check paths and stdin" };
     const input = path.join(root, "payload.json");
     fs.writeFileSync(input, JSON.stringify(payload));
@@ -290,6 +293,7 @@ describe("Cursor hook installer", () => {
       assert.strictEqual(result.status, 0, result.stderr);
       assert.strictEqual(result.stderr, "");
       const received = JSON.parse(result.stdout.trim());
+      t.diagnostic(`Cursor stdin bridge ${index + 1}: ${received.bytes} bytes in ${received.durationMs}ms (timedOut=${received.timedOut})`);
       assert.deepStrictEqual(received.payload, payload, `Cursor stdin bridge ${index + 1}: ${JSON.stringify(received)}`);
     }
   });

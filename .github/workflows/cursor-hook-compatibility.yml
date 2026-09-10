@@ -13,6 +13,7 @@ on:
       - "hooks/json-utils.js"
       - "src/remote-ssh-deploy.js"
       - "test/cursor-*.test.js"
+      - "test/shared-process.test.js"
       - "test/helpers/spawned-hook.js"
       - "test/helpers/hook-post-recorder.js"
   workflow_dispatch:
@@ -52,6 +53,8 @@ jobs:
           test/hook-pid-cache-contexts.test.js
           test/doctor-node-bin-parser.test.js
           test/doctor-find-hook-commands.test.js
+      - name: Verify the unchanged production stdin read deadline
+        run: node --test --test-name-pattern=readStdinJson test/shared-process.test.js
       - name: Exercise SQLite on the supported Node 22.12 floor
         if: matrix.runtime == 'node-22-floor'
         run: node --experimental-sqlite --test test/cursor-session-title.test.js test/remote-deploy.test.js
