@@ -725,6 +725,28 @@ describe("server-route-state POST", () => {
     ]]);
   });
 
+  it("forwards Qoder title inputs for runtime enrichment after accepting the lifecycle", async () => {
+    for (const sessionTitle of [null, "Explicit Qoder title"]) {
+      const res = await callStatePost(JSON.stringify({
+        state: "thinking", event: "UserPromptSubmit", session_id: "qoder:s1",
+        agent_id: "qoder", transcript_path: "/tmp/qoder-session.jsonl",
+        ...(sessionTitle ? { session_title: sessionTitle } : {}),
+      }));
+      assert.strictEqual(res.statusCode, 200);
+      assert.strictEqual(res.calls.updateSession[0][3].sessionTitle, sessionTitle);
+      assert.strictEqual(res.calls.updateSession[0][3].transcriptPath, "/tmp/qoder-session.jsonl");
+    }
+  });
+
+  it("does not forward disabled Qoder events for title enrichment", async () => {
+    const res = await callStatePost(JSON.stringify({
+      state: "attention", event: "Stop", session_id: "qoder:s1",
+      agent_id: "qoder", transcript_path: "/tmp/qoder-session.jsonl",
+    }), { ctx: { isAgentEnabled: () => false } });
+    assert.strictEqual(res.statusCode, 204);
+    assert.deepStrictEqual(res.calls.updateSession, []);
+  });
+
   it("strips remote process metadata from state updates on the profile-bound ingress", async () => {
     const body = JSON.stringify({
       state: "working",
