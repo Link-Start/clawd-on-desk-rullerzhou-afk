@@ -73,8 +73,10 @@ describe("Remote SSH secure hook manifest", () => {
   // The relative-require closure test above cannot see bare requires, so
   // this allowlists Node builtins and rejects everything else (R8 P2).
   it("remote manifests require ONLY Node builtins; the family JSONC editor never ships", () => {
-    const { builtinModules } = require("node:module");
-    const builtinRoots = new Set(builtinModules.map((name) => name.split("/")[0]));
+    // Prefix-only builtins are absent from builtinModules. On Node 22.12,
+    // isBuiltin also hides node:sqlite unless its experimental flag is set;
+    // the title helper's guarded optional import is covered by its own tests.
+    const { isBuiltin } = require("node:module");
 
     const manifests = new Set(parseDeployedFiles());
     for (const name of manifests) {
@@ -90,9 +92,9 @@ describe("Remote SSH secure hook manifest", () => {
       );
       for (const match of content.matchAll(/require\(["']([^."'][^"']*)["']\)/g)) {
         const spec = match[1];
-        const root = (spec.startsWith("node:") ? spec.slice(5) : spec).split("/")[0];
+        const optionalTitleSqlite = name === "cursor-session-title.js" && spec === "node:sqlite";
         assert.ok(
-          builtinRoots.has(root),
+          isBuiltin(spec) || optionalTitleSqlite,
           `hooks/${name} requires "${spec}" — remote hosts have no node_modules, only Node builtins are deployable`
         );
       }
