@@ -35,6 +35,11 @@ function registerSessionIpc(options = {}) {
   );
   const getKimiQuotaStatus = requiredDependency(options.getKimiQuotaStatus, "getKimiQuotaStatus");
   const refreshKimiQuota = requiredDependency(options.refreshKimiQuota, "refreshKimiQuota");
+  const getSessionHistory = requiredDependency(options.getSessionHistory, "getSessionHistory");
+  const resumeSessionFromHistory = requiredDependency(
+    options.resumeSessionFromHistory,
+    "resumeSessionFromHistory"
+  );
   const quickMode = options.quickMode || null;
   const disposers = [];
 
@@ -92,6 +97,40 @@ function registerSessionIpc(options = {}) {
     }
     return openSessionFolder(sessionId);
   });
+  // Session history is the resume index for conversations that are no longer
+  // running. Rows carry working-directory paths, and resuming spawns a real
+  // agent process, so both channels are restricted to the trusted Dashboard
+  // frame the same way the Kimi quota capability is.
+  handle("dashboard:get-session-history", (event) => {
+    const rejected = rejectUntrustedDashboardEvent(event);
+    return rejected || getSessionHistory();
+  });
+  handle("dashboard:resume-session", (event, payload) => {
+    const rejected = rejectUntrustedDashboardEvent(event);
+    if (rejected) return rejected;
+    const keys = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? Object.keys(payload).sort()
+      : [];
+    if (
+      keys.length !== 2
+      || keys[0] !== "agentId"
+      || keys[1] !== "sessionId"
+      || typeof payload.agentId !== "string"
+      || !payload.agentId
+      || typeof payload.sessionId !== "string"
+      || !payload.sessionId
+    ) {
+      return { status: "invalid" };
+    }
+    // No mode field on purpose: the Dashboard can only resume with normal
+    // permissions. --dangerously-skip-permissions stays behind the pet menu
+    // flow, which confirms it explicitly.
+    return resumeSessionFromHistory({
+      agentId: payload.agentId,
+      sessionId: payload.sessionId,
+    });
+  });
+
   handle("dashboard:set-session-alias", (_event, payload) => setSessionAlias(payload));
   handle("dashboard:set-session-automation", (event, payload) => {
     const keys = payload && typeof payload === "object" && !Array.isArray(payload)

@@ -112,6 +112,14 @@ function createHarness(overrides = {}) {
       calls.push(["clearSessionAutomationGrant", payload]);
       return { status: "applied" };
     }),
+    getSessionHistory: overrides.getSessionHistory || (() => {
+      calls.push(["getSessionHistory"]);
+      return [{ agentId: "claude-code", sessionId: "h1", cwd: "/work" }];
+    }),
+    resumeSessionFromHistory: overrides.resumeSessionFromHistory || ((payload) => {
+      calls.push(["resumeSessionFromHistory", payload]);
+      return { status: "ok" };
+    }),
     getDashboardWebContents: overrides.getDashboardWebContents
       || (() => dashboardWebContents),
     quickMode: Object.prototype.hasOwnProperty.call(overrides, "quickMode")
@@ -147,6 +155,7 @@ test("session IPC registers owned channels and disposes them", () => {
     "dashboard:clear-session-automation-grant",
     "dashboard:get-i18n",
     "dashboard:get-kimi-quota-status",
+    "dashboard:get-session-history",
     "dashboard:get-snapshot",
     "dashboard:hide-session",
     "dashboard:open-session-folder",
@@ -156,6 +165,7 @@ test("session IPC registers owned channels and disposes them", () => {
     "dashboard:quick-pending",
     "dashboard:quick-ready",
     "dashboard:refresh-kimi-quota",
+    "dashboard:resume-session",
     "dashboard:set-session-alias",
     "dashboard:set-session-automation",
     "session-hud:get-i18n",
@@ -315,6 +325,73 @@ test("Kimi quota Dashboard IPC accepts only the real Dashboard main frame", asyn
     );
   }
   assert.deepStrictEqual(calls, [["refreshKimiQuota"]]);
+});
+
+test("session history IPC accepts only the real Dashboard main frame", async () => {
+  const { ipcMain, calls, trustedDashboardEvent } = createHarness();
+
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedDashboardEvent, "dashboard:get-session-history"),
+    [{ agentId: "claude-code", sessionId: "h1", cwd: "/work" }]
+  );
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(
+      trustedDashboardEvent,
+      "dashboard:resume-session",
+      { agentId: "claude-code", sessionId: "h1" }
+    ),
+    { status: "ok" }
+  );
+  assert.deepStrictEqual(calls, [
+    ["getSessionHistory"],
+    ["resumeSessionFromHistory", { agentId: "claude-code", sessionId: "h1" }],
+  ]);
+
+  // Rows expose working-directory paths and resuming spawns a real process,
+  // so a near-miss sender must not reach either owner.
+  calls.length = 0;
+  for (const event of [
+    { sender: trustedDashboardEvent.sender },
+    { sender: {}, senderFrame: trustedDashboardEvent.senderFrame },
+    { sender: trustedDashboardEvent.sender, senderFrame: { ...trustedDashboardEvent.senderFrame } },
+  ]) {
+    for (const channel of ["dashboard:get-session-history", "dashboard:resume-session"]) {
+      assert.deepStrictEqual(
+        await ipcMain.invokeFrom(event, channel, { agentId: "claude-code", sessionId: "h1" }),
+        { status: "error", reason: "untrusted-dashboard-sender" },
+        channel
+      );
+    }
+  }
+  assert.deepStrictEqual(calls, []);
+});
+
+test("resume-session takes exactly an agentId/sessionId pair", async () => {
+  const { ipcMain, calls, trustedDashboardEvent } = createHarness();
+
+  for (const bad of [
+    null,
+    undefined,
+    "claude-code",
+    42,
+    [],
+    {},
+    { sessionId: "h1" },
+    { agentId: "claude-code" },
+    { agentId: "claude-code", sessionId: "" },
+    { agentId: "", sessionId: "h1" },
+    { agentId: "claude-code", sessionId: "h1", mode: "resume-dangerous" },
+    { agentId: "claude-code", sessionId: "h1", cwd: "/somewhere/else" },
+  ]) {
+    assert.deepStrictEqual(
+      await ipcMain.invokeFrom(trustedDashboardEvent, "dashboard:resume-session", bad),
+      { status: "invalid" },
+      JSON.stringify(bad)
+    );
+  }
+  // Above all: no extra field may ride along. cwd is resolved in main from the
+  // store, and a dangerous-mode flag has no route in from the Dashboard.
+  assert.deepStrictEqual(calls, []);
 });
 
 test("session IPC owns dashboard open bridges", () => {

@@ -197,6 +197,10 @@ const {
 const { focusCodexThreadTarget } = require("./session-focus-handoff");
 const { isSessionInProgress } = require("./state-session-snapshot");
 const { restoreSessionsFromRecoveryLeases } = require("./session-recovery-loader");
+const {
+  loadResumableSessionHistory,
+  resolveResumeTarget,
+} = require("./session-history-loader");
 const { getAllAgents, getAgent } = require("../agents/registry");
 const { getAgentIconUrl } = require("./state-agent-icons");
 // ── Autoplay policy: allow sound playback without user gesture ──
@@ -4773,6 +4777,34 @@ registerSessionIpc({
   },
   clearSessionAutomationGrant: (payload) =>
     sessionAutomationCoordinator.clearSessionAutomationGrant(payload),
+  getSessionHistory: () => {
+    // Sessions already on screen belong to the live list, not the resume list.
+    const snapshot = _state.buildSessionSnapshot();
+    const activeRawSessionIds = new Set(
+      (snapshot && Array.isArray(snapshot.sessions) ? snapshot.sessions : [])
+        .map((session) => session && session.rawSessionId)
+        .filter((id) => typeof id === "string" && id)
+    );
+    return loadResumableSessionHistory({
+      activeRawSessionIds,
+      isAgentEnabled: (agentId) => (
+        _runtimeAgentGate.isAgentEnabled(agentId)
+        && _runtimeAgentGate.isAgentIntegrationInstalled(agentId)
+      ),
+    });
+  },
+  // The renderer sends an id pair only; the folder to relaunch in is read back
+  // from the store so a renderer can never choose it.
+  resumeSessionFromHistory: async ({ agentId, sessionId }) => {
+    const target = resolveResumeTarget(agentId, sessionId);
+    if (!target) return { status: "error", reason: "unresolvable" };
+    try {
+      await launchClaudeSession("resume", target.cwd, target.sessionId);
+      return { status: "ok" };
+    } catch (err) {
+      return { status: "error", reason: "launch-failed", message: err && err.message };
+    }
+  },
   showDashboard: (options) => showDashboard(options),
   setSessionHudPinned: (value) => {
     const result = _settingsController.applyUpdate("sessionHudPinned", !!value);

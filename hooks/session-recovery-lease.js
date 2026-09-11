@@ -648,6 +648,9 @@ function loadActiveRecoveryLeases(options = {}) {
 
 module.exports = {
   LEASE_VERSION,
+  // Exported so hooks/session-history.js can reuse this arbiter instead of
+  // deciding "is this session still running" a second, divergent way.
+  classifyStateBodyForRecovery: classifyBody,
   LEASE_FILE_PREFIX,
   MAX_LEASE_AGE_MS,
   MAX_LEASE_FILES,
