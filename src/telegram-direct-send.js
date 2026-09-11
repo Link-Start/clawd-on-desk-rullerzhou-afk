@@ -1,8 +1,10 @@
 "use strict";
 
+const { getEntryDisplaySessionTag } = require("./state-session-snapshot");
+
 const { execFile: defaultExecFile } = require("child_process");
 const {
-  getSessionFocusTarget,
+  getDirectSendFocusTarget,
   isFocusableLocalHudSession,
 } = require("./session-focus");
 const { createTranslator } = require("./i18n");
@@ -47,9 +49,8 @@ function normalizePromptText(value) {
   return text;
 }
 
-function shortSessionId(sessionId) {
-  const id = String(sessionId || "");
-  return id.length > 12 ? `${id.slice(0, 12)}...` : id;
+function shortSessionId(entry) {
+  return getEntryDisplaySessionTag(entry);
 }
 
 function findSession(snapshot, sessionId) {
@@ -358,7 +359,7 @@ function interpolate(template, token, value) {
 }
 
 function formatDeliveryAck(status, entry, deliveryResult, t) {
-  const shortId = shortSessionId(entry && entry.id);
+  const shortId = shortSessionId(entry);
   switch (status) {
     case "sent_with_enter":
       return interpolate(t("directSendAckSent"), "{session}", shortId);
@@ -610,21 +611,23 @@ function createTelegramDirectSend({
       };
     }
 
-    const focusTarget = getSessionFocusTarget(entry, { osPlatform });
+    const focusTarget = getDirectSendFocusTarget(entry, { osPlatform });
     const localFocusable = isFocusableLocalHudSession(entry, { osPlatform });
-    if (!localFocusable || focusTarget.type !== "terminal") {
+    if (!localFocusable || !focusTarget.canFocus || focusTarget.type !== "terminal") {
+      const errorClass = focusTarget.reason || "not_focusable_terminal";
       safeLog("info", "direct-send fallback: session not local terminal", {
         sessionId: entry.id,
         type: focusTarget.type || "none",
+        reason: errorClass,
       });
       updateDeliveryEntry(deliveryEntry, "not_focusable", {
-        errorClass: "not_focusable_terminal",
+        errorClass,
       });
       const fallback = await tryClipboardFallback(
         deliveryEntry,
         entry,
-        "not_focusable_terminal",
-        { errorClass: "not_focusable_terminal" }
+        errorClass,
+        { errorClass }
       );
       if (fallback) return fallback;
       return {
@@ -746,6 +749,7 @@ function createTelegramDirectSend({
 
 module.exports = {
   DEFAULT_MAPPING_TTL_MS,
+  formatDeliveryAck,
   DEFAULT_MAX_DELIVERIES,
   createTelegramDirectSend,
   createClipboardFallbackDeliveryAdapter,

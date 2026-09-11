@@ -1,7 +1,7 @@
 // test/hook-adapter-offline-contract.test.js — #681 Slice A1, adapter contract.
 //
 // The claim this file has to earn: tightening the SHARED resolver to return an
-// unavailable shape is safe for all 14 adapters WITHOUT touching any of them.
+// unavailable shape is safe for all 16 adapters WITHOUT touching any of them.
 //
 // It is not enough to assert the shape in isolation. Seven adapters (codex,
 // copilot, cursor, kimi, kiro, codebuddy, workbuddy) do a bare `pidChain.length`
@@ -33,7 +33,7 @@ const { createSpawnedHookHarness } = require("./helpers/spawned-hook");
 const HOOKS_DIR = path.resolve(__dirname, "..", "hooks");
 
 // Every createPidResolver consumer. Cross-checked against
-// `grep -l createPidResolver hooks/*.js` — if a 15th adapter appears without a
+// `grep -l createPidResolver hooks/*.js` — if an 18th adapter appears without a
 // row here, the count assertion at the bottom fails.
 //
 // `stdout` is the EXACT bytes the agent must still receive while Clawd is
@@ -52,7 +52,11 @@ const ADAPTERS = [
   { name: "clawd-hook.js", argv: ["PreToolUse"], payload: { hook_event_name: "PreToolUse", session_id: "s-681", cwd: "D:/repo" }, stdout: "" },
   { name: "codex-hook.js", payload: { hook_event_name: "PreToolUse", session_id: "s-681", cwd: "D:/repo" }, stdout: "" },
   { name: "copilot-hook.js", argv: ["sessionStart"], payload: { hook_event_name: "sessionStart", session_id: "s-681", cwd: "D:/repo" }, stdout: "" },
-  { name: "cursor-hook.js", payload: { hook_event_name: "beforeSubmitPrompt", cwd: "D:/repo" }, stdout: `${JSON.stringify({ continue: true })}\n` },
+  // #634: cursor's beforeSubmitPrompt now maps to the "prompt" lifecycle,
+  // which is cache-only and deliberately spawn-free — it can no longer anchor
+  // the one-spawn vacuity guard. preToolUse ("event" lifecycle: fresh on cache
+  // miss) keeps the guard meaningful, matching the other adapters' rows.
+  { name: "cursor-hook.js", payload: { hook_event_name: "preToolUse", cwd: "D:/repo" }, stdout: "{}\n" },
   { name: "gemini-hook.js", payload: { hook_event_name: "SessionStart", cwd: "D:/repo" }, stdout: null },
   { name: "kimi-hook.js", payload: { hook_event_name: "PreToolUse", session_id: "s-681", cwd: "D:/repo" }, stdout: "" },
   { name: "kiro-hook.js", payload: { hook_event_name: "preToolUse", cwd: "D:/repo" }, stdout: "" },
@@ -61,13 +65,29 @@ const ADAPTERS = [
   { name: "qoder-hook.js", payload: { hook_event_name: "PreToolUse", session_id: "s-681", cwd: "D:/repo" }, stdout: null },
   { name: "qoderwork-hook.js", payload: { hook_event_name: "PreToolUse", session_id: "s-681", cwd: "D:/repo" }, stdout: null },
   { name: "qwen-code-hook.js", payload: { hook_event_name: "PreToolUse", session_id: "s-681", cwd: "D:/repo" }, stdout: null },
-  { name: "reasonix-hook.js", payload: { event: "PreToolUse", cwd: "D:/repo", toolName: "bash" }, stdout: "" },
+  // #843: QwenWork is state-only — stdout is "{}\n" on every path (offline,
+  // online, unmapped event, throw), so it is asserted exactly here. PreToolUse
+  // (not PermissionRequest/PermissionDenied) is the row that keeps the vacuity
+  // guard honest: the permission events deliberately skip pid resolution.
+  { name: "qwenwork-hook.js", payload: { hook_event_name: "PreToolUse", session_id: "s-681", cwd: "D:/repo" }, stdout: "{}\n" },
+  // Since Phase 2, zcode's PermissionRequest path resolves pid metadata (one
+  // spawn keeps the vacuity guard honest) and then blocks on /permission;
+  // offline that probe fails fast and stdout stays the exact "{}\n"
+  // no-decision the ZCode hook runner needs to fall back to its native flow.
+  { name: "zcode-hook.js", argv: ["PermissionRequest"], payload: { hook_event_name: "PermissionRequest", session_id: "s-681", cwd: "D:/repo", tool_name: "Bash", tool_input: { command: "echo hi" } }, stdout: "{}\n" },
+  // Reasonix blocking hooks are intentionally cache-only/zero-spawn even when
+  // Clawd is live. PostToolUse keeps this offline gate assertion non-vacuous.
+  { name: "reasonix-hook.js", payload: { event: "PostToolUse", sessionId: "s-681", cwd: "D:/repo", toolName: "bash" }, stdout: "" },
   // WorkBuddy reads pidChain.length bare too, so the tightened resolver's
   // []-not-null offline shape is still load-bearing here. session_id is
   // REQUIRED: workbuddy-hook.js
   // drops any event without one before it ever resolves (#618/#648), which would
   // otherwise make the vacuity guard below see zero spawns and fail.
   { name: "workbuddy-hook.js", payload: { hook_event_name: "PreToolUse", session_id: "s-681", cwd: "D:/repo" }, stdout: "{}\n" },
+  // TraeCode is state-only: every event emits {} (no permission gating).
+  // session_id is required so the resolver cache context is non-default and
+  // the vacuity guard sees the one PowerShell snapshot when Clawd is alive.
+  { name: "traecode-hook.js", payload: { hook_event_name: "PreToolUse", session_id: "s-681", cwd: "D:/repo" }, stdout: "{}\n" },
 ];
 
 let hookHarness;
@@ -140,14 +160,14 @@ describe("#681 — every adapter survives a clean offline with zero spawn", { sk
     }
   });
 
-  it("covers every createPidResolver consumer in hooks/ (fails when a 15th adapter lands)", () => {
+  it("covers every createPidResolver consumer in hooks/ (fails when an 18th adapter lands)", () => {
     const consumers = fs.readdirSync(HOOKS_DIR)
       .filter((f) => f.endsWith("-hook.js"))
       .filter((f) => fs.readFileSync(path.join(HOOKS_DIR, f), "utf8").includes("createPidResolver("))
       .sort();
     assert.deepStrictEqual(consumers, ADAPTERS.map((a) => a.name).sort(),
       "a new createPidResolver adapter must be added to ADAPTERS above and proven offline-safe");
-    assert.strictEqual(consumers.length, 14, "the plan and AGENTS.md both say 14 (workbuddy joined in #618)");
+    assert.strictEqual(consumers.length, 17, "traecode-hook.js and qwenwork-hook.js joined the createPidResolver consumers");
   });
 });
 

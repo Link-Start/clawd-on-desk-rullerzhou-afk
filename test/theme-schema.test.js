@@ -46,6 +46,25 @@ describe("theme schema validation", () => {
     assert.ok(errors.some((error) => error.includes("updateBubbleAnchorBox must include finite")));
   });
 
+  it("strictly validates per-file object-channel SVG basenames", () => {
+    assert.deepStrictEqual(schema.validateTheme(validThemeJson({
+      rendering: { objectChannelFiles: ["animated.svg"] },
+    })), []);
+
+    for (const objectChannelFiles of [
+      "animated.svg",
+      ["../animated.svg"],
+      ["animated.png"],
+      ["UPPER.SVG"],
+      [42],
+    ]) {
+      const errors = schema.validateTheme(validThemeJson({
+        rendering: { objectChannelFiles },
+      }));
+      assert.ok(errors.some((error) => error.includes("rendering.objectChannelFiles")));
+    }
+  });
+
   it("treats sleepSequence.mode=direct as not requiring full sleep art", () => {
     const errors = schema.validateTheme(validThemeJson({
       sleepSequence: { mode: "direct" },
@@ -118,7 +137,7 @@ describe("theme schema validation", () => {
     );
     assert.deepStrictEqual(
       schema.mergeDefaults(validThemeJson()).customization,
-      { petTint: false, accessories: null }
+      { petTint: false, accessories: null, mouthAccessories: null }
     );
   });
 
@@ -133,6 +152,7 @@ describe("theme schema validation", () => {
           files: {
             "idle.svg": {
               staticFrame: { cx: 50, baseY: 20, width: 30 },
+              hitBoxPadding: { left: 1, top: 2, right: 1, bottom: 0 },
               followTarget: {
                 id: "body-js",
                 frame: { cx: 12, baseY: 4, width: 16 },
@@ -153,9 +173,139 @@ describe("theme schema validation", () => {
     assert.strictEqual(schema.buildCapabilities(raw).accessories, true);
     assert.strictEqual(schema.buildCapabilities(normalized).accessories, true);
     assert.deepStrictEqual(
+      normalized.customization.accessories.files["idle.svg"].hitBoxPadding,
+      { left: 1, top: 2, right: 1, bottom: 0 }
+    );
+    assert.deepStrictEqual(
       normalized.customization.accessories.files["sleeping.svg"],
       { visibility: "hidden" }
     );
+  });
+
+  it("validates bounded conditional idle easter eggs", () => {
+    const egg = {
+      file: "clawd-outlaw-bender.svg",
+      duration: 15000,
+      chance: 0.05,
+      cooldownMs: 1800000,
+      requiresAccessories: { head: "cowboy-hat", mouth: "cigarette" },
+    };
+    assert.deepStrictEqual(schema.validateTheme(validThemeJson({ idleEasterEggs: [egg] })), []);
+
+    const cases = [
+      [{ ...egg, file: "../bender.svg" }, ".file must be a safe basename"],
+      [{ ...egg, duration: 0 }, ".duration must be between"],
+      [{ ...egg, chance: 0 }, ".chance must be greater than 0"],
+      [{ ...egg, cooldownMs: Infinity }, ".cooldownMs must be between"],
+      [{ ...egg, requiresAccessories: { head: "cowboy-hat" } }, ".mouth must be a safe accessory item id"],
+      [{ ...egg, requiresAccessories: { ...egg.requiresAccessories, tail: "cape" } }, ".tail is not supported"],
+    ];
+    for (const [badEgg, expected] of cases) {
+      const errors = schema.validateTheme(validThemeJson({ idleEasterEggs: [badEgg] }));
+      assert.ok(errors.some((error) => error.includes(expected)), JSON.stringify(errors));
+    }
+
+    const errors = schema.validateTheme(validThemeJson({
+      idleEasterEggs: [{ ...egg, chance: 0.6 }, { ...egg, file: "second.svg", chance: 0.5 }],
+    }));
+    assert.ok(errors.includes("idleEasterEggs total chance must be at most 1"));
+  });
+
+  it("derives the mouth slot independently and preserves reflection normalization", () => {
+    const raw = validThemeJson({
+      customization: {
+        mouthAccessories: {
+          default: { staticFrame: { cx: 70, baseY: 58, width: 12 } },
+          files: {
+            "idle.svg": {
+              staticFrame: { cx: 68, baseY: 57, width: 12 },
+              followTarget: {
+                id: "mouth-anchor-right",
+                frame: { cx: 2.5, baseY: 8, width: 5 },
+                normalizeReflection: "x",
+              },
+            },
+            "sleeping.svg": { visibility: "hidden" },
+          },
+        },
+      },
+    });
+    const normalized = schema.mergeDefaults(raw, "demo", true);
+    assert.deepStrictEqual(schema.validateTheme(raw), []);
+    assert.strictEqual(schema.deriveMouthAccessoryCapability(raw), true);
+    assert.strictEqual(schema.buildCapabilities(raw).mouthAccessories, true);
+    assert.strictEqual(schema.buildCapabilities(raw).accessories, false);
+    assert.strictEqual(
+      normalized.customization.mouthAccessories.files["idle.svg"].followTarget.normalizeReflection,
+      "x"
+    );
+
+    const invalidMouth = validThemeJson({
+      customization: {
+        accessories: { default: { staticFrame: { cx: 50, baseY: 20, width: 30 } } },
+        mouthAccessories: {
+          default: { staticFrame: { cx: 70, baseY: 58, width: 12 } },
+          files: {
+            "idle.svg": {
+              staticFrame: { cx: 68, baseY: 57, width: 12 },
+              followTarget: {
+                id: "mouth-anchor-right",
+                frame: { cx: 2.5, baseY: 8, width: 5 },
+                normalizeReflection: "both",
+              },
+            },
+          },
+        },
+      },
+    });
+    assert.ok(schema.validateTheme(invalidMouth).some((error) => (
+      error.includes("customization.mouthAccessories")
+      && error.includes("normalizeReflection")
+    )));
+    assert.strictEqual(schema.deriveAccessoryCapability(invalidMouth), true);
+    assert.strictEqual(schema.deriveMouthAccessoryCapability(invalidMouth), false);
+  });
+
+  it("materializes sparse head item overrides without adding a third fallback path", () => {
+    const raw = validThemeJson({
+      customization: {
+        accessories: {
+          default: { staticFrame: { cx: 50, baseY: 20, width: 30 } },
+          itemOverrides: {
+            "cowboy-hat": {
+              files: {
+                "sleeping.svg": { visibility: "hidden" },
+                "idle.svg": { staticFrame: { cx: 48, baseY: 19, width: 31 } },
+              },
+            },
+          },
+        },
+      },
+    });
+    assert.deepStrictEqual(schema.validateTheme(raw), []);
+    const effective = schema.resolveEffectiveAccessoryAttachments(raw, raw);
+    assert.deepStrictEqual(effective.itemOverrides["cowboy-hat"].files["sleeping.svg"], {
+      visibility: "hidden",
+    });
+    assert.deepStrictEqual(effective.itemOverrides["cowboy-hat"].files["idle.svg"], {
+      staticFrame: { cx: 48, baseY: 19, width: 31 },
+    });
+
+    const stale = validThemeJson({
+      customization: {
+        accessories: {
+          default: { staticFrame: { cx: 50, baseY: 20, width: 30 } },
+          itemOverrides: {
+            "cowboy-hat": {
+              files: { "missing.svg": { visibility: "hidden" } },
+            },
+          },
+        },
+      },
+    });
+    assert.ok(schema.validateTheme(stale).some((error) => (
+      error.includes("itemOverrides") && error.includes("reachable")
+    )));
   });
 
   it("projects mini low-power overrides through the mini viewBox", () => {
@@ -196,7 +346,7 @@ describe("theme schema validation", () => {
     assert.ok(lowPowerUsages.every((usage) => usage.effectiveViewBox.width === 20));
   });
 
-  it("fails accessory capability closed on incomplete viewBox coverage or stale file descriptors", () => {
+  it("fails accessory capability closed on incomplete viewBox coverage but permits exact library descriptors", () => {
     const miniStates = Object.fromEntries(
       schema.MINI_REQUIRED_STATES.map((state) => [state, [`${state}.svg`]])
     );
@@ -238,7 +388,17 @@ describe("theme schema validation", () => {
         },
       },
     });
-    assert.strictEqual(schema.deriveAccessoryCapability(staleDescriptor), false);
+    assert.strictEqual(schema.deriveAccessoryCapability(staleDescriptor), true);
+    assert.deepStrictEqual(
+      schema.resolveEffectiveAccessoryAttachments(staleDescriptor, staleDescriptor)
+        .files["not-reachable.svg"],
+      { staticFrame: { cx: 50, baseY: 20, width: 30 } },
+      "an optional picker descriptor must survive until a later override selects it"
+    );
+    assert.ok(
+      schema.collectRequiredAssetFiles(staleDescriptor).includes("not-reachable.svg"),
+      "an exact animation-library descriptor must make its asset required"
+    );
   });
 
   it("does not require unreachable mini attachments when mini mode is disabled", () => {
@@ -288,6 +448,15 @@ describe("theme schema validation", () => {
               id: "[id^=eye]",
               frame: { cx: 12, baseY: 4, width: 16 },
             },
+          },
+        },
+      },
+      {
+        default: { staticFrame: { cx: 50, baseY: 20, width: 30 } },
+        files: {
+          "idle.svg": {
+            staticFrame: { cx: 50, baseY: 20, width: 30 },
+            hitBoxPadding: { top: -1 },
           },
         },
       },
@@ -360,6 +529,13 @@ describe("theme schema defaults and normalization", () => {
       },
       workingTiers: [{ minSessions: 2, file: "../tier.svg" }],
       idleAnimations: [{ file: "../look.svg", duration: 100 }],
+      idleEasterEggs: [{
+        file: "bender.svg",
+        duration: 15000,
+        chance: 0.05,
+        cooldownMs: 1800000,
+        requiresAccessories: { head: "cowboy-hat", mouth: "cigarette" },
+      }],
       displayHintMap: { "../old.svg": "../new.svg" },
       updateVisuals: { checking: "../checking.svg" },
     }), "demo", true);
@@ -376,6 +552,13 @@ describe("theme schema defaults and normalization", () => {
     assert.deepStrictEqual(theme.reactions.double.files, ["a.svg", "b.svg"]);
     assert.strictEqual(theme.workingTiers[0].file, "tier.svg");
     assert.strictEqual(theme.idleAnimations[0].file, "look.svg");
+    assert.deepStrictEqual(theme.idleEasterEggs, [{
+      file: "bender.svg",
+      duration: 15000,
+      chance: 0.05,
+      cooldownMs: 1800000,
+      requiresAccessories: { head: "cowboy-hat", mouth: "cigarette" },
+    }]);
     assert.deepStrictEqual(theme.displayHintMap, { "../old.svg": "new.svg" });
     assert.deepStrictEqual(theme.updateVisuals, { checking: "checking.svg" });
   });
@@ -389,6 +572,7 @@ describe("theme schema defaults and normalization", () => {
       },
       rendering: {
         svgChannel: "object",
+        objectChannelFiles: ["../animated.svg", "animated.svg", "still.png"],
         lowPowerStaticImageOverrides: {
           sleeping: { from: "../sleep.svg", to: "../sleep.png" },
           bad: { from: "", to: "missing.png" },
@@ -405,6 +589,7 @@ describe("theme schema defaults and normalization", () => {
     });
     assert.deepStrictEqual(builtin.rendering, {
       svgChannel: "object",
+      objectChannelFiles: ["animated.svg"],
       lowPowerStaticImageOverrides: {
         sleeping: { from: "sleep.svg", to: "sleep.png" },
       },
@@ -424,6 +609,15 @@ describe("theme schema defaults and normalization", () => {
     assert.deepStrictEqual(external.rendering, { svgChannel: "auto" });
   });
 
+  it("drops non-string object-channel entries instead of throwing during normalization", () => {
+    const input = validThemeJson({
+      rendering: { objectChannelFiles: [{}, 42, true, ["nested.svg"], "valid.svg"] },
+    });
+    assert.doesNotThrow(() => schema.mergeDefaults(input, "external", false));
+    const normalized = schema.mergeDefaults(input, "external", false);
+    assert.deepStrictEqual(normalized.rendering.objectChannelFiles, ["valid.svg"]);
+  });
+
   it("collectRequiredAssetFiles returns unique basename-only references", () => {
     const files = schema.collectRequiredAssetFiles({
       states: { idle: ["../idle.svg"], working: ["working.svg"] },
@@ -431,7 +625,9 @@ describe("theme schema defaults and normalization", () => {
       workingTiers: [{ file: "../tier.svg" }],
       jugglingTiers: [{ file: "juggling.svg" }],
       idleAnimations: [{ file: "idle-look.svg" }],
+      idleEasterEggs: [{ file: "bender.svg" }],
       rendering: {
+        objectChannelFiles: ["../bender.svg", "bender.svg"],
         lowPowerStaticImageOverrides: {
           sleeping: { from: "../sleep.svg", to: "sleep.png" },
         },
@@ -446,6 +642,7 @@ describe("theme schema defaults and normalization", () => {
     });
 
     assert.deepStrictEqual(files.sort(), [
+      "bender.svg",
       "checking.svg",
       "dnd-sleep.svg",
       "double.svg",
@@ -461,5 +658,41 @@ describe("theme schema defaults and normalization", () => {
       "tier.svg",
       "working.svg",
     ]);
+    assert.deepStrictEqual(
+      schema.projectThemeVisualUsages({ rendering: { objectChannelFiles: ["bender.svg"] } }),
+      [],
+      "a channel override is an asset reference, not an independent visual/viewBox usage"
+    );
+  });
+
+  it("collectRequiredAssetFiles ignores malformed raw object-channel entries", () => {
+    assert.deepStrictEqual(schema.collectRequiredAssetFiles({
+      rendering: { objectChannelFiles: [42, {}, ["nested.svg"], "valid.svg"] },
+    }), ["valid.svg"]);
+    assert.deepStrictEqual(schema.collectRequiredAssetFiles({
+      rendering: { objectChannelFiles: 42 },
+    }), []);
+    assert.deepStrictEqual(schema.collectRequiredAssetFiles({
+      rendering: { objectChannelFiles: {} },
+    }), []);
+  });
+
+  it("does not invent a root-viewBox usage for mini object-channel files", () => {
+    const theme = validThemeJson({
+      viewBox: { x: 0, y: 0, width: 100, height: 100 },
+      miniMode: {
+        supported: true,
+        viewBox: { x: 0, y: 0, width: 32, height: 32 },
+        states: { "mini-idle": ["mini-idle.svg"] },
+      },
+      rendering: { objectChannelFiles: ["mini-idle.svg"] },
+    });
+    const usages = schema.projectThemeVisualUsages(theme)
+      .filter((usage) => usage.file === "mini-idle.svg");
+
+    assert.strictEqual(usages.length, 1);
+    assert.strictEqual(usages[0].stateFamily, "mini:mini-idle");
+    assert.deepStrictEqual(usages[0].effectiveViewBox, { x: 0, y: 0, width: 32, height: 32 });
+    assert.ok(schema.collectRequiredAssetFiles(theme).includes("mini-idle.svg"));
   });
 });

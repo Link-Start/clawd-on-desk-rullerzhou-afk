@@ -21,7 +21,18 @@
 //
 // Steps in order: verify → remote-shell → mkdir → check-node → scp →
 // host-prefix → install-claude → install-codex → install-copilot
-// (last three are best-effort — failures don't abort).
+// (last three are best-effort — failures don't abort). That list describes
+// the retired legacy path only.
+//
+// secureDeploy additionally runs the Hermes Agent phase — hermes-files →
+// install-hermes — as its LAST remote mutation, after the identity-tracked
+// components (installers, Claude permission readback, Codex monitor) and
+// before it returns success. Hermes assets live in their own exact staging
+// directory, a sibling of the flat hook stage, cleaned with rm -f of the two
+// known files plus a single rmdir; an unknown transport result leaves that
+// stage, the deploy lock and the recovery evidence untouched. Hermes has no
+// identity transaction step of its own (REMOTE_IDENTITY_STEP_NAMES is
+// unchanged) and never sets the local integrationInstalled flag.
 //
 // remote-shell aborts the deploy when the remote default shell is cmd.exe:
 // every later step would fail anyway (`mkdir -p`, `~/...` expansion, the
@@ -41,6 +52,7 @@ const {
   buildRemoteNodeEvalCommand,
 } = require("./remote-ssh-node");
 const { decodeShellBytes } = require("./remote-ssh-decode");
+const { redactTransportDiagnostic } = require("./remote-ssh-transport");
 const { detectRemoteShell } = require("./remote-ssh-shell-detect");
 const {
   normalizeRemoteRuntimeIdentity,
@@ -48,6 +60,11 @@ const {
 } = require("./remote-ssh-layout");
 const { buildRemoteIdentityDocument } = require("./remote-ssh-identity");
 const { quoteForPosixShellArg } = require("./remote-ssh-quote");
+const {
+  HERMES_RESULT_SENTINEL,
+  HERMES_PLUGIN_ASSET_FILES,
+  parseHermesInstallerResult,
+} = require("./hermes-installer-result");
 
 // ── Hook files manifest ──
 //
@@ -67,6 +84,7 @@ const HOOK_FILES = [
   "state-payload-size.js",
   "claude-stop-disposition.js",
   "session-recovery-lease.js",
+  "cursor-session-title.js",
   "clawd-hook.js",
   "install.js",
   "uninstall.js",
@@ -81,7 +99,15 @@ const HOOK_FILES = [
   "codex-subagent-fields.js",
   "copilot-hook.js",
   "copilot-install.js",
+  "hermes-install.js",
 ];
+// Hermes plugin assets never join HOOK_FILES: they are not hook scripts and
+// go to their own exact staging directory, not ~/.claude/hooks.
+const HERMES_PLUGIN_DIR = "hermes-plugin";
+const HERMES_CLI_TIMEOUT_MS = 15000;
+const HERMES_OUTER_TIMEOUT_BASE_MS = 30000;
+const HERMES_OUTER_TIMEOUT_PER_TARGET_MS = 5000;
+const HERMES_OUTER_TIMEOUT_MAX_MS = 300000;
 const ISOLATED_CLI_MINIMUMS = Object.freeze({
   // Claude has a reviewed baseline in plan v8. Codex/Copilot stay fail-closed
   // until the real CLI matrix establishes supported minimums.
@@ -102,23 +128,38 @@ function resolveHooksDir({ app, isPackaged } = {}) {
 }
 
 function spawnAndWait(spawn, command, args, opts = {}) {
-  const { stdin, env, timeoutMs = 60000, runtime } = opts;
-  return new Promise((resolve) => {
+  const {
+    stdin,
+    env,
+    timeoutMs = 60000,
+    runtime,
+    role = command,
+    mutation = false,
+  } = opts;
+  return new Promise((resolve, reject) => {
     let child;
+    const managed = runtime && typeof runtime.spawnManagedTransportChild === "function";
+    const childOptions = {
+      env: { ...process.env, LANG: "C", LC_ALL: "C", ...(env || {}) },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    };
     try {
-      child = spawn(command, args, {
-        env: { ...process.env, LANG: "C", LC_ALL: "C", ...(env || {}) },
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-      });
+      child = managed
+        ? runtime.spawnManagedTransportChild({ role, tool: command, args, options: childOptions })
+        : spawn(command, args, childOptions);
     } catch (err) {
+      if (managed) {
+        reject(err);
+        return;
+      }
       resolve({ code: -1, signal: null, stdout: "", stderr: (err && err.message) || "spawn failed", spawnError: true });
       return;
     }
     // Register with runtime so before-quit cleanup can kill the child if
     // the user closes the app mid-Deploy. Unregister on resolve so we
     // don't pile up references for completed children.
-    if (runtime && typeof runtime.registerChild === "function") {
+    if (!managed && runtime && typeof runtime.registerChild === "function") {
       runtime.registerChild(child);
     }
     // Accumulate raw bytes — decode once at finish via decodeShellBytes so
@@ -128,17 +169,74 @@ function spawnAndWait(spawn, command, args, opts = {}) {
     const stdoutChunks = [];
     const stderrChunks = [];
     let done = false;
+    let exitCode = null;
+    let exitSignal = null;
+    let processError = null;
+    let timedOut = false;
+    let drainTimer = null;
     const timer = setTimeout(() => {
       if (done) return;
-      try { child.kill(); } catch {}
+      timedOut = true;
+      // A managed serialized child is not force-killed here. Closing only the
+      // outer ssh process cannot prove that its nested ProxyCommand transport
+      // has drained. Keep tracking it and quarantine if it will not close on
+      // its own. Ordinary transports retain the legacy termination request.
+      if (!managed) {
+        try { child.kill(); } catch {}
+      }
+      // A timeout request is not a verified drain. Serialized operation
+      // contexts invalidate here and retain their independent close registry;
+      // the public operation can still return within a bound.
+      drainTimer = setTimeout(() => {
+        if (done) return;
+        const err = Object.assign(new Error("Remote SSH child did not close after timeout"), {
+          name: "TransportUndrainedError",
+          code: "transport_drain_timeout",
+          timedOut: true,
+          drainVerified: false,
+          role,
+          tool: command,
+        });
+        if (managed || mutation) {
+          if (mutation) err.recoveryCode = "manual_lock_inspection_required";
+          if (runtime && typeof runtime.invalidateManagedOperation === "function") {
+            try { runtime.invalidateManagedOperation(err); } catch {}
+          }
+          done = true;
+          clearTimeout(timer);
+          reject(err);
+          return;
+        }
+        // Ordinary transports retain the exact child in runtime's auxiliary
+        // registry for app cleanup; do not unregister it here.
+        done = true;
+        clearTimeout(timer);
+        resolve({
+          code: exitCode,
+          signal: exitSignal,
+          stdout: decodeShellBytes(stdoutChunks),
+          stderr: decodeShellBytes(stderrChunks),
+          timedOut: true,
+          drainVerified: false,
+        });
+      }, 5000);
     }, timeoutMs);
 
-    function finish(payload) {
+    function finish(payload, { unregister = true } = {}) {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      if (runtime && typeof runtime.unregisterChild === "function") {
+      if (drainTimer) clearTimeout(drainTimer);
+      if (unregister && !managed && runtime && typeof runtime.unregisterChild === "function") {
         runtime.unregisterChild(child);
+      }
+      if (managed && runtime && typeof runtime.assertTransportActive === "function") {
+        try {
+          runtime.assertTransportActive();
+        } catch (err) {
+          reject(err);
+          return;
+        }
       }
       resolve(payload);
     }
@@ -156,17 +254,102 @@ function spawnAndWait(spawn, command, args, opts = {}) {
       try { child.stdin.end(); } catch {}
     }
 
-    child.on("error", (err) => {
-      const stdout = decodeShellBytes(stdoutChunks);
-      const stderr = decodeShellBytes(stderrChunks);
-      finish({ code: -1, signal: null, stdout, stderr: stderr || (err && err.message) || "process error", spawnError: true });
-    });
+    child.on("error", (err) => { processError = err; });
     child.on("exit", (code, signal) => {
+      exitCode = code;
+      exitSignal = signal;
+    });
+    child.on("close", (code, signal) => {
+      if (done) {
+        // An ordinary child retained after an undrained timeout may close
+        // later. Only its own close proves it can leave the auxiliary registry.
+        if (!managed && runtime && typeof runtime.unregisterChild === "function") {
+          runtime.unregisterChild(child);
+        }
+        return;
+      }
       const stdout = decodeShellBytes(stdoutChunks);
       const stderr = decodeShellBytes(stderrChunks);
-      finish({ code, signal, stdout, stderr });
+      if (managed && timedOut) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (drainTimer) clearTimeout(drainTimer);
+        const err = Object.assign(new Error("Remote SSH child exceeded its operation deadline"), {
+          name: "TransportOperationTimeoutError",
+          code: "transport_operation_timeout",
+          timedOut: true,
+          drainVerified: true,
+          role,
+          tool: command,
+          ...(mutation ? { recoveryCode: "manual_lock_inspection_required" } : {}),
+        });
+        if (runtime && typeof runtime.settleManagedTimeoutAfterClose === "function") {
+          try { runtime.settleManagedTimeoutAfterClose(err); } catch {}
+        }
+        reject(err);
+        return;
+      }
+      const payload = {
+        code: exitCode === null ? code : exitCode,
+        signal: exitSignal === null ? signal : exitSignal,
+        stdout,
+        stderr: stderr || (processError && processError.message) || "",
+        ...(processError ? { spawnError: true } : {}),
+        ...(timedOut ? { timedOut: true, drainVerified: true } : {}),
+      };
+      // A remote command can keep running after either kind of SSH transport
+      // loses its result. The ordinary path has no coordinator context, but
+      // must preserve the same lease/staging evidence as serialized transport.
+      const ambiguousMutation = mutation && (payload.timedOut === true || payload.signal != null || (
+        payload.code !== 0 && (
+          payload.code === 255
+          || (payload.code == null && !payload.spawnError)
+          || /(?:^|\s)EOF(?:\s|$)|connection (?:closed|reset)|broken pipe/i.test(payload.stderr)
+        )
+      ));
+      if (ambiguousMutation) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (drainTimer) clearTimeout(drainTimer);
+        const err = Object.assign(new Error("Remote SSH mutation completed with an unknown transport result"), {
+          name: "TransportUnknownResultError",
+          code: "transport_unknown_result",
+          role,
+          tool: command,
+          exitCode: payload.code,
+          signal: payload.signal,
+          drainVerified: true,
+          recoveryCode: "manual_lock_inspection_required",
+          ...(payload.timedOut ? { timedOut: true } : {}),
+        });
+        if (!managed && runtime && typeof runtime.unregisterChild === "function") {
+          runtime.unregisterChild(child);
+        }
+        if (runtime && typeof runtime.invalidateManagedOperation === "function") {
+          try { runtime.invalidateManagedOperation(err); } catch {}
+        }
+        reject(err);
+        return;
+      }
+      finish(payload);
     });
   });
+}
+
+function managedTransportIsActive(runtime) {
+  if (!runtime || typeof runtime.assertTransportActive !== "function") return true;
+  try {
+    runtime.assertTransportActive();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function requiresManualLockInspection(error) {
+  return !!error && error.recoveryCode === "manual_lock_inspection_required";
 }
 
 // ── Deploy ──
@@ -186,7 +369,7 @@ async function legacyDeploy({ profile, runtime, deps = {} }) {
       profileId: profile.id,
       step,
       status,
-      message: message || null,
+      message: message ? redactTransportDiagnostic(message, profile) : null,
       hint: hint || null,
     });
   }
@@ -408,6 +591,9 @@ async function acquireDeployLock({
   runtime,
   now = Date.now,
 }) {
+  if (runtime && typeof runtime.setManagedLockStage === "function") {
+    runtime.setManagedLockStage("acquire-attempted");
+  }
   const owner = {
     leaseId,
     installId,
@@ -434,9 +620,36 @@ async function acquireDeployLock({
     spawn,
     "ssh",
     buildSshArgs(profile).concat([command]),
-    { stdin: compactJson(owner), runtime },
+    { stdin: compactJson(owner), runtime, role: "deploy-lock-acquire", mutation: true },
   );
-  if (result.code === 0) return { ok: true, owner };
+  if (result.code === 0) {
+    if (runtime && typeof runtime.setManagedLockStage === "function") {
+      runtime.setManagedLockStage("lock-owned");
+    }
+    return { ok: true, owner };
+  }
+  if (result.code === 73 || result.code === 74) {
+    // The remote command proved that this lease never acquired the lock.
+    // Keep the transport usable even though the remote lock itself may need
+    // another owner (73) or manual inspection (74).
+    if (runtime && typeof runtime.setManagedLockStage === "function") {
+      runtime.setManagedLockStage("before-acquire");
+    }
+  } else {
+    // Code 75 means mkdir may have succeeded but owner persistence/cleanup did
+    // not. Any other unexpected result is likewise unsafe to treat as a
+    // cleanly unowned lock.
+    const err = Object.assign(new Error("Remote deployment lock acquisition requires manual inspection"), {
+      name: "TransportRecoveryError",
+      code: "lock_acquire_unknown",
+      recoveryCode: "manual_lock_inspection_required",
+      drainVerified: true,
+    });
+    if (runtime && typeof runtime.invalidateManagedOperation === "function") {
+      try { runtime.invalidateManagedOperation(err); } catch {}
+    }
+    throw err;
+  }
   const reason = result.code === 73
     ? "lock_busy"
     : (result.code === 74 ? "lock_owner_invalid" : "lock_acquire_failed");
@@ -453,7 +666,88 @@ async function acquireDeployLock({
 async function releaseDeployLock({ profile, layout, leaseId, remoteNode, spawn, runtime }) {
   const lock = quoteForPosixShellArg(layout.deployLockDir);
   const command = `${assertLeaseCommand(layout, leaseId, remoteNode)} && rm -rf ${lock}`;
-  return spawnAndWait(spawn, "ssh", buildSshArgs(profile).concat([command]), { runtime });
+  const result = await spawnAndWait(
+    spawn,
+    "ssh",
+    buildSshArgs(profile).concat([command]),
+    { runtime, role: "deploy-lock-release", mutation: true },
+  );
+  if (result.code !== 0) {
+    const err = Object.assign(new Error("Remote deployment lock release requires manual inspection"), {
+      name: "TransportRecoveryError",
+      code: "manual_lock_inspection_required",
+      recoveryCode: "manual_lock_inspection_required",
+      drainVerified: true,
+    });
+    if (runtime && typeof runtime.invalidateManagedOperation === "function") {
+      try { runtime.invalidateManagedOperation(err); } catch {}
+    }
+    throw err;
+  }
+  if (result.code === 0 && runtime && typeof runtime.setManagedLockStage === "function") {
+    runtime.setManagedLockStage("before-acquire");
+  }
+  return result;
+}
+
+// ── Hermes preflight (C5 / C6) ──
+//
+// Runs inside the same read-only ownership preflight `node -e` script, so the
+// Hermes target set is frozen before any mutation and the deploy never
+// re-discovers homes mid-flight. The classification below is the same
+// algorithm hooks/hermes-install.js re-runs immediately before it touches a
+// directory — duplicated on purpose: the remote script has no module to
+// require, and preflight must be able to fail closed on a foreign directory
+// before the installer is ever shipped.
+//
+// hermesPresent is deliberately narrow (config.yaml or the venv CLI): an empty
+// ~/.hermes left over from an uninstall is not a Hermes installation.
+function buildHermesPreflightLines(layout) {
+  const hermesHome = resolveRemoteHermesHome(layout);
+  if (!hermesHome) {
+    // Phase 1 scope: profile-isolated runtimes report the phase as not
+    // applicable rather than guessing at a non-standard HERMES_HOME.
+    return [
+      "const hermesHome=null;",
+      "const hermesPresent=false;",
+      "const hermesTargets=[];",
+    ];
+  }
+  return [
+    "const hpath=require('path');",
+    `const hermesHome=${JSON.stringify(hermesHome)};`,
+    "const hstat=p=>{try{return {st:fs.lstatSync(p)}}catch(e){return {err:(e&&e.code)||'EUNKNOWN'}}};",
+    "const hread=p=>{try{return fs.readFileSync(p,'utf8')}catch{return null}};",
+    "function hclassify(dir){",
+    "const allowed=['plugin.yaml','__init__.py','clawd-ssh-secure-v1','__pycache__'];",
+    "const top=hstat(dir);",
+    "if(top.err)return top.err==='ENOENT'?'absent':'foreign';",
+    "if(top.st.isSymbolicLink())return 'symlink';",
+    "if(!top.st.isDirectory())return 'foreign';",
+    "let entries;try{entries=fs.readdirSync(dir)}catch{return 'foreign'}",
+    "for(const n of entries){const s=hstat(hpath.join(dir,n));if(s.err)return 'foreign';if(allowed.includes(n)&&s.st.isSymbolicLink())return 'symlink'}",
+    "if(entries.some(n=>!allowed.includes(n)))return 'foreign';",
+    "const isFile=n=>{const s=hstat(hpath.join(dir,n));return !!(s.st&&s.st.isFile())};",
+    "if(!isFile('plugin.yaml')||!isFile('__init__.py'))return 'foreign';",
+    "if(entries.includes('__pycache__')){",
+    "const cacheDir=hpath.join(dir,'__pycache__');const c=hstat(cacheDir);",
+    "if(!c.st||!c.st.isDirectory())return 'foreign';",
+    "let cached;try{cached=fs.readdirSync(cacheDir)}catch{return 'foreign'}",
+    "for(const n of cached){const s=hstat(hpath.join(cacheDir,n));if(!s.st||!s.st.isFile()||!n.endsWith('.pyc'))return 'foreign'}}",
+    "if(entries.includes('clawd-ssh-secure-v1')){",
+    "const marker=hread(hpath.join(dir,'clawd-ssh-secure-v1'));",
+    "return marker!==null&&marker.trim()==='clawd-ssh-secure-v1'?'managed':'foreign'}",
+    "const yaml=hread(hpath.join(dir,'plugin.yaml'));const init=hread(hpath.join(dir,'__init__.py'));",
+    "if(yaml===null||init===null)return 'foreign';",
+    "if(!/^name:\\s*[\"']?clawd-on-desk[\"']?\\s*$/m.test(yaml))return 'foreign';",
+    "if(!init.includes('CLAWD_SERVER_ID = \"clawd-on-desk\"'))return 'foreign';",
+    "return 'legacy';",
+    "}",
+    "const hermesPresent=fs.existsSync(hpath.join(hermesHome,'config.yaml'))||fs.existsSync(hpath.join(hermesHome,'hermes-agent','venv','bin','hermes'));",
+    "let hermesProfileHomes=[];",
+    "try{const pdir=hpath.join(hermesHome,'profiles');hermesProfileHomes=fs.readdirSync(pdir,{withFileTypes:true}).filter(e=>e.isDirectory()&&fs.existsSync(hpath.join(pdir,e.name,'config.yaml'))).map(e=>hpath.join(pdir,e.name)).sort()}catch{}",
+    "const hermesTargets=hermesPresent?[{home:hermesHome,kind:'root',plugin:hclassify(hpath.join(hermesHome,'plugins','clawd-on-desk'))}].concat(hermesProfileHomes.map(h=>({home:h,kind:'profile',plugin:hclassify(hpath.join(h,'plugins','clawd-on-desk'))}))):[];",
+  ];
 }
 
 function buildOwnershipPreflightScript({ profile, layout, installId }) {
@@ -499,11 +793,12 @@ function buildOwnershipPreflightScript({ profile, layout, installId }) {
     "if(identity){for(const k of Object.keys(expected)){if(identity[k]!==expected[k]){console.log(JSON.stringify({ok:false,reason:'ownership_conflict',field:k}));process.exit(83)}}}",
     "const traces=tracePaths.filter(p=>{try{return fs.existsSync(p)}catch{return true}});",
     "const configTraces=configTracePaths.filter(p=>{try{const raw=fs.readFileSync(p,'utf8');return managedConfigMarkers.some(m=>raw.includes(m))}catch(e){return e&&e.code!=='ENOENT'}});",
+    ...buildHermesPreflightLines(layout),
     "console.log(JSON.stringify({ok:true,identity:!!identity,legacyTraces:traces.length,legacyConfigTraces:configTraces.length,legacyMonitorPresent:"
       + (layout.legacyMonitorPidFile
         ? `fs.existsSync(${JSON.stringify(layout.legacyMonitorPidFile)})`
         : "false")
-      + ",claudePresent:fs.existsSync(" + JSON.stringify(layout.claudeConfigDir) + "),codexPresent:fs.existsSync(" + JSON.stringify(layout.codexHome) + "),copilotPresent:fs.existsSync(" + JSON.stringify(layout.copilotHome) + ")}));",
+      + ",claudePresent:fs.existsSync(" + JSON.stringify(layout.claudeConfigDir) + "),codexPresent:fs.existsSync(" + JSON.stringify(layout.codexHome) + "),copilotPresent:fs.existsSync(" + JSON.stringify(layout.copilotHome) + "),hermesHome:hermesHome,hermesPresent:hermesPresent,hermesTargets:hermesTargets}));",
   ].join("");
 }
 
@@ -590,7 +885,7 @@ async function cleanupLegacyMonitor({
         buildRemoteNodeEvalCommand(remoteNode, buildLegacyMonitorCleanupScript(layout)),
       ),
     ]),
-    { runtime },
+    { runtime, role: "legacy-monitor-cleanup", mutation: true },
   );
   let detail = null;
   try {
@@ -603,7 +898,17 @@ async function cleanupLegacyMonitor({
   };
 }
 
+// Phase 1 scope: the standard `~/.hermes` root of an account-default layout.
+// profile-isolated runtimes get null — the Hermes phase is not applicable
+// there and no HERMES_HOME is exported to the remote installers.
+function resolveRemoteHermesHome(layout) {
+  if (!layout || layout.runtimeMode !== "account-default") return null;
+  if (typeof layout.remoteHome !== "string" || !layout.remoteHome) return null;
+  return path.posix.join(layout.remoteHome, ".hermes");
+}
+
 function buildRemoteInstallerEnv(layout, remotePermissionTransport = "path") {
+  const hermesHome = resolveRemoteHermesHome(layout);
   return [
     `CLAUDE_CONFIG_DIR=${quoteForPosixShellArg(layout.claudeConfigDir)}`,
     `CODEX_HOME=${quoteForPosixShellArg(layout.codexHome)}`,
@@ -620,6 +925,7 @@ function buildRemoteInstallerEnv(layout, remotePermissionTransport = "path") {
         ? remotePermissionTransport
         : "path"
     )}`,
+    ...(hermesHome ? [`HERMES_HOME=${quoteForPosixShellArg(hermesHome)}`] : []),
   ].join(" ");
 }
 
@@ -860,7 +1166,7 @@ async function writeIsolatedWrappers({
     spawn,
     "ssh",
     buildSshArgs(profile).concat([command]),
-    { stdin: compactJson(files), runtime },
+    { stdin: compactJson(files), runtime, role: "isolated-wrapper-write", mutation: true },
   );
   return { ok: result.code === 0, stderr: result.stderr, files };
 }
@@ -950,6 +1256,39 @@ async function verifyIsolatedArtifacts({
   };
 }
 
+// Budget the outer fenced command by the frozen target count: each target can
+// spend one enable call plus one enable-verification call at the per-profile
+// CLI timeout, plus fixed per-target overhead. The maintainer's single-profile
+// timing (0.559 s for `plugins list --json`) must not be generalized into a
+// multi-profile budget, so this stays a worst case with a hard cap.
+function hermesOuterTimeoutMs(targetCount) {
+  return Math.min(
+    HERMES_OUTER_TIMEOUT_MAX_MS,
+    HERMES_OUTER_TIMEOUT_BASE_MS
+      + targetCount * (2 * HERMES_CLI_TIMEOUT_MS + HERMES_OUTER_TIMEOUT_PER_TARGET_MS),
+  );
+}
+
+// One progress line for the Hermes phase. Activation wording is the
+// maintainer's: enabling a plugin takes effect on the next session, while a
+// replaced module needs a gateway restart Clawd deliberately never performs.
+function summarizeHermesTargets(targets) {
+  const counts = new Map();
+  for (const target of targets) {
+    const action = target && target.action;
+    if (!action) continue;
+    counts.set(action, (counts.get(action) || 0) + 1);
+  }
+  const actions = [...counts].map(([action, count]) => `${action} ${count}`).join(", ");
+  const restart = targets
+    .filter((target) => target && target.activation === "restart-required")
+    .map((target) => target.home);
+  const activation = restart.length
+    ? `gateway restart required for: ${restart.join(", ")}`
+    : "effective on next session";
+  return [actions, activation].filter(Boolean).join("; ");
+}
+
 async function secureDeploy({
   profile,
   installId,
@@ -982,7 +1321,7 @@ async function secureDeploy({
       profileId: profile.id,
       step,
       status,
-      message: message || null,
+      message: message ? redactTransportDiagnostic(message, profile) : null,
       hint: hint || null,
     });
   }
@@ -990,11 +1329,12 @@ async function secureDeploy({
     await onStep(name, { status, ...(evidence ? { evidence } : {}) });
   }
   async function fail(step, message, reason = null, identityStep = null) {
-    progress(step, "fail", message);
+    const safeMessage = redactTransportDiagnostic(message, profile);
+    progress(step, "fail", safeMessage);
     if (identityStep) {
-      try { await recordStep(identityStep, "failed", String(message || "failed").slice(0, 500)); } catch {}
+      try { await recordStep(identityStep, "failed", String(safeMessage || "failed").slice(0, 500)); } catch {}
     }
-    return { ok: false, step, message, reason };
+    return { ok: false, step, message: safeMessage, reason };
   }
 
   const missing = HOOK_FILES
@@ -1055,7 +1395,10 @@ async function secureDeploy({
   lockHeld = true;
   progress("lock", "ok");
 
+  let operationResult = null;
+  let primaryError = null;
   try {
+    operationResult = await (async () => {
     progress("preflight", "start");
     const preflight = await runOwnershipPreflight({
       profile,
@@ -1135,7 +1478,7 @@ async function secureDeploy({
       spawn,
       "ssh",
       buildSshArgs(profile).concat([mkdirCommand]),
-      { runtime },
+      { runtime, role: "layout-create", mutation: true },
     );
     if (mkdirResult.code !== 0) return fail("mkdir", mkdirResult.stderr || "Remote layout creation failed");
 
@@ -1157,7 +1500,7 @@ async function secureDeploy({
       spawn,
       "ssh",
       buildSshArgs(profile).concat([identityCommand]),
-      { stdin: compactJson(identityDocument), runtime },
+      { stdin: compactJson(identityDocument), runtime, role: "identity-write", mutation: true },
     );
     if (identityWrite.code !== 0) {
       return fail("identity", identityWrite.stderr || "Identity write failed", null, "identity");
@@ -1192,7 +1535,7 @@ async function secureDeploy({
       spawn,
       "ssh",
       buildSshArgs(profile).concat([markerCommand]),
-      { stdin: "clawd-ssh-secure-v1", runtime },
+      { stdin: "clawd-ssh-secure-v1", runtime, role: "secure-marker-write", mutation: true },
     );
     if (markerWrite.code !== 0) return fail("secure-marker", markerWrite.stderr || "Secure marker write failed", null, "secureMarker");
     await recordStep("secureMarker", "done", "marker atomically written and read back");
@@ -1206,7 +1549,7 @@ async function secureDeploy({
       spawn,
       "scp",
       buildScpArgs(profile).concat([...localFiles, remoteTarget]),
-      { timeoutMs: 120000, runtime },
+      { timeoutMs: 120000, runtime, role: "hook-files-upload", mutation: true },
     );
     if (scp.code !== 0) return fail("hook-files", scp.stderr || "Hook staging upload failed", null, "hookFiles");
     const promotion = HOOK_FILES
@@ -1218,7 +1561,7 @@ async function secureDeploy({
       buildSshArgs(profile).concat([
         fencedCommand(layout, leaseId, remoteNode, `${promotion} && rmdir ${quoteForPosixShellArg(stagingDir)}`),
       ]),
-      { runtime },
+      { runtime, role: "hook-files-promote", mutation: true },
     );
     if (promote.code !== 0) return fail("hook-files", promote.stderr || "Hook promotion lost its deployment lease", null, "hookFiles");
     const expectedHashes = Object.fromEntries(HOOK_FILES.map((name) => [
@@ -1269,7 +1612,7 @@ async function secureDeploy({
         spawn,
         "ssh",
         buildSshArgs(profile).concat([hpCommand]),
-        { stdin: profile.hostPrefix, runtime },
+        { stdin: profile.hostPrefix, runtime, role: "host-prefix-write", mutation: true },
       );
       if (hp.code !== 0) return fail("host-prefix", hp.stderr || "Host prefix write failed");
     }
@@ -1302,7 +1645,7 @@ async function secureDeploy({
             `${envPrefix} ${nodeCommand} && ${verifyCommand}`,
           ),
         ]),
-        { timeoutMs: 60000, runtime },
+        { timeoutMs: 60000, runtime, role: `installer-${txnStep}`, mutation: true },
       );
       if (result.code !== 0) {
         return fail(progressStep, summarizeStderr(result.stderr) || "Remote installer failed", null, txnStep);
@@ -1371,7 +1714,7 @@ async function secureDeploy({
         buildSshArgs(profile).concat([
           fencedCommand(layout, leaseId, remoteNode, monitorCommand),
         ]),
-        { runtime },
+        { runtime, role: "codex-monitor-restart", mutation: true },
       );
       if (monitor.code !== 0) return fail("codex-monitor", monitor.stderr || "Codex monitor verification failed", null, "codexMonitor");
       await recordStep(
@@ -1408,6 +1751,195 @@ async function secureDeploy({
       );
     }
 
+    // ── Hermes Agent phase ──
+    //
+    // Q4: this is the LAST remote mutation of the deploy. It sits after every
+    // identity-tracked component — including the Codex monitor restart, which
+    // is itself a mutating command — so that once the Hermes installer has
+    // run, nothing else touches the remote host except this phase's own stage
+    // cleanup and the lease release. Hermes has no identity transaction step:
+    // REMOTE_IDENTITY_STEP_NAMES and the persisted transaction schema stay
+    // frozen, and a Hermes failure simply leaves the transaction uncommitted.
+    let hermesSummary = null;
+    const remoteHermesHome = resolveRemoteHermesHome(layout);
+    const hermesTargets = Array.isArray(componentPresence.hermesTargets)
+      ? componentPresence.hermesTargets
+      : [];
+    if (componentPresence.hermesPresent !== true || !remoteHermesHome || hermesTargets.length === 0) {
+      progress("install-hermes", "ok", "not applicable");
+    } else {
+      // Ownership gate first: a foreign or symlinked plugin directory fails
+      // the deploy before a single byte is staged. Never overwrite, never
+      // recursively delete.
+      const hermesConflicts = hermesTargets.filter((target) =>
+        target && (target.plugin === "foreign" || target.plugin === "symlink"));
+      if (hermesConflicts.length) {
+        return fail(
+          "install-hermes",
+          `Hermes plugin directory is not managed by Clawd: ${hermesConflicts.map((target) => target.home).join(", ")}`,
+          "hermes_plugin_ownership_conflict",
+        );
+      }
+
+      progress("hermes-files", "start");
+      const hermesAssetPaths = HERMES_PLUGIN_ASSET_FILES
+        .map((name) => path.join(hooksDir, HERMES_PLUGIN_DIR, name));
+      const missingHermesAssets = hermesAssetPaths.filter((file) => !fs.existsSync(file));
+      if (missingHermesAssets.length) {
+        return fail("hermes-files", `Missing files: ${missingHermesAssets.join(", ")}`);
+      }
+      // Sibling of the flat hook stage (`<deployStagingDir>/<leaseId>`), never
+      // nested inside it: the flat stage is rmdir'd during hook promotion, and
+      // a nested Hermes directory would make that rmdir fail.
+      const hermesStage = path.posix.join(layout.deployStagingDir, `${leaseId}-hermes`);
+      const hermesStageArg = quoteForPosixShellArg(hermesStage);
+      const hermesStageMkdir = await spawnAndWait(
+        spawn,
+        "ssh",
+        buildSshArgs(profile).concat([
+          fencedCommand(
+            layout,
+            leaseId,
+            remoteNode,
+            `umask 077 && mkdir -p ${hermesStageArg} && chmod 700 ${hermesStageArg}`,
+          ),
+        ]),
+        { runtime, role: "hermes-stage-create", mutation: true },
+      );
+      if (hermesStageMkdir.code !== 0) {
+        return fail("hermes-files", hermesStageMkdir.stderr || "Hermes staging directory creation failed");
+      }
+      const hermesScp = await spawnAndWait(
+        spawn,
+        "scp",
+        buildScpArgs(profile).concat([
+          ...hermesAssetPaths,
+          buildScpRemoteTarget(profile.host, hermesStage),
+        ]),
+        { timeoutMs: 120000, runtime, role: "hermes-files-upload", mutation: true },
+      );
+      if (hermesScp.code !== 0) {
+        return fail("hermes-files", hermesScp.stderr || "Hermes asset staging upload failed");
+      }
+      const hermesExpectedHashes = Object.fromEntries(HERMES_PLUGIN_ASSET_FILES.map((name, index) => [
+        name,
+        crypto.createHash("sha256").update(fs.readFileSync(hermesAssetPaths[index])).digest("hex"),
+      ]));
+      const hermesHashScript = [
+        "const fs=require('fs'),c=require('crypto'),p=require('path');",
+        `const d=${JSON.stringify(hermesStage)},e=${JSON.stringify(hermesExpectedHashes)};`,
+        "for(const [n,h] of Object.entries(e)){const a=c.createHash('sha256').update(fs.readFileSync(p.join(d,n))).digest('hex');if(a!==h)process.exit(1)}",
+      ].join("");
+      const hermesHashVerify = await spawnAndWait(
+        spawn,
+        "ssh",
+        buildSshArgs(profile).concat([
+          fencedCommand(layout, leaseId, remoteNode, buildRemoteNodeEvalCommand(remoteNode, hermesHashScript)),
+        ]),
+        { runtime },
+      );
+      if (hermesHashVerify.code !== 0) {
+        return fail("hermes-files", "Hermes staged asset hash verification failed");
+      }
+      progress("hermes-files", "ok");
+
+      progress("install-hermes", "start");
+      const hermesArgs = [
+        "--remote",
+        "--json",
+        "--source-dir",
+        hermesStage,
+        "--cli-timeout-ms",
+        String(HERMES_CLI_TIMEOUT_MS),
+        ...hermesTargets.flatMap((target) => ["--target-home", target.home]),
+      ];
+      const hermesRun = await spawnAndWait(
+        spawn,
+        "ssh",
+        buildSshArgs(profile).concat([
+          fencedCommand(
+            layout,
+            leaseId,
+            remoteNode,
+            `${envPrefix} ${buildRemoteHookNodeCommand(remoteNode, "hermes-install.js", hermesArgs, {
+              hooksDir: layout.claudeHooksDir,
+            })}`,
+          ),
+        ]),
+        {
+          timeoutMs: hermesOuterTimeoutMs(hermesTargets.length),
+          runtime,
+          role: "installer-hermes",
+          mutation: true,
+        },
+      );
+      // Reaching this line means the installer returned a KNOWN result, so the
+      // stage may be cleaned. An unknown transport result throws out of
+      // spawnAndWait above instead: no cleanup mutation, no retry, the lock
+      // stays quarantined and the staging evidence survives for recovery.
+      // Exact files only — no recursive removal anywhere.
+      const hermesParsed = parseHermesInstallerResult(hermesRun.stdout, "install");
+      const hermesResult = hermesParsed.ok ? hermesParsed.result : null;
+      const hermesResultTargets = hermesResult && Array.isArray(hermesResult.targets) ? hermesResult.targets : [];
+      const hermesFailedTargets = hermesResultTargets.filter((target) =>
+        target && (target.status === "error" || target.action === "failed"));
+      let hermesFailure = null;
+      if (!hermesParsed.ok) {
+        hermesFailure = await fail("install-hermes", hermesParsed.error, "hermes_install_result_invalid");
+      } else if (hermesRun.code !== 0 || hermesResult.status === "error" || hermesFailedTargets.length) {
+        const perTarget = hermesFailedTargets
+          .map((target) => `${target.home}: ${target.reason || target.message || target.status}`)
+          .join("; ");
+        hermesFailure = await fail("install-hermes", hermesResult.message || perTarget
+          || summarizeStderr(hermesRun.stderr), "hermes_install_failed");
+      }
+      let hermesCleanup;
+      try {
+        hermesCleanup = await spawnAndWait(
+          spawn,
+          "ssh",
+          buildSshArgs(profile).concat([
+            fencedCommand(
+              layout,
+              leaseId,
+              remoteNode,
+              `rm -f ${HERMES_PLUGIN_ASSET_FILES
+                .map((name) => quoteForPosixShellArg(path.posix.join(hermesStage, name)))
+                .join(" ")} && rmdir ${hermesStageArg}`,
+            ),
+          ]),
+          { timeoutMs: 60000, runtime, role: "hermes-stage-cleanup", mutation: true },
+        );
+      } catch (err) {
+        if (hermesFailure && requiresManualLockInspection(err)) {
+          return { ...hermesFailure, recoveryCode: err.recoveryCode, recoveryError: err.message };
+        }
+        throw err;
+      }
+      const hermesCleanupWarning = hermesCleanup.code !== 0
+        ? `staged assets could not be removed from ${hermesStage}`
+        : null;
+
+      // Q2: a per-target error is a hard deploy failure even when the
+      // aggregate status would only be a warning. Default-home success plus a
+      // named-profile failure is a failed Remote SSH deploy.
+      if (hermesFailure) return hermesFailure;
+      hermesSummary = {
+        status: hermesResult.status,
+        message: hermesResult.message || null,
+        warning: hermesResult.warning || null,
+        targets: hermesResultTargets,
+        activeGatewayUnits: Array.isArray(hermesResult.activeGatewayUnits)
+          ? hermesResult.activeGatewayUnits
+          : null,
+      };
+      progress(
+        "install-hermes",
+        "ok",
+        [summarizeHermesTargets(hermesResultTargets), hermesCleanupWarning].filter(Boolean).join("; "),
+      );
+    }
+
     return {
       ok: true,
       secure: true,
@@ -1416,9 +1948,18 @@ async function secureDeploy({
       remoteNode: remoteNodeInfo,
       transactionReady: true,
       isolation,
+      hermes: hermesSummary,
     };
-  } finally {
-    if (lockHeld && layout && remoteNode) {
+    })();
+  } catch (err) {
+    primaryError = err;
+  }
+
+  let releaseError = null;
+  if (lockHeld && layout && remoteNode
+    && !requiresManualLockInspection(primaryError) && !requiresManualLockInspection(operationResult)
+    && managedTransportIsActive(runtime)) {
+    try {
       const released = await releaseDeployLock({
         profile,
         layout,
@@ -1428,12 +1969,39 @@ async function secureDeploy({
         runtime,
       });
       if (released.code !== 0) {
+        releaseError = Object.assign(new Error("Remote deployment lock release requires manual inspection"), {
+          code: "manual_lock_inspection_required",
+          recoveryCode: "manual_lock_inspection_required",
+        });
         progress("lock-release", "fail", `Lock release requires manual inspection at ${layout.deployLockDir}`);
       } else {
         progress("lock-release", "ok");
       }
+    } catch (err) {
+      releaseError = err;
+      progress("lock-release", "fail", `Lock release requires manual inspection at ${layout.deployLockDir}`);
     }
   }
+
+  if (releaseError) {
+    const recoveryCode = releaseError.recoveryCode || "manual_lock_inspection_required";
+    if (primaryError) {
+      primaryError.recoveryCode = recoveryCode;
+      primaryError.recoveryError = "Remote deployment lock release requires manual inspection";
+      throw primaryError;
+    }
+    if (operationResult && operationResult.ok === false) {
+      return {
+        ...operationResult,
+        recoveryCode,
+        recoveryError: "Remote deployment lock release requires manual inspection",
+      };
+    }
+    releaseError.recoveryCode = recoveryCode;
+    throw releaseError;
+  }
+  if (primaryError) throw primaryError;
+  return operationResult;
 }
 
 async function deploy(options) {
@@ -1507,6 +2075,7 @@ async function bootstrapIsolatedRuntime({
     now: deps.now,
   });
   if (!lock.ok) return { ok: false, skipped: true, reason: lock.reason, stderr: lock.message };
+  let operationError = null;
   try {
     const dirs = [
       isolatedLayout.runtimeRoot,
@@ -1545,7 +2114,7 @@ async function bootstrapIsolatedRuntime({
       buildSshArgs(accountProfile).concat([
         fencedCommand(accountLayout, leaseId, remoteNode, command),
       ]),
-      { runtime },
+      { runtime, role: "isolated-runtime-bootstrap", mutation: true },
     );
     if (created.code !== 0) {
       return {
@@ -1567,15 +2136,20 @@ async function bootstrapIsolatedRuntime({
         source: resolved.source || null,
       },
     };
+  } catch (err) {
+    operationError = err;
+    throw err;
   } finally {
-    await releaseDeployLock({
-      profile: accountProfile,
-      layout: accountLayout,
-      leaseId,
-      remoteNode,
-      spawn,
-      runtime,
-    });
+    if (!requiresManualLockInspection(operationError) && managedTransportIsActive(runtime)) {
+      await releaseDeployLock({
+        profile: accountProfile,
+        layout: accountLayout,
+        leaseId,
+        remoteNode,
+        spawn,
+        runtime,
+      });
+    }
   }
 }
 
@@ -1734,6 +2308,8 @@ async function withOwnedRemoteLease({ profile, runtime, deps = {}, operation }) 
   if (!lock.ok) {
     return { ok: false, skipped: true, reason: lock.reason, stderr: lock.message };
   }
+  let operationResult = null;
+  let primaryError = null;
   try {
     const ownership = await runOwnershipPreflight({
       profile,
@@ -1744,7 +2320,7 @@ async function withOwnedRemoteLease({ profile, runtime, deps = {}, operation }) 
       runtime,
     });
     if (!ownership.ok || !ownership.detail || ownership.detail.identity !== true) {
-      return {
+      operationResult = {
         ok: false,
         skipped: true,
         reason: ownership.ok
@@ -1754,18 +2330,54 @@ async function withOwnedRemoteLease({ profile, runtime, deps = {}, operation }) 
           ? "Remote identity is missing; no cleanup or monitor mutation was attempted."
           : ownership.message,
       };
+    } else {
+      operationResult = await operation({ spawn, layout, remoteNode, leaseId });
     }
-    return await operation({ spawn, layout, remoteNode, leaseId });
-  } finally {
-    await releaseDeployLock({
-      profile,
-      layout,
-      leaseId,
-      remoteNode,
-      spawn,
-      runtime,
-    });
+  } catch (err) {
+    primaryError = err;
   }
+
+  let releaseError = null;
+  if (!requiresManualLockInspection(primaryError) && managedTransportIsActive(runtime)) {
+    try {
+      const released = await releaseDeployLock({
+        profile,
+        layout,
+        leaseId,
+        remoteNode,
+        spawn,
+        runtime,
+      });
+      if (released.code !== 0) {
+        releaseError = Object.assign(new Error("Remote deployment lock release requires manual inspection"), {
+          code: "manual_lock_inspection_required",
+          recoveryCode: "manual_lock_inspection_required",
+        });
+      }
+    } catch (err) {
+      releaseError = err;
+    }
+  }
+
+  if (releaseError) {
+    const recoveryCode = releaseError.recoveryCode || "manual_lock_inspection_required";
+    if (primaryError) {
+      primaryError.recoveryCode = recoveryCode;
+      primaryError.recoveryError = "Remote deployment lock release requires manual inspection";
+      throw primaryError;
+    }
+    if (operationResult && operationResult.ok === false) {
+      return {
+        ...operationResult,
+        recoveryCode,
+        recoveryError: "Remote deployment lock release requires manual inspection",
+      };
+    }
+    releaseError.recoveryCode = recoveryCode;
+    throw releaseError;
+  }
+  if (primaryError) throw primaryError;
+  return operationResult;
 }
 
 function secureMonitorStopCommand(layout) {
@@ -1803,7 +2415,7 @@ async function secureStartCodexMonitor({ profile, runtime = null, deps = {} }) {
         buildSshArgs(profile).concat([
           fencedCommand(layout, leaseId, remoteNode, start),
         ]),
-        { runtime },
+        { runtime, role: "codex-monitor-start", mutation: true },
       );
       return { ok: result.code === 0, stderr: result.stderr, layout };
     },
@@ -1822,7 +2434,7 @@ async function secureStopCodexMonitor({ profile, runtime = null, deps = {} }) {
         buildSshArgs(profile).concat([
           fencedCommand(layout, leaseId, remoteNode, secureMonitorStopCommand(layout)),
         ]),
-        { runtime },
+        { runtime, role: "codex-monitor-stop", mutation: true },
       );
       return { ok: result.code === 0, stderr: result.stderr, layout };
     },
@@ -1841,15 +2453,25 @@ async function secureUninstallRemoteIntegrations({
     deps,
     operation: async ({ spawn, layout, remoteNode, leaseId }) => {
       const envPrefix = buildRemoteInstallerEnv(layout, profile.remotePermissionTransport);
-      const optionalInstaller = (script, argv) => {
+      const optionalInstaller = (script, argv, whenAbsent = "") => {
         const scriptPath = path.posix.join(layout.claudeHooksDir, script);
-        return `if [ -f ${quoteForPosixShellArg(scriptPath)} ]; then ${envPrefix} ${buildRemoteHookNodeCommand(remoteNode, script, argv, { hooksDir: layout.claudeHooksDir })}; fi`;
+        return `if [ -f ${quoteForPosixShellArg(scriptPath)} ]; then ${envPrefix} ${buildRemoteHookNodeCommand(remoteNode, script, argv, { hooksDir: layout.claudeHooksDir })};${whenAbsent ? ` else ${whenAbsent};` : ""} fi`;
       };
+      const hermesCommand = resolveRemoteHermesHome(layout)
+        ? optionalInstaller("hermes-install.js", ["--uninstall", "--remote", "--json"],
+          `printf '%s\\n' ${quoteForPosixShellArg(HERMES_RESULT_SENTINEL + JSON.stringify({ schemaVersion: 1, operation: "uninstall", status: "ok", remote: true, targets: [], skipped: "installer-absent" }))}`)
+        : null;
+      let hermes = null;
       const commands = [
         secureMonitorStopCommand(layout),
         optionalInstaller("uninstall.js", []),
         optionalInstaller("codex-install.js", ["--uninstall"]),
         optionalInstaller("copilot-install.js", ["--uninstall"]),
+        // Runs before the hook payload is removed, under the same lease and
+        // fence. The installer discovers its own targets from HERMES_HOME
+        // (exported by buildRemoteInstallerEnv) and removes exactly the
+        // managed leaves — never a recursive delete.
+        ...(hermesCommand ? [hermesCommand] : []),
         `rm -f ${[
           layout.hostPrefixFile,
           layout.statuslineSidecarFile,
@@ -1870,13 +2492,31 @@ async function secureUninstallRemoteIntegrations({
           buildSshArgs(profile).concat([
             fencedCommand(layout, leaseId, remoteNode, command),
           ]),
-          { timeoutMs: 30000, runtime },
+          { timeoutMs: 30000, runtime, role: "remote-cleanup", mutation: true },
         );
+        if (command === hermesCommand) {
+          const parsed = parseHermesInstallerResult(result.stdout, "uninstall");
+          if (!parsed.ok || parsed.result.remote !== true || !Array.isArray(parsed.result.targets)
+            || (parsed.result.targets.length === 0 && parsed.result.skipped !== "installer-absent")) {
+            return { ok: false, reason: "hermes_cleanup_result_invalid", stderr: parsed.error || "Invalid remote Hermes cleanup targets", layout };
+          }
+          hermes = parsed.result;
+          const residual = hermes.targets.filter((target) => !target
+            || !["ok", "warning"].includes(target.status)
+            || !(target.action === "removed" || (target.action === "skipped" && target.plugin === "absent")));
+          if (result.code !== 0 || hermes.status === "error" || residual.length) {
+            const details = residual.map((target) => target && `${target.home}: ${target.message || target.reason || "Plugin cleanup incomplete"}`);
+            return {
+              ok: false, reason: "hermes_cleanup_incomplete", layout, hermes,
+              stderr: details.filter(Boolean).join("\n") || hermes.message || result.stderr || "Hermes cleanup incomplete",
+            };
+          }
+        }
         if (result.code !== 0) {
           return { ok: false, stderr: result.stderr, reason: "cleanup_step_failed", layout };
         }
       }
-      return { ok: true, layout };
+      return { ok: true, layout, ...(hermes ? { hermes } : {}) };
     },
   });
 }
@@ -1928,6 +2568,7 @@ async function finalizeRetiredRemoteLayout({
     now: deps.now,
   });
   if (!lock.ok) return { ok: false, skipped: true, reason: lock.reason, stderr: lock.message };
+  let operationError = null;
   try {
     const expected = {
       installId: profile.installId,
@@ -1952,7 +2593,7 @@ async function finalizeRetiredRemoteLayout({
       buildSshArgs(profile).concat([
         fencedCommand(layout, leaseId, remoteNode, buildRemoteNodeEvalCommand(remoteNode, script)),
       ]),
-      { runtime },
+      { runtime, role: "runtime-layout-retire", mutation: true },
     );
     if (result.code !== 0) {
       const reason = result.code === 83
@@ -1966,15 +2607,20 @@ async function finalizeRetiredRemoteLayout({
       };
     }
     return { ok: true, layout };
+  } catch (err) {
+    operationError = err;
+    throw err;
   } finally {
-    await releaseDeployLock({
-      profile,
-      layout,
-      leaseId,
-      remoteNode,
-      spawn,
-      runtime,
-    });
+    if (!requiresManualLockInspection(operationError) && managedTransportIsActive(runtime)) {
+      await releaseDeployLock({
+        profile,
+        layout,
+        leaseId,
+        remoteNode,
+        spawn,
+        runtime,
+      });
+    }
   }
 }
 
@@ -1998,7 +2644,7 @@ function formatExit(r) {
 }
 
 function summarizeStderr(text) {
-  const t = (text || "").toString().trim();
+  const t = redactTransportDiagnostic(text);
   if (!t) return null;
   return t.length > 200 ? t.slice(0, 200) + "..." : t;
 }
@@ -2013,6 +2659,7 @@ module.exports = {
   finalizeRetiredRemoteLayout,
   bootstrapIsolatedRuntime,
   __test: {
+    spawnAndWait,
     legacyDeploy,
     legacyStartCodexMonitor,
     legacyStopCodexMonitor,
@@ -2024,6 +2671,10 @@ module.exports = {
     acquireDeployLock,
     releaseDeployLock,
     buildOwnershipPreflightScript,
+    buildHermesPreflightLines,
+    resolveRemoteHermesHome,
+    hermesOuterTimeoutMs,
+    summarizeHermesTargets,
     buildLegacyMonitorCleanupScript,
     buildInstallerVerificationCommand,
     buildMonitorVerificationCommand,

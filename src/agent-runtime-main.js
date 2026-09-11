@@ -2,12 +2,21 @@
 
 const DefaultCodexSubagentClassifier = require("../agents/codex-subagent-classifier");
 const {
-  buildCodexMonitorUpdateOptions,
+  buildCodexMonitorSessionOptions,
+  normalizeCodexMonitorAccountQuotas,
   isCodexMonitorMetadataOnlyEvent,
 } = require("./codex-monitor-callback");
-const { makeSessionKey } = require("./session-key");
+const { resolveSessionIdentity } = require("./session-key");
+const { digestCodexTurnId, normalizeCodexTurnId } = require("./codex-turn-id");
+const createCodexTurnFence = require("./codex-turn-fence");
+const createCodexOfficialActivity = require("./codex-official-activity");
+const { createQoderSessionTitleTracker, QODER_TITLE_EVENTS } = require("./qoder-session-title");
 
 const CODEX_OFFICIAL_LOG_SUPPRESS_TTL_MS = 10 * 60 * 1000;
+// Intentionally excludes response_item:web_search_call. Codex official hooks
+// do not cover WebSearch, so JSONL is its only lifecycle/tool boundary today.
+// Keep this asymmetry under test: adding it here would silently drop web-search
+// recap; upstream adding an official WebSearch hook requires a new dedupe path.
 const CODEX_LOG_EVENTS_COVERED_BY_OFFICIAL_HOOKS = new Set([
   "session_meta",
   "event_msg:task_started",
@@ -24,39 +33,80 @@ const CODEX_LOG_EVENTS_COVERED_BY_OFFICIAL_HOOKS = new Set([
 // Local Codex turns that are still in flight sit in one of these states. Kept in
 // sync with isWorkingLikeState() in state-stale-cleanup.js.
 const CODEX_WORKING_LIKE_STATES = new Set(["working", "thinking", "juggling"]);
+const CODEX_TURN_CAPTURE_EVENTS = new Set([
+  "UserPromptSubmit",
+  "Stop",
+  "event_msg:task_started",
+  "event_msg:task_complete",
+  "event_msg:turn_aborted",
+]);
+
+function createProfileScopedClassifier(classifier, profileId) {
+  const canonicalSessionId = (sessionId) =>
+    resolveSessionIdentity(sessionId, profileId).sessionId;
+  return {
+    registerSession(sessionId, input) {
+      return classifier && typeof classifier.registerSession === "function"
+        ? classifier.registerSession(canonicalSessionId(sessionId), input)
+        : "unknown";
+    },
+    classify(sessionId) {
+      return classifier && typeof classifier.classify === "function"
+        ? classifier.classify(canonicalSessionId(sessionId))
+        : "unknown";
+    },
+    clear(sessionId) {
+      if (classifier && typeof classifier.clear === "function") {
+        classifier.clear(canonicalSessionId(sessionId));
+      }
+    },
+  };
+}
 
 function createAgentRuntimeMain(options = {}) {
   const now = typeof options.now === "function" ? options.now : Date.now;
   const logWarn = typeof options.logWarn === "function" ? options.logWarn : console.warn;
+  const debugLog = typeof options.debugLog === "function" ? options.debugLog : () => {};
   const loadCodexLogMonitor = options.loadCodexLogMonitor || (() => require("../agents/codex-log-monitor"));
   const loadCodexAgent = options.loadCodexAgent || (() => require("../agents/codex"));
   const codexSubagentClassifier = options.codexSubagentClassifier || new DefaultCodexSubagentClassifier();
+  const localCodexSubagentClassifier = createProfileScopedClassifier(codexSubagentClassifier, "local");
   const getServer = options.getServer || (() => null);
   const getStateRuntime = options.getStateRuntime || (() => null);
   const getPermissionRuntime = options.getPermissionRuntime || (() => null);
   const isAgentEnabled = options.isAgentEnabled || (() => true);
   const updateSession = options.updateSession || (() => {});
+  const qoderSessionTitleTracker = options.qoderSessionTitleTracker
+    || createQoderSessionTitleTracker();
   const captureGhosttyTerminalId = options.captureGhosttyTerminalId || null;
   const clearCodexNotifyBubbles = options.clearCodexNotifyBubbles || (() => {});
   const showCodexUserInputBubble = options.showCodexUserInputBubble || (() => false);
   const clearCodexUserInputBubbles = options.clearCodexUserInputBubbles || (() => {});
 
   let codexMonitor = null;
-  const codexOfficialHookSessions = new Map();
+  let disposed = false;
+  const codexTurnFence = createCodexTurnFence({ now, debugLog });
+  const codexOfficialActivity = createCodexOfficialActivity({
+    now,
+    debugLog,
+    ttlMs: CODEX_OFFICIAL_LOG_SUPPRESS_TTL_MS,
+  });
 
-  function markCodexOfficialHookSession(sessionId) {
-    if (!sessionId) return;
-    codexOfficialHookSessions.set(String(sessionId), now());
+  function recordCodexTurnIdCapture(sessionId, source, event, turnId) {
+    if (!CODEX_TURN_CAPTURE_EVENTS.has(event)) return;
+    const digest = digestCodexTurnId(turnId);
+    debugLog(
+      `codex-turn-id sid=${String(sessionId || "-").replace(/[\r\n]/g, "_")}`
+      + ` source=${source} event=${event} turn=${digest || "-"}`
+    );
   }
 
-  function hasRecentCodexOfficialHookSession(sessionId) {
-    const lastHookAt = codexOfficialHookSessions.get(String(sessionId));
-    if (!lastHookAt) return false;
-    if (now() - lastHookAt > CODEX_OFFICIAL_LOG_SUPPRESS_TTL_MS) {
-      codexOfficialHookSessions.delete(String(sessionId));
-      return false;
-    }
-    return true;
+  function markCodexOfficialHookSession(sessionId, turnId = null) {
+    codexOfficialActivity.mark(sessionId, turnId);
+  }
+
+  function hasRecentCodexOfficialHookSession(sessionId, turnId = null) {
+    return codexOfficialActivity.hasRecent(sessionId, turnId);
   }
 
   // JSONL fallback rescue. Official Codex hooks normally emit a Stop that closes
@@ -80,20 +130,117 @@ function createAgentRuntimeMain(options = {}) {
     return CODEX_WORKING_LIKE_STATES.has(session.state);
   }
 
-  function shouldSuppressCodexLogEvent(sessionId, state, event) {
+  function shouldSuppressCodexLogEvent(sessionId, state, event, turnId = null, extra = null) {
+    // Some Codex builds encode WebSearch as a generic function_call. Official
+    // hooks do not expose that boundary, so keep this privacy-safe monitor bit
+    // on the same fallback path as response_item:web_search_call.
+    if (event === "response_item:function_call" && extra && extra.recapIsWebSearch === true) return false;
     if (!CODEX_LOG_EVENTS_COVERED_BY_OFFICIAL_HOOKS.has(event)) return false;
-    if (!hasRecentCodexOfficialHookSession(sessionId)) return false;
+    if (!hasRecentCodexOfficialHookSession(sessionId, turnId)) return false;
     if (shouldAllowCodexJsonlCompletionFallback(sessionId, state, event)) return false;
     return true;
   }
 
+  function isCodexWebSearchLogBoundary(event, extra) {
+    return event === "response_item:web_search_call"
+      || (event === "response_item:function_call" && extra && extra.recapIsWebSearch === true);
+  }
+
+  function recordCodexWebSearchRecapOnly(sessionIdentity, sessionOptions, event, extra) {
+    if (
+      !isCodexWebSearchLogBoundary(event, extra)
+      || sessionOptions.recapSuppressed === true
+      || !Number.isSafeInteger(sessionOptions.recapOccurredAt)
+    ) return false;
+    const stateRuntime = getStateRuntime();
+    if (!stateRuntime || typeof stateRuntime.recordRecapEventOnly !== "function") return false;
+    return stateRuntime.recordRecapEventOnly({
+      occurredAt: sessionOptions.recapOccurredAt,
+      sessionId: sessionIdentity.sessionId,
+      rawSessionId: sessionIdentity.rawSessionId,
+      agentId: "codex",
+      profileId: sessionIdentity.profileId,
+      event,
+      toolUseId: sessionOptions.toolUseId || null,
+      recapDedupeId: sessionOptions.recapDedupeId || null,
+      recapIsSubagent: sessionOptions.recapIsSubagent === true,
+      headless: sessionOptions.headless === true,
+      hookSource: "codex-jsonl",
+    });
+  }
+
   function updateSessionFromServer(sessionId, state, event, opts = {}) {
     if (opts && opts.agentId === "codex" && opts.hookSource === "codex-official") {
-      markCodexOfficialHookSession(sessionId);
+      markCodexOfficialHookSession(sessionId, opts.turnId);
+      if (opts.profileId === "local") {
+        recordCodexTurnIdCapture(sessionId, "official", event, opts.turnId);
+        const fenceDecision = codexTurnFence.observe({
+          sessionId,
+          source: "official",
+          event,
+          state,
+          turnId: opts.turnId,
+        });
+        if (!fenceDecision.accept) return false;
+      }
     }
     const result = updateSession(sessionId, state, event, opts);
     maybeCaptureGhosttyTerminalId(sessionId, event, opts);
+    enrichQoderSessionTitle(sessionId, event, opts);
     return result;
+  }
+
+  function localQoderSession(sessionId) {
+    if (disposed || !isAgentEnabled("qoder")) return null;
+    const state = getStateRuntime();
+    const session = state && state.sessions && state.sessions.get(sessionId);
+    return session && session.agentId === "qoder"
+      && (session.profileId || "local") === "local"
+      && !session.host && !session.wslDistro ? session : null;
+  }
+
+  function noteQoderExternalTitle(sessionId, title) {
+    const session = localQoderSession(sessionId);
+    if (!session || !title) return;
+    qoderSessionTitleTracker.noteExternalTitle(session.rawSessionId || sessionId, title);
+  }
+
+  function updateSessionMetadataFromServer(sessionId, opts = {}) {
+    const state = getStateRuntime();
+    const accepted = !!(state && typeof state.updateSessionMetadata === "function"
+      && state.updateSessionMetadata(sessionId, opts));
+    if (accepted) noteQoderExternalTitle(sessionId, opts.sessionTitle);
+    return accepted;
+  }
+
+  function enrichQoderSessionTitle(sessionId, event, opts) {
+    if (opts.agentId !== "qoder" || (opts.profileId || "local") !== "local"
+      || opts.host || opts.wslDistro) return;
+    const session = localQoderSession(sessionId);
+    const rawSessionId = (session && session.rawSessionId) || opts.rawSessionId || sessionId;
+    // A new lifecycle must invalidate work from an earlier --resume of this id.
+    if (event === "SessionStart" || event === "SessionEnd") {
+      qoderSessionTitleTracker.clear(rawSessionId, { preserveExternalTitle: event === "SessionStart" });
+    }
+    if (event === "SessionEnd") return;
+    if (!session) return;
+    if (opts.sessionTitle) {
+      noteQoderExternalTitle(sessionId, opts.sessionTitle);
+      return;
+    }
+    if (!QODER_TITLE_EVENTS.has(event) || !session.transcriptPath) return;
+    const transcriptPath = session.transcriptPath;
+    // Lifecycle acceptance is already complete. This result only annotates a
+    // surviving local session and must not refresh activity or replay an event.
+    qoderSessionTitleTracker.resolve({ event, sessionId: rawSessionId, transcriptPath }).then((title) => {
+      const live = localQoderSession(sessionId);
+      if (!title || !live || live.transcriptPath !== transcriptPath
+        || qoderSessionTitleTracker.getTitle(rawSessionId) !== title) return;
+      const state = getStateRuntime();
+      if (state && typeof state.updateSessionMetadata === "function") {
+        state.updateSessionMetadata(sessionId, { sessionTitle: title });
+      }
+    }).catch(() => {});
   }
 
   function maybeCaptureGhosttyTerminalId(sessionId, event, opts = {}) {
@@ -136,11 +283,41 @@ function createAgentRuntimeMain(options = {}) {
     return callServer("stopIntegrationForAgent", agentId);
   }
 
+  function touchLocalCodexUserInputActivity(sessionId, activity) {
+    if (!activity || activity.userInputReplay === true
+      || !Number.isSafeInteger(activity.recapOccurredAt)
+      || activity.recapOccurredAt < 0 || activity.recapOccurredAt > now() + 1500) return false;
+    const snapshot = codexTurnFence.getSnapshot(sessionId);
+    const turnId = normalizeCodexTurnId(activity.turnId);
+    // An idless observer cannot prove it belongs to a known active turn.
+    if (snapshot && snapshot.currentTurnId && !turnId) return false;
+    const decision = codexTurnFence.observe({
+      sessionId, source: "jsonl", event: "CodexUserInputActivity", state: "working",
+      turnId,
+    });
+    if (!decision.accept) return false;
+    const state = getStateRuntime();
+    return !!(
+      state
+      && typeof state.touchSessionActivity === "function"
+      && state.touchSessionActivity(sessionId, {
+        agentId: "codex",
+        profileId: "local",
+        localOnly: true,
+        reviveIdle: true,
+      })
+    );
+  }
+
   function uninstallIntegrationForAgent(agentId) {
     return callServer("uninstallIntegrationForAgent", agentId);
   }
 
   function clearSessionsByAgent(agentId) {
+    if (agentId === "codex") resetLocalCodexLifecycleTracking();
+    if (agentId === "qoder" && qoderSessionTitleTracker && typeof qoderSessionTitleTracker.clear === "function") {
+      qoderSessionTitleTracker.clear();
+    }
     const state = getStateRuntime();
     return state && typeof state.clearSessionsByAgent === "function"
       ? state.clearSessionsByAgent(agentId)
@@ -174,48 +351,76 @@ function createAgentRuntimeMain(options = {}) {
       const CodexLogMonitor = loadCodexLogMonitor();
       const codexAgent = loadCodexAgent();
       codexMonitor = new CodexLogMonitor(codexAgent, (sid, state, event, extra) => {
-        const sessionId = makeSessionKey({ profileId: "local", rawSessionId: sid });
+        const sessionIdentity = resolveSessionIdentity(sid, "local");
+        const sessionId = sessionIdentity.sessionId;
         // Subscription quota is account state, not session state: it goes
         // to the session-independent per-source store (null host = this
         // machine), never into updateSession opts — see state.js
         // updateAccountQuota and src/state-account-quota.js.
-        const { codexQuota, ...sessionOptions } = buildCodexMonitorUpdateOptions(extra, {
-          includeHeadless: true,
-        });
-        const annotateCodexQuota = () => {
-          if (!codexQuota) return;
+        const sessionOptions = {
+          ...buildCodexMonitorSessionOptions(extra, { includeHeadless: true, includeRecap: true }),
+          profileId: sessionIdentity.profileId,
+          rawSessionId: sessionIdentity.rawSessionId,
+        };
+        const accountQuotas = normalizeCodexMonitorAccountQuotas(extra);
+        recordCodexTurnIdCapture(sessionId, "jsonl", event, extra && extra.turnId);
+        const annotateCodexAccountQuota = () => {
+          if (!accountQuotas) return;
           const stateRuntime = getStateRuntime();
           if (stateRuntime && typeof stateRuntime.updateAccountQuota === "function") {
-            stateRuntime.updateAccountQuota(null, { codexQuota });
+            stateRuntime.updateAccountQuota(null, accountQuotas);
           }
         };
+        const annotateCodexContextUsage = () => {
+          if (!sessionOptions.contextUsage) return false;
+          const stateRuntime = getStateRuntime();
+          if (!stateRuntime || typeof stateRuntime.updateSessionMetadata !== "function") return false;
+          return stateRuntime.updateSessionMetadata(sessionId, {
+            contextUsage: sessionOptions.contextUsage,
+          });
+        };
         if (isCodexMonitorMetadataOnlyEvent(event, extra)) {
-          if (sessionOptions.contextUsage) {
-            updateSession(sessionId, state, event, {
-              ...sessionOptions,
-              preserveState: true,
-            });
-          }
-          annotateCodexQuota();
+          annotateCodexContextUsage();
+          annotateCodexAccountQuota();
           return;
         }
-        if (shouldSuppressCodexLogEvent(sessionId, state, event)) {
-          if (sessionOptions.contextUsage) {
-            updateSession(sessionId, state, event, {
-              ...sessionOptions,
-              preserveState: true,
-            });
+        const fenceDecision = codexTurnFence.observe({
+          sessionId,
+          source: "jsonl",
+          event,
+          state,
+          turnId: extra && extra.turnId,
+          syntheticBackfill: extra && extra.syntheticBackfill === true,
+          turnBoundaryOpen: extra && extra.turnBoundaryOpen === true,
+        });
+        if (!fenceDecision.accept) {
+          if (
+            fenceDecision.reason === "closed-turn-id"
+            || fenceDecision.reason === "terminal-latch"
+          ) {
+            recordCodexWebSearchRecapOnly(sessionIdentity, sessionOptions, event, extra);
           }
-          annotateCodexQuota();
+          annotateCodexContextUsage();
+          annotateCodexAccountQuota();
+          return;
+        }
+        if (shouldSuppressCodexLogEvent(sessionId, state, event, extra && extra.turnId, extra)) {
+          annotateCodexContextUsage();
+          annotateCodexAccountQuota();
           return;
         }
         clearCodexNotifyBubbles(sessionId, `codex-state-transition:${state}`);
         updateSession(sessionId, state, event, sessionOptions);
-        annotateCodexQuota();
+        annotateCodexAccountQuota();
       }, {
-        classifier: codexSubagentClassifier,
+        classifier: localCodexSubagentClassifier,
         onUserInputRequest: (sid, request, extra) => {
-          const sessionId = makeSessionKey({ profileId: "local", rawSessionId: sid });
+          const sessionIdentity = resolveSessionIdentity(sid, "local");
+          const sessionId = sessionIdentity.sessionId;
+          // A live blocking question proves the turn is still active even when
+          // the Desktop app has emitted no ordinary lifecycle hook during a
+          // long model/network-retry segment. Never creates a missing session.
+          touchLocalCodexUserInputActivity(sessionId, extra);
           const shown = showCodexUserInputBubble({
             sessionId,
             callId: request.callId,
@@ -225,12 +430,25 @@ function createAgentRuntimeMain(options = {}) {
           });
           if (!shown) return;
           updateSession(sessionId, "notification", "CodexUserInputRequest", {
-            ...buildCodexMonitorUpdateOptions(extra, { includeHeadless: true }),
+            ...buildCodexMonitorSessionOptions(extra, { includeHeadless: true }),
+            profileId: sessionIdentity.profileId,
+            rawSessionId: sessionIdentity.rawSessionId,
             transientPermissionEvent: true,
+            // Card/focus recovery is independent of accepted activity. Only
+            // the fenced touch above may extend the session's lifetime, and
+            // this UI event must never enter recap with receipt time.
+            recapSuppressed: true,
           });
         },
-        onUserInputResolved: (sid, callId) => {
-          const sessionId = makeSessionKey({ profileId: "local", rawSessionId: sid });
+        onUserInputResolved: (sid, callId, resolution = null) => {
+          const sessionId = resolveSessionIdentity(sid, "local").sessionId;
+          // The correlated function_call_output is also forward progress. It
+          // used to close only the card, leaving the stale clock untouched.
+          // Terminal cleanup (task_complete / turn_aborted) uses the same card
+          // callback but is not forward progress and must never revive work.
+          if (!resolution || resolution.source !== "turn-terminal") {
+            touchLocalCodexUserInputActivity(sessionId, resolution);
+          }
           clearCodexUserInputBubbles(sessionId, callId, "codex-user-input-resolved");
         },
       });
@@ -244,8 +462,17 @@ function createAgentRuntimeMain(options = {}) {
   }
 
   function cleanup() {
+    disposed = true;
     if (codexMonitor && typeof codexMonitor.stop === "function") codexMonitor.stop();
-    codexOfficialHookSessions.clear();
+    resetLocalCodexLifecycleTracking();
+    if (qoderSessionTitleTracker && typeof qoderSessionTitleTracker.clear === "function") {
+      qoderSessionTitleTracker.clear();
+    }
+  }
+
+  function resetLocalCodexLifecycleTracking() {
+    codexTurnFence.clear();
+    codexOfficialActivity.clear();
   }
 
   return {
@@ -260,8 +487,12 @@ function createAgentRuntimeMain(options = {}) {
     clearSessionsByAgent,
     dismissPermissionsByAgent,
     updateSessionFromServer,
+    updateSessionMetadataFromServer,
     markCodexOfficialHookSession,
     shouldSuppressCodexLogEvent,
+    resetLocalCodexLifecycleTracking,
+    getCodexTurnFenceSnapshot: (sessionId) => codexTurnFence.getSnapshot(sessionId),
+    getCodexOfficialActivitySnapshot: (sessionId) => codexOfficialActivity.getSnapshot(sessionId),
     cleanup,
   };
 }

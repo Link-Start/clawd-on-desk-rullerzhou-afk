@@ -93,13 +93,14 @@ describe("state-payload-size fitStateBodyToByteBudget", () => {
       session_id: "sid",
       event: "Stop",
       background_tasks_count: 2,
+      background_subagents_count: 1,
       session_crons_count: 1,
       stop_hook_active: true,
       assistant_last_output: "字".repeat(50),
     };
     // Tight budget: the gate/completion fields alone nearly fill it, leaving no
     // usable room for any assistant text → drop it but keep everything else.
-    const r = fitStateBodyToByteBudget(body, { targetBytes: 150 });
+    const r = fitStateBodyToByteBudget(body, { targetBytes: 170 });
     assert.strictEqual(r.assistantDropped, true);
     assert.strictEqual(r.fitted, true);
     assert.strictEqual(r.body.assistant_last_output, undefined);
@@ -107,6 +108,7 @@ describe("state-payload-size fitStateBodyToByteBudget", () => {
     assert.strictEqual(r.body.state, "attention");
     assert.strictEqual(r.body.event, "Stop");
     assert.strictEqual(r.body.background_tasks_count, 2);
+    assert.strictEqual(r.body.background_subagents_count, 1);
     assert.strictEqual(r.body.session_crons_count, 1);
     assert.strictEqual(r.body.stop_hook_active, true);
   });

@@ -7,14 +7,25 @@ const vm = require("node:vm");
 const test = require("node:test");
 
 const ROOT = path.join(__dirname, "..");
-const TABLE_READMES = ["README.md", "README.ko-KR.md", "README.ja-JP.md"];
+const TABLE_READMES = ["README.md", "README.ko-KR.md", "README.ja-JP.md", "README.es.md"];
 const ALL_READMES = [
   "README.md",
   "README.zh-CN.md",
   "README.zh-TW.md",
   "README.ko-KR.md",
   "README.ja-JP.md",
+  "README.es.md",
 ];
+
+test("all other README variants expose Spanish navigation without a Spanish self-link", () => {
+  for (const file of ALL_READMES.filter((name) => name !== "README.es.md")) {
+    const source = fs.readFileSync(path.join(ROOT, file), "utf8");
+    assert.match(source, /href="README\.es\.md"/, `${file} should link to README.es.md`);
+  }
+  const spanish = fs.readFileSync(path.join(ROOT, "README.es.md"), "utf8");
+  assert.doesNotMatch(spanish, /href="README\.es\.md"/, "README.es.md should not link to itself");
+});
+
 const VERIFIED_GITHUB_CONTRIBUTORS = [
   "Bynlk",
   "zxypro1",
@@ -47,6 +58,20 @@ const VERIFIED_GITHUB_CONTRIBUTORS = [
   "lurui1997",
   "JesmonX",
   "chen86860",
+  "LinYsssss",
+  "He-wei-gui",
+  "liugou27",
+  "YOOGOMJA",
+  "anupamme",
+  "anthonyonazure",
+  "weed33834",
+  "arismarioneves",
+  "wang4433",
+  "shengmai-justin",
+  "Zamaniego",
+  "CheeseAgent",
+  "RS-Nocsi",
+  "Cobb04",
 ];
 
 function loadSettingsContributors() {
@@ -59,7 +84,13 @@ function loadSettingsContributors() {
 
 function extractContributorLogins(markdown, filename) {
   const section = extractContributorSection(markdown, filename);
-  return [...section.matchAll(/href="https:\/\/github\.com\/([^"/]+)"/g)].map((match) => match[1]);
+  const linked = [...section.matchAll(/href="https:\/\/github\.com\/([^"/]+)"/g)].map((match) => match[1]);
+  // A contributor whose GitHub account no longer resolves is credited as plain text
+  // rather than a link and avatar that both 404. Those entries still belong in the
+  // list, so collect them from the markup left over once every link is removed.
+  const unlinkedMarkup = section.replace(/<a\s[^>]*>[\s\S]*?<\/a>/g, "");
+  const unlinked = [...unlinkedMarkup.matchAll(/<sub>([^<]+)<\/sub>/g)].map((match) => match[1].trim());
+  return [...linked, ...unlinked];
 }
 
 function extractContributorTable(markdown, filename) {

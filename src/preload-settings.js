@@ -9,6 +9,7 @@
 //   getSnapshot()                       Promise<snapshot>
 //   getPetTintOptions()                 Promise<Array<{id, labelKey}>>
 //   getPetAccessoryOptions()            Promise<Array<{id, labelKey}>>
+//   getPetMouthAccessoryOptions()       Promise<Array<{id, labelKey}>>
 //   update(key, value)                  Promise<{ status, message? }>
 //   command(action, payload)            Promise<{ status, message? }>
 //   listAgents()                        Promise<Array<{id, name, ...}>>
@@ -16,6 +17,8 @@
 //                                       every settings-changed broadcast
 //   onAgentActivity(cb)                 cb({ agentId, timestamp, eventType }) —
 //                                       accepted custom /state activity only
+//   onRecapChanged(cb)                  cb() — coalesced signal that the local
+//                                       Footprints aggregate changed
 //   onAnimationPreviewPosterReady(cb)   cb({ themeId, filename, previewImageUrl,
 //                                       previewPosterCacheKey }) — incremental
 //                                       animation override preview poster
@@ -45,6 +48,10 @@ const remoteSshProgressListeners = new Set();
 const remoteApprovalStatusListeners = new Set();
 const textScaleContextListeners = new Set();
 const agentActivityListeners = new Set();
+const recapChangedListeners = new Set();
+const updateCheckStatusListeners = new Set();
+const requestedTabListeners = new Set();
+let pendingRequestedTab = null;
 ipcRenderer.on("settings-changed", (_event, payload) => {
   for (const cb of listeners) {
     try { cb(payload); } catch (err) { console.warn("settings onChanged listener threw:", err); }
@@ -88,15 +95,55 @@ ipcRenderer.on("settings:agent-activity", (_event, payload) => {
     try { cb(payload); } catch (err) { console.warn("agent activity listener threw:", err); }
   }
 });
+ipcRenderer.on("settings:recap-changed", () => {
+  for (const cb of recapChangedListeners) {
+    try { cb(); } catch (err) { console.warn("recap changed listener threw:", err); }
+  }
+});
+ipcRenderer.on("settings:update-check-status", (_event, payload) => {
+  for (const cb of updateCheckStatusListeners) {
+    try { cb(payload); } catch (err) { console.warn("update check status listener threw:", err); }
+  }
+});
+ipcRenderer.on("settings:select-tab", (_event, tab) => {
+  if (typeof tab !== "string") return;
+  pendingRequestedTab = tab;
+  for (const cb of requestedTabListeners) {
+    try { cb(tab); } catch (err) { console.warn("settings requested-tab listener threw:", err); }
+  }
+});
 
 contextBridge.exposeInMainWorld("settingsAPI", {
   // Capability flag: true when a default Discord App ID is hardcoded (maintainer-
   // shipped), so the presence enable switch can be ready without a user-saved App ID.
   discordDefaultAppIdPresent,
   getSnapshot: () => ipcRenderer.invoke("settings:get-snapshot"),
+  queryRecap: (period) => ipcRenderer.invoke("settings:recap-query", period),
+  clearRecap: () => ipcRenderer.invoke("settings:recap-clear"),
+  consumeRequestedTab: () => {
+    const tab = pendingRequestedTab;
+    pendingRequestedTab = null;
+    return tab;
+  },
+  onRequestedTab: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    requestedTabListeners.add(cb);
+    return () => requestedTabListeners.delete(cb);
+  },
   getQuotaSourceCount: () => ipcRenderer.invoke("settings:get-quota-source-count"),
+  getQuotaRingProviders: () => ipcRenderer.invoke("settings:get-quota-ring-providers"),
+  getKimiQuotaStatus: () => ipcRenderer.invoke("settings:kimi-quota-status"),
+  connectKimiQuota: (apiKey) => ipcRenderer.invoke("settings:kimi-quota-connect", { apiKey }),
+  refreshKimiQuota: () => ipcRenderer.invoke("settings:kimi-quota-refresh"),
+  reconnectKimiQuota: () => ipcRenderer.invoke("settings:kimi-quota-reconnect"),
+  disconnectKimiQuota: () => ipcRenderer.invoke("settings:kimi-quota-disconnect"),
+  forgetKimiQuotaCredential: () => ipcRenderer.invoke("settings:kimi-quota-forget"),
   getPetTintOptions: () => ipcRenderer.invoke("settings:get-pet-tint-options"),
   getPetAccessoryOptions: () => ipcRenderer.invoke("settings:get-pet-accessory-options"),
+  getPetMouthAccessoryOptions: () => ipcRenderer.invoke("settings:get-pet-mouth-accessory-options"),
+  getRoamFence: () => ipcRenderer.invoke("settings:get-roam-fence"),
+  selectRoamFence: () => ipcRenderer.invoke("settings:select-roam-fence"),
+  clearRoamFence: () => ipcRenderer.invoke("settings:clear-roam-fence"),
   getShortcutFailures: () => ipcRenderer.invoke("settings:getShortcutFailures"),
   getAnimationOverridesData: () => ipcRenderer.invoke("settings:get-animation-overrides-data"),
   openThemeAssetsDir: () => ipcRenderer.invoke("settings:open-theme-assets-dir"),
@@ -129,6 +176,8 @@ contextBridge.exposeInMainWorld("settingsAPI", {
   detectAgentInstallations: (opts) => ipcRenderer.invoke("settings:detect-agent-installations", opts),
   getAboutInfo: () => ipcRenderer.invoke("settings:get-about-info"),
   checkForUpdates: () => ipcRenderer.invoke("settings:check-for-updates"),
+  clearUpdateError: () => ipcRenderer.invoke("settings:clear-update-error"),
+  copyUpdateError: (copyText) => ipcRenderer.invoke("settings:copy-update-error", copyText),
   showTutorial: () => ipcRenderer.invoke("settings:show-tutorial"),
   openExternal: (url) => ipcRenderer.invoke("settings:open-external", url),
   listThemes: () => ipcRenderer.invoke("settings:list-themes"),
@@ -150,6 +199,11 @@ contextBridge.exposeInMainWorld("settingsAPI", {
     if (typeof cb !== "function") return () => {};
     agentActivityListeners.add(cb);
     return () => agentActivityListeners.delete(cb);
+  },
+  onRecapChanged: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    recapChangedListeners.add(cb);
+    return () => recapChangedListeners.delete(cb);
   },
   onAnimationPreviewPosterReady: (cb) => {
     if (typeof cb !== "function") return () => {};
@@ -174,6 +228,11 @@ contextBridge.exposeInMainWorld("settingsAPI", {
     remoteApprovalStatusListeners.add(cb);
     return () => remoteApprovalStatusListeners.delete(cb);
   },
+  onUpdateCheckStatus: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    updateCheckStatusListeners.add(cb);
+    return () => updateCheckStatusListeners.delete(cb);
+  },
 });
 
 contextBridge.exposeInMainWorld("doctor", {
@@ -190,7 +249,7 @@ contextBridge.exposeInMainWorld("doctor", {
 //
 //   listStatuses()                 Promise<{ status, statuses: Array<state> }>
 //   status(profileId)              Promise<{ status, state }>
-//   connect(profileId)             Promise<{ status, state? }>
+//   connect(profileId)             Promise<{ status, state?, reason?, hint?, detail? }>
 //   disconnect(profileId)          Promise<{ status, state? }>
 //   deploy(profileId, options?)    Promise<{ status, message?, step? }>
 //   authenticate(profileId)        Promise<{ status, terminal?, message? }>

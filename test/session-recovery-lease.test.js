@@ -147,6 +147,129 @@ describe("durable session recovery leases", () => {
     assert.strictEqual(complete.record.validUntil, null);
   });
 
+  it("does not create or refresh a durable lease when typed subagents alone upgrade Stop to hold (#952)", () => {
+    const filePath = getLeaseFilePath("claude-code", "real-session-1", { recoveryDir });
+    const withoutExisting = updateRecoveryLeaseFromStateBody(body({
+      event: "Stop",
+      state: "attention",
+      background_tasks_count: 1,
+      background_subagents_count: 1,
+      assistant_last_output: "parent finished",
+    }), winOptions(1000));
+    assert.deepStrictEqual(withoutExisting, {
+      written: false,
+      reason: "no-existing-evidence",
+    });
+    assert.strictEqual(fs.existsSync(filePath), false);
+
+    updateRecoveryLeaseFromStateBody(body({ state: "working" }), winOptions(2000));
+    const bytesBefore = fs.readFileSync(filePath);
+    const mtimeBefore = fs.statSync(filePath).mtimeMs;
+    const preserved = updateRecoveryLeaseFromStateBody(body({
+      event: "Stop",
+      state: "attention",
+      background_tasks_count: 1,
+      background_subagents_count: 1,
+      assistant_last_output: "parent finished",
+    }), winOptions(3000));
+    assert.strictEqual(preserved.written, false);
+    assert.strictEqual(preserved.reason, "preserved-existing-evidence");
+    assert.deepStrictEqual(fs.readFileSync(filePath), bytesBefore);
+    assert.strictEqual(fs.statSync(filePath).mtimeMs, mtimeBefore);
+    assert.strictEqual(readLeaseFile(filePath).eventAt, 2000);
+
+    const completed = updateRecoveryLeaseFromStateBody(body({
+      event: "Stop",
+      state: "attention",
+      background_tasks_count: 0,
+      background_subagents_count: 0,
+      assistant_last_output: "actually finished",
+    }), winOptions(4000));
+    assert.strictEqual(completed.written, true);
+    assert.strictEqual(completed.record.active, false);
+  });
+
+  it("preserves a provisional lease byte-for-byte and never creates a recovery directory for typed-only evidence (#952)", () => {
+    const provisional = updateRecoveryLeaseFromStateBody(body({
+      event: "Stop",
+      state: "attention",
+      background_tasks_count: 1,
+      assistant_last_output: "parent finished",
+    }), winOptions(1000));
+    assert.strictEqual(provisional.record.validUntil, 3000);
+    const filePath = provisional.filePath;
+    const bytesBefore = fs.readFileSync(filePath);
+
+    const preserved = updateRecoveryLeaseFromStateBody(body({
+      event: "Stop",
+      state: "attention",
+      background_tasks_count: 1,
+      background_subagents_count: 1,
+      assistant_last_output: "parent finished",
+    }), winOptions(1500));
+    assert.strictEqual(preserved.reason, "preserved-existing-evidence");
+    assert.deepStrictEqual(fs.readFileSync(filePath), bytesBefore);
+    assert.strictEqual(readLeaseFile(filePath).validUntil, 3000);
+
+    const missingDir = path.join(recoveryDir, "must-not-be-created");
+    const missing = updateRecoveryLeaseFromStateBody(body({
+      session_id: "typed-without-directory",
+      event: "Stop",
+      state: "attention",
+      background_subagents_count: 1,
+      assistant_last_output: "parent finished",
+    }), winOptions(2000, { recoveryDir: missingDir }));
+    assert.strictEqual(missing.reason, "no-existing-evidence");
+    assert.strictEqual(fs.existsSync(missingDir), false);
+  });
+
+  it("leaves an inactive tombstone untouched when typed-only evidence arrives late (#952)", () => {
+    const completed = updateRecoveryLeaseFromStateBody(body({
+      event: "Stop",
+      state: "attention",
+    }), winOptions(1000));
+    const bytesBefore = fs.readFileSync(completed.filePath);
+    const lateTyped = updateRecoveryLeaseFromStateBody(body({
+      event: "Stop",
+      state: "attention",
+      background_subagents_count: 1,
+      assistant_last_output: "late parent output",
+    }), winOptions(2000));
+    assert.strictEqual(lateTyped.reason, "no-active-evidence");
+    assert.deepStrictEqual(fs.readFileSync(completed.filePath), bytesBefore);
+  });
+
+  it("keeps ordinary durable hold behavior when another Stop signal is independently hard-live (#952)", () => {
+    const cases = [
+      {
+        background_tasks_count: 1,
+        background_subagents_count: 1,
+      },
+      {
+        background_subagents_count: 1,
+        assistant_last_output: "parent finished",
+        session_crons_count: 1,
+      },
+      {
+        background_subagents_count: 1,
+        assistant_last_output: "parent finished",
+        stop_hook_active: true,
+      },
+    ];
+    cases.forEach((fields, index) => {
+      const held = updateRecoveryLeaseFromStateBody(body({
+        session_id: `durable-hold-${index}`,
+        event: "Stop",
+        state: "attention",
+        ...fields,
+      }), winOptions(1000 + index));
+      assert.strictEqual(held.written, true);
+      assert.strictEqual(held.record.active, true);
+      assert.strictEqual(held.record.state, "working");
+      assert.strictEqual(held.record.validUntil, null);
+    });
+  });
+
   it("prevents a late older hook from resurrecting a terminal tombstone", () => {
     updateRecoveryLeaseFromStateBody(body({ event: "Stop", state: "attention" }), winOptions(2000));
     const late = updateRecoveryLeaseFromStateBody(body(), winOptions(1000));

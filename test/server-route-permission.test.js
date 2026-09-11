@@ -8,6 +8,8 @@ const initPermission = require("../src/permission");
 const {
   CLAWD_SERVER_HEADER,
   CLAWD_SERVER_ID,
+  CLAWD_HOOK_PID_HEADER,
+  CLAWD_PROCESS_INSTANCE_HEADER,
 } = require("../hooks/server-config");
 const {
   MAX_PERMISSION_BODY_BYTES,
@@ -33,8 +35,9 @@ function interaction(agentId, toolName) {
   return classifyPermissionInteraction({ agentId, toolName });
 }
 
-function makeReq(body) {
+function makeReq(body, headers = {}) {
   const req = new EventEmitter();
+  req.headers = headers;
   setImmediate(() => {
     if (body != null) req.emit("data", Buffer.from(body));
     req.emit("end");
@@ -73,6 +76,7 @@ function makeCtx(overrides = {}) {
     showPermissionBubble: [],
     sendPermissionResponse: [],
     replyOpencodeFamilyPermission: [],
+    dismissOpencodeFamilyPermissionResolvedExternally: [],
     resolved: [],
     maybeStartRemoteApproval: [],
     addPendingPermission: [],
@@ -96,6 +100,10 @@ function makeCtx(overrides = {}) {
       res.end(behavior);
     },
     replyOpencodeFamilyPermission: (payload) => calls.replyOpencodeFamilyPermission.push(payload),
+    dismissOpencodeFamilyPermissionResolvedExternally: (payload) => {
+      calls.dismissOpencodeFamilyPermissionResolvedExternally.push(payload);
+      return 0;
+    },
     resolvePermissionEntry: (entry, behavior, message) => calls.resolved.push({ entry, behavior, message }),
     maybeStartRemoteApproval: (entry) => calls.maybeStartRemoteApproval.push(entry),
     addPendingPermission(entry) {
@@ -121,7 +129,7 @@ function callPermissionPost(body, overrides = {}) {
     const res = makeRes();
     const ctx = makeCtx(overrides.ctx);
     const recorder = [];
-    handlePermissionPost(makeReq(body), res, {
+    handlePermissionPost(makeReq(body, overrides.headers), res, {
       ctx,
       createRequestHookRecorder: (identity, data, route) => {
         recorder.push({ identity, data, route });
@@ -204,6 +212,59 @@ function callPermissionPostThroughAutomation(body, mode, options = {}) {
   });
 }
 
+describe("Claude ExitPlanMode updatedInput compatibility", () => {
+  it("keeps the exact request input separate from the truncated display copy", async () => {
+    const rawInput = {
+      plan: `Start of plan ${"x".repeat(700)} end-of-plan`,
+      planFilePath: "C:\\Users\\Ruller\\.claude\\plans\\exact.md",
+      metadata: { source: "permission-hook", untouched: true },
+      steps: ["first", "second"],
+    };
+    const res = await callPermissionPostThroughAutomation(JSON.stringify({
+      agent_id: "claude-code",
+      session_id: "claude:exact-plan-input",
+      tool_name: "ExitPlanMode",
+      tool_input: rawInput,
+    }), "off", { showPermissionBubble() {} });
+
+    assert.strictEqual(res.permission.pendingPermissions.length, 1);
+    const entry = res.permission.pendingPermissions[0];
+    assert.notStrictEqual(entry.toolInput.plan, rawInput.plan, "display copy should remain truncated");
+    assert.deepStrictEqual(entry.planReviewWireInput, rawInput, "wire input must remain unmodified");
+
+    res.permission.resolvePermissionEntry(entry, "allow");
+
+    assert.strictEqual(res.body, JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: {
+          behavior: "allow",
+          updatedInput: rawInput,
+        },
+      },
+    }));
+  });
+
+  it("drops the connection instead of allowing when the request omitted tool_input", async () => {
+    const res = await callPermissionPostThroughAutomation(JSON.stringify({
+      agent_id: "claude-code",
+      session_id: "claude:missing-plan-input",
+      tool_name: "ExitPlanMode",
+    }), "off", { showPermissionBubble() {} });
+
+    assert.strictEqual(res.permission.pendingPermissions.length, 1);
+    const entry = res.permission.pendingPermissions[0];
+    assert.strictEqual(entry.planReviewWireInput, null);
+
+    res.permission.resolvePermissionEntry(entry, "allow");
+
+    assert.strictEqual(res.body, "", "fallback must not write a decision payload");
+    assert.strictEqual(res.writableFinished, false, "fallback must not end with a false allow");
+    assert.strictEqual(res.destroyed, true, "connection drop returns control to Claude's native prompt");
+    assert.deepStrictEqual(res.permission.pendingPermissions, []);
+  });
+});
+
 describe("server-route-permission helpers", () => {
   it("preserves bubble bypass decisions for CC, Codex, and opencode", () => {
     assert.strictEqual(shouldBypassCCBubble({ hideBubbles: true }, interaction("claude-code", "Bash"), "claude-code"), true);
@@ -282,6 +343,84 @@ describe("server-route-permission POST", () => {
         `${agentId} permission identity must reach the main-owned session path`
       );
     }
+  });
+
+  it("keeps a bounded compact preview and a complete local detail across permission adapters", async () => {
+    const marker = "__CLAWD_PERMISSION_DETAIL_END__";
+    const command = `${"printf x; ".repeat(260)}${marker}`;
+    const cases = [
+      { agentId: "claude-code", body: {} },
+      { agentId: "codebuddy", body: {} },
+      { agentId: "codex", body: { tool_input_description: "Run a generated command" } },
+      { agentId: "qwen-code", body: {} },
+      { agentId: "zcode", body: {} },
+      { agentId: "copilot-cli", body: {} },
+      { agentId: "hermes", body: {} },
+      {
+        agentId: "opencode",
+        body: {
+          request_id: "req-detail",
+          bridge_url: "http://127.0.0.1:9",
+          bridge_token: "detail-token",
+        },
+      },
+    ];
+
+    for (const { agentId, body } of cases) {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: agentId,
+        session_id: `${agentId}:detail`,
+        tool_name: "Bash",
+        tool_input: { command },
+        ...body,
+      }));
+      assert.strictEqual(res.ctx.pendingPermissions.length, 1, agentId);
+      const entry = res.ctx.pendingPermissions[0];
+      assert.strictEqual(entry.detailText.endsWith(marker), true, agentId);
+      assert.strictEqual(entry.detailTruncated, false, agentId);
+      assert.strictEqual(JSON.stringify(entry.toolInput).includes(marker), false, agentId);
+    }
+  });
+
+  it("keeps long Ask text for the expanded view without changing the wire answer keys", async () => {
+    const marker = "__CLAWD_ASK_DETAIL_END__";
+    const question = [
+      "Compare the tradeoffs carefully.",
+      "",
+      "1. Keep the compact window.",
+      "2. Open a scrollable detail view.",
+      "",
+      `${"Include every relevant constraint. ".repeat(20)}${marker}`,
+    ].join("\n");
+    const optionDescription = [
+      "Open the detail view.",
+      "",
+      "- Preserve paragraphs.",
+      "- Preserve list structure.",
+    ].join("\n");
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "claude-code",
+      session_id: "claude-code:ask-detail",
+      tool_name: "AskUserQuestion",
+      tool_input: {
+        questions: [{
+          question,
+          header: "Approach",
+          multiSelect: false,
+          options: [
+            { label: "Option A", description: "Keep the compact window." },
+            { label: "Option B", description: optionDescription },
+          ],
+        }],
+      },
+    }));
+
+    assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+    const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.toolInput.questions[0].question.includes(marker), false);
+    assert.strictEqual(entry.elicitationDetailInput.questions[0].question, question);
+    assert.strictEqual(entry.elicitationDetailInput.questions[0].options[1].description, optionDescription);
+    assert.strictEqual(entry.elicitationWireInput.questions[0].question, question);
   });
 
   it("uses the raw permission session id and ignores sender eligibility claims", async () => {
@@ -508,13 +647,15 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(res.recorder.length, 0);
   });
 
-  it("uses the existing deny response for oversized permission bodies", async () => {
+  it("never forges a deny for oversized permission bodies (connection closed, native fallback)", async () => {
     const res = await callPermissionPost("x".repeat(MAX_PERMISSION_BODY_BYTES + 1));
 
-    assert.deepStrictEqual(res.ctx.calls.sendPermissionResponse, [{
-      behavior: "deny",
-      message: "Permission request too large for Clawd bubble; answer in terminal",
-    }]);
+    // A transport-level rejection happens before the agent is identified, and
+    // qwen/zcode hooks pass hookSpecificOutput denies straight through as real
+    // decisions — so the only safe answer is no answer: destroy the socket so
+    // CC/CodeBuddy fall back to their chat prompt and qwen/zcode emit "{}".
+    assert.deepStrictEqual(res.ctx.calls.sendPermissionResponse, []);
+    assert.strictEqual(res.destroyed, true);
   });
 
   it("returns no-decision for Codex DND fallback", async () => {
@@ -588,6 +729,8 @@ describe("server-route-permission POST", () => {
         model: "gpt-5.4",
         codexOriginator: "Codex Desktop",
         codexSource: "vscode",
+        profileId: "local",
+        rawSessionId: sessionId,
         sessionAutomationIdentity: {
           eligible: false,
           reason: "unsupported-codex-session-source",
@@ -597,6 +740,166 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, [entry]);
     assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [entry]);
     assert.deepStrictEqual(res.ctx.calls.addPendingPermission, [entry]);
+  });
+
+  it("strips Codex permission process metadata on the profile-bound ingress", async () => {
+    const sessionId = "codex:019e115a-4df2-7ed0-b90e-8e6345aca777";
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "codex",
+      session_id: sessionId,
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      source_pid: 456,
+      agent_pid: 456,
+      pid_chain: [789, 456, -1],
+      editor: "cursor",
+      tmux_socket: "/tmp/tmux-1000/work",
+      tmux_client: "/dev/pts/7",
+      orca_pane_key: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/repo",
+      host: "spoofed-by-hook",
+      platform: "webui",
+      model: "gpt-5.4",
+      codex_originator: "Codex Desktop",
+      codex_source: "vscode",
+      hook_source: "codex-official",
+    }), {
+      options: {
+        remoteProfile: { profileId: "ssh-work", displayHost: "workbox" },
+      },
+    });
+
+    const remoteSessionId = makeSessionKey({ profileId: "ssh-work", rawSessionId: sessionId });
+    assert.deepStrictEqual(res.ctx.calls.updateSession, [[
+      remoteSessionId,
+      "notification",
+      "PermissionRequest",
+      {
+        agentId: "codex",
+        hookSource: "codex-official",
+        sourcePid: null,
+        agentPid: null,
+        pidChain: null,
+        editor: null,
+        tmuxSocket: null,
+        tmuxClient: null,
+        // Survives the gate — it is the one terminal identity the secure
+        // transport is still allowed to send.
+        orcaPaneKey: "8ce1fff7-tab:9813824b-leaf",
+        cwd: "/repo",
+        host: "workbox",
+        platform: "webui",
+        model: "gpt-5.4",
+        codexOriginator: "Codex Desktop",
+        codexSource: "vscode",
+        profileId: "ssh-work",
+        rawSessionId: sessionId,
+        sessionAutomationIdentity: {
+          eligible: false,
+          reason: "remote-session-lifecycle-not-authoritative",
+        },
+      },
+    ]]);
+    // The Codex permEntry never carried an `editor` key, hence the `?? null`.
+    const entry = res.ctx.pendingPermissions[0];
+    assert.deepStrictEqual({
+      sourcePid: entry.sourcePid ?? null,
+      agentPid: entry.agentPid ?? null,
+      pidChain: entry.pidChain ?? null,
+      editor: entry.editor ?? null,
+      tmuxSocket: entry.tmuxSocket ?? null,
+      tmuxClient: entry.tmuxClient ?? null,
+      orcaPaneKey: entry.orcaPaneKey ?? null,
+      cwd: entry.cwd ?? null,
+    }, {
+      sourcePid: null,
+      agentPid: null,
+      pidChain: null,
+      editor: null,
+      tmuxSocket: null,
+      tmuxClient: null,
+      orcaPaneKey: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/repo",
+    });
+  });
+
+  it("strips Hermes permission process metadata on the profile-bound ingress", async () => {
+    const sessionId = "hermes:01HQABCD";
+    const body = JSON.stringify({
+      agent_id: "hermes",
+      session_id: sessionId,
+      tool_name: "execute_bash",
+      tool_input: { command: "rm -rf /tmp/test" },
+      tool_use_id: "tool-1",
+      source_pid: 1234,
+      agent_pid: 1234,
+      pid_chain: [9999, 1234, -1],
+      tmux_socket: "/tmp/tmux-1000/work",
+      tmux_client: "/dev/pts/7",
+      orca_pane_key: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/home/user/repo",
+      editor: "cursor",
+    });
+    const processFields = (opts) => ({
+      sourcePid: opts.sourcePid ?? null,
+      agentPid: opts.agentPid ?? null,
+      pidChain: opts.pidChain ?? null,
+      editor: opts.editor ?? null,
+      tmuxSocket: opts.tmuxSocket ?? null,
+      tmuxClient: opts.tmuxClient ?? null,
+      orcaPaneKey: opts.orcaPaneKey ?? null,
+      cwd: opts.cwd ?? null,
+    });
+
+    const remote = await callPermissionPost(body, {
+      options: {
+        remoteProfile: { profileId: "ssh-work", displayHost: "workbox" },
+      },
+    });
+    const remoteOpts = remote.ctx.calls.updateSession[0][3];
+    assert.deepStrictEqual(remote.ctx.calls.updateSession[0].slice(0, 3), [
+      makeSessionKey({ profileId: "ssh-work", rawSessionId: sessionId }),
+      "notification",
+      "PermissionRequest",
+    ]);
+    assert.deepStrictEqual(processFields(remoteOpts), {
+      sourcePid: null,
+      agentPid: null,
+      pidChain: null,
+      editor: null,
+      tmuxSocket: null,
+      tmuxClient: null,
+      orcaPaneKey: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/home/user/repo",
+    });
+    assert.strictEqual(remoteOpts.host, "workbox");
+    assert.deepStrictEqual(processFields(remote.ctx.pendingPermissions[0]), {
+      sourcePid: null,
+      agentPid: null,
+      pidChain: null,
+      editor: null,
+      tmuxSocket: null,
+      tmuxClient: null,
+      orcaPaneKey: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/home/user/repo",
+    });
+
+    // Regression: the local path must stay exactly what it was before the gate.
+    const local = await callPermissionPost(body);
+    assert.deepStrictEqual(processFields(local.ctx.calls.updateSession[0][3]), {
+      sourcePid: 1234,
+      agentPid: 1234,
+      pidChain: [9999, 1234],
+      editor: "cursor",
+      tmuxSocket: "/tmp/tmux-1000/work",
+      tmuxClient: "/dev/pts/7",
+      orcaPaneKey: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/home/user/repo",
+    });
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(local.ctx.calls.updateSession[0][3], "host"),
+      false,
+    );
   });
 
   it("keeps every permission focus entry carrying the same terminal identity fields", () => {
@@ -690,6 +993,8 @@ describe("server-route-permission POST", () => {
       "PermissionRequest",
       {
         agentId: "opencode",
+        profileId: "local",
+        rawSessionId: "opencode:s1",
         sessionAutomationIdentity: {
           eligible: false,
           reason: "permission-session-association-not-authoritative",
@@ -722,10 +1027,36 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, [entry]);
   });
 
+  it("rejects non-loopback or path-bearing opencode bridges before enqueue", async () => {
+    for (const bridgeUrl of [
+      "https://127.0.0.1:1234",
+      "http://localhost:1234",
+      "http://127.0.0.1:1234/reply",
+      "http://192.168.1.20:1234",
+      "http://example.com:1234",
+    ]) {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: "opencode",
+        session_id: "opencode:invalid-bridge",
+        tool_name: "Bash",
+        request_id: "req-invalid-bridge",
+        bridge_url: bridgeUrl,
+        bridge_token: "token",
+      }));
+      assert.strictEqual(res.statusCode, 200, bridgeUrl);
+      assert.deepStrictEqual(res.ctx.pendingPermissions, [], bridgeUrl);
+      assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, [], bridgeUrl);
+      assert.deepStrictEqual(res.ctx.calls.replyOpencodeFamilyPermission, [], bridgeUrl);
+    }
+  });
+
   it("silently drops headless opencode sessions before auto-pilot can bridge allow", async () => {
     const sessionId = "opencode:headless";
     const res = await callPermissionPost(JSON.stringify({
       agent_id: "opencode",
+      hook_source: "codex-official",
+      codex_session_role: "subagent",
+      codex_originator: "codex-tui",
       session_id: sessionId,
       tool_name: "Bash",
       tool_input: { command: "npm test" },
@@ -795,6 +1126,140 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(reply.requestId, "req-boom");
     assert.strictEqual(reply.bridgeUrl, "http://127.0.0.1:1234");
     assert.strictEqual(reply.bridgeToken, "token");
+  });
+
+  it("routes a strict family replied lifecycle before every create/decision gate and never records a request", async () => {
+    const lifecycleCalls = [];
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "opencode",
+      hook_source: "opencode-plugin",
+      permission_event: "replied",
+      session_id: "opencode:ses-life",
+      request_id: "per-life",
+      lifecycle_bridge_url: "http://127.0.0.1:43210",
+      lifecycle_bridge_token: "token_life",
+    }), {
+      ctx: {
+        doNotDisturb: true,
+        hideBubbles: true,
+        isAgentEnabled: () => false,
+        isAgentPermissionsEnabled: () => false,
+        dismissOpencodeFamilyPermissionResolvedExternally: (identity) => {
+          lifecycleCalls.push(identity);
+          return 1;
+        },
+      },
+    });
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID);
+    assert.strictEqual(res.body, "ok");
+    assert.deepStrictEqual(lifecycleCalls, [{
+      agentId: "opencode",
+      requestId: "per-life",
+      sessionId: localSessionKey("opencode:ses-life"),
+      bridgeUrl: "http://127.0.0.1:43210",
+      bridgeToken: "token_life",
+    }]);
+    assert.deepStrictEqual(res.recorder, [], "lifecycle must not create a PermissionRequest recorder");
+    assert.deepStrictEqual(res.ctx.calls.updateSession, []);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.ctx.calls.addPendingPermission, []);
+    assert.deepStrictEqual(res.ctx.calls.replyOpencodeFamilyPermission, []);
+    assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, []);
+  });
+
+  it("200-no-ops malformed lifecycle identity without a default session or a thrown validator error", async () => {
+    const invalidBodies = [
+      { session_id: null },
+      { session_id: 42 },
+      { lifecycle_bridge_url: "http://localhost:43210" },
+      { lifecycle_bridge_url: { href: "http://127.0.0.1:43210" } },
+      { lifecycle_bridge_token: 42 },
+      { lifecycle_bridge_token: "x".repeat(129) },
+      { request_id: "" },
+    ];
+    for (const delta of invalidBodies) {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: "opencode",
+        permission_event: "replied",
+        session_id: "opencode:strict",
+        request_id: "per-strict",
+        lifecycle_bridge_url: "http://127.0.0.1:43210",
+        lifecycle_bridge_token: "token_strict",
+        ...delta,
+      }));
+      assert.strictEqual(res.statusCode, 200);
+      assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID);
+      assert.deepStrictEqual(res.recorder, []);
+      assert.deepStrictEqual(
+        res.ctx.calls.dismissOpencodeFamilyPermissionResolvedExternally,
+        [],
+        JSON.stringify(delta)
+      );
+      assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+      assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    }
+  });
+
+  it("fails closed for unknown permission_event instead of creating an unknown family bubble", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "opencode",
+      permission_event: "resolved-someday",
+      session_id: "opencode:unknown-event",
+      request_id: "per-unknown-event",
+      lifecycle_bridge_url: "http://127.0.0.1:1234",
+      lifecycle_bridge_token: "token-unknown-event",
+    }));
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.deepStrictEqual(res.recorder, []);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.ctx.calls.dismissOpencodeFamilyPermissionResolvedExternally, []);
+  });
+
+  it("keeps ACK and ordinary family enqueue in one synchronous execution segment", () => {
+    const body = JSON.stringify({
+      agent_id: "opencode",
+      session_id: "opencode:sync",
+      tool_name: "Bash",
+      request_id: "per-sync",
+      bridge_url: "http://127.0.0.1:1234",
+      bridge_token: "token",
+    });
+    const ctx = makeCtx();
+    let dataHandler = null;
+    const req = {
+      headers: {},
+      on(eventName, handler) {
+        if (eventName === "data") dataHandler = handler;
+        if (eventName === "end") {
+          dataHandler(Buffer.from(body));
+          handler();
+        }
+        return this;
+      },
+    };
+    const res = makeRes();
+    let pendingAtAck = null;
+    const originalEnd = res.end;
+    res.end = function endAndSnapshot(data) {
+      originalEnd.call(this, data);
+      pendingAtAck = ctx.pendingPermissions.length;
+    };
+
+    handlePermissionPost(req, res, {
+      ctx,
+      createRequestHookRecorder: () => ({
+        accepted() {}, droppedByDisabled() {}, droppedByDnd() {},
+        droppedInvalidAgent() {}, droppedUnsupported() {},
+      }),
+    });
+
+    assert.strictEqual(pendingAtAck, 0, "ACK is written immediately before enqueue");
+    assert.strictEqual(ctx.pendingPermissions.length, 1, "enqueue completes before the handler returns");
+    assert.strictEqual(ctx.pendingPermissions[0].familyRequestId, "per-sync");
   });
 
   it("destroys the Claude/CodeBuddy connection during DND", async () => {
@@ -914,6 +1379,73 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.recorder.map((item) => item.outcome).filter(Boolean), ["accepted"]);
   });
 
+  it("fails closed for every QwenWork /permission shape before bubbles, passthrough, or remote approval", async () => {
+    const cases = [
+      {
+        label: "tool approval",
+        toolName: "Bash",
+        toolInput: { command: "npm test" },
+      },
+      {
+        label: "elicitation",
+        toolName: "AskUserQuestion",
+        toolInput: {
+          questions: [{
+            question: "Continue?",
+            header: "Review",
+            options: [{ label: "Yes", description: "Continue" }],
+            multiSelect: false,
+          }],
+        },
+        ctx: { isAgentPermissionsEnabled: () => false },
+      },
+      {
+        label: "passthrough tool",
+        toolName: "TaskList",
+        toolInput: {},
+        ctx: { PASSTHROUGH_TOOLS: new Set(["TaskList"]) },
+      },
+      {
+        label: "DND",
+        toolName: "Bash",
+        toolInput: { command: "npm test" },
+        ctx: { doNotDisturb: true },
+      },
+      {
+        label: "agent disabled",
+        toolName: "Bash",
+        toolInput: { command: "npm test" },
+        ctx: { isAgentEnabled: () => false },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: "qwenwork",
+        session_id: "qwenwork:sid",
+        tool_name: testCase.toolName,
+        tool_input: testCase.toolInput,
+        tool_use_id: "tool-qwenwork-1",
+      }), { ctx: testCase.ctx });
+
+      assert.strictEqual(res.statusCode, 204, testCase.label);
+      assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID, testCase.label);
+      assert.strictEqual(res.body, "", testCase.label);
+      assert.strictEqual(res.destroyed, false, testCase.label);
+      assert.deepStrictEqual(res.ctx.pendingPermissions, [], testCase.label);
+      assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, [], testCase.label);
+      assert.deepStrictEqual(res.ctx.calls.addPendingPermission, [], testCase.label);
+      assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [], testCase.label);
+      assert.deepStrictEqual(res.ctx.calls.updateSession, [], testCase.label);
+      assert.deepStrictEqual(res.ctx.calls.sendPermissionResponse, [], testCase.label);
+      assert.deepStrictEqual(
+        res.recorder.map((item) => item.outcome).filter(Boolean),
+        ["unsupported"],
+        testCase.label
+      );
+    }
+  });
+
   it("allows legacy Pi permission requests without creating a bubble", async () => {
     const res = await callPermissionPost(JSON.stringify({
       agent_id: "pi",
@@ -967,6 +1499,8 @@ describe("server-route-permission POST", () => {
     const entry = res.ctx.pendingPermissions[0];
     assert.strictEqual(entry.res, res);
     assert.strictEqual(entry.sessionId, localSessionKey("sid"));
+    assert.strictEqual(entry.profileId, "local");
+    assert.strictEqual(entry.rawSessionId, "sid");
     assert.strictEqual(entry.toolName, "Bash");
     assert.strictEqual(entry.toolUseId, "tool-1");
     assert.strictEqual(entry.agentId, "claude-code");
@@ -976,6 +1510,8 @@ describe("server-route-permission POST", () => {
       "PermissionRequest",
       {
         agentId: "claude-code",
+        profileId: "local",
+        rawSessionId: "sid",
         sessionAutomationIdentity: {
           eligible: false,
           reason: "identity-verification-required",
@@ -1097,6 +1633,8 @@ describe("server-route-permission POST", () => {
       "PermissionRequest",
       {
         agentId: "claude-code",
+        profileId: "local",
+        rawSessionId: "sid",
         sessionAutomationIdentity: {
           eligible: false,
           reason: "identity-verification-required",
@@ -1168,6 +1706,21 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(entry.profileId, "profile-a");
     assert.strictEqual(entry.rawSessionId, "same-raw");
     assert.strictEqual(entry.host, "trusted-host");
+    assert.deepStrictEqual(res.ctx.calls.updateSession[0].slice(0, 3), [
+      entry.sessionId,
+      "notification",
+      "PermissionRequest",
+    ]);
+    assert.deepStrictEqual(res.ctx.calls.updateSession[0][3], {
+      agentId: "claude-code",
+      profileId: "profile-a",
+      rawSessionId: "same-raw",
+      host: "trusted-host",
+      sessionAutomationIdentity: {
+        eligible: false,
+        reason: "identity-verification-required",
+      },
+    });
   });
 
   it("falls back to destroying the connection when bubbles are disabled and remote approval has nowhere to send it", async () => {
@@ -1419,6 +1972,9 @@ describe("server-route-permission POST", () => {
     const sessionId = "copilot:headless";
     const res = await callPermissionPost(JSON.stringify({
       agent_id: "copilot-cli",
+      hook_source: "codex-official",
+      codex_session_role: "subagent",
+      codex_originator: "codex-tui",
       session_id: sessionId,
       tool_name: "edit",
       tool_input: { filePath: "a.txt" },
@@ -1477,6 +2033,8 @@ describe("server-route-permission POST", () => {
         pidChain: [9999, 1234],
         cwd: "D:/repo",
         host: "devbox",
+        profileId: "local",
+        rawSessionId: sessionId,
         sessionAutomationIdentity: {
           eligible: false,
           reason: "session-lifecycle-not-authoritative",
@@ -1634,6 +2192,9 @@ describe("server-route-permission POST", () => {
     const sessionId = "hermes:headless";
     const res = await callPermissionPost(JSON.stringify({
       agent_id: "hermes",
+      hook_source: "codex-official",
+      codex_session_role: "subagent",
+      codex_originator: "codex-tui",
       session_id: sessionId,
       tool_name: "execute_bash",
       tool_input: { command: "rm -rf /tmp/test" },
@@ -1692,6 +2253,8 @@ describe("server-route-permission POST", () => {
         pidChain: [9999, 1234],
         cwd: "/home/user/repo",
         editor: "cursor",
+        profileId: "local",
+        rawSessionId: sessionId,
         sessionAutomationIdentity: {
           eligible: false,
           reason: "session-lifecycle-not-authoritative",
@@ -1730,6 +2293,8 @@ describe("server-route-permission POST", () => {
         agentId: "hermes",
         cwd: "/home/user/repo",
         agentPid: 5678,
+        profileId: "local",
+        rawSessionId: sessionId,
         sessionAutomationIdentity: {
           eligible: false,
           reason: "session-lifecycle-not-authoritative",
@@ -1778,6 +2343,159 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(res.ctx.calls.resolved[0].entry, entry);
     assert.strictEqual(res.ctx.calls.resolved[0].behavior, "no-decision");
   });
+
+  // ── DeepSeek Harness branch ──
+
+  it("creates an independent DSH approval entry with no Claude response vocabulary", async () => {
+    const rawSessionId = "deepseek-harness:session-1";
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "deepseek-harness",
+      hook_source: "dsh-plugin",
+      session_id: rawSessionId,
+      tool_name: "execute_shell",
+      tool_use_id: "call-1",
+      tool_input: { command: "must-not-cross-the-public-contract" },
+      reason: `  Run the formatter\u0000 safely\r\n${"x".repeat(600)}`,
+      source_pid: 111,
+      agent_pid: 222,
+      pid_chain: [111, 222],
+      cwd: "C:/repo",
+    }));
+    assert.strictEqual(res.statusCode, null);
+    assert.strictEqual(res.destroyed, false);
+    assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+    const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.agentId, "deepseek-harness");
+    assert.strictEqual(entry.isDsh, true);
+    assert.strictEqual(entry.sessionId, localSessionKey(rawSessionId));
+    assert.strictEqual(entry.toolName, "execute_shell");
+    assert.strictEqual(entry.toolUseId, "call-1");
+    assert.deepStrictEqual(Object.keys(entry.toolInput), ["description"]);
+    assert.match(entry.toolInput.description, /^Run the formatter safely /);
+    assert.ok(entry.toolInput.description.length <= 500);
+    assert.doesNotMatch(entry.toolInput.description, /[\u0000-\u001F\u007F-\u009F]/);
+    assert.strictEqual(JSON.stringify(entry.toolInput).includes("must-not-cross"), false);
+    assert.deepStrictEqual(entry.suggestions, []);
+    assert.deepStrictEqual(entry.sessionAutomationIdentity, {
+      eligible: false,
+      reason: "automation-not-audited",
+    });
+    assert.deepStrictEqual(res.ctx.calls.sendPermissionResponse, []);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, [entry]);
+    assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [entry]);
+  });
+
+  it("leaves DSH ask_user_question with the native provider", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "deepseek-harness",
+      session_id: "deepseek-harness:q1",
+      tool_name: "ask_user_question",
+      tool_input: { questions: [{ id: "q1", question: "Continue?" }] },
+    }));
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.recorder.map((entry) => entry.outcome).filter(Boolean), ["unsupported"]);
+  });
+
+  it("returns DSH no-decision for DND, headless, disabled, and the per-agent gate", async () => {
+    const cases = [
+      { ctx: { doNotDisturb: true }, outcome: "dnd" },
+      { extra: { headless: true }, outcome: "accepted" },
+      { ctx: { isAgentEnabled: (agentId) => agentId !== "deepseek-harness" }, outcome: "disabled" },
+      { ctx: { isAgentPermissionsEnabled: (agentId) => agentId !== "deepseek-harness" }, outcome: "accepted" },
+    ];
+    for (const testCase of cases) {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: "deepseek-harness",
+        session_id: "deepseek-harness:fallback",
+        tool_name: "execute_shell",
+        tool_input: {},
+        ...(testCase.extra || {}),
+      }), { ctx: testCase.ctx || {} });
+      assert.strictEqual(res.statusCode, 204, testCase.outcome);
+      assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID, testCase.outcome);
+      assert.deepStrictEqual(res.ctx.pendingPermissions, [], testCase.outcome);
+      assert.deepStrictEqual(res.ctx.calls.sendPermissionResponse, [], testCase.outcome);
+      assert.deepStrictEqual(res.recorder.map((entry) => entry.outcome).filter(Boolean), [testCase.outcome]);
+    }
+  });
+
+  it("routes DSH to remote-only approval when local bubbles are off, but never crosses a disabled agent gate", async () => {
+    const remoteCalls = [];
+    const remote = await callPermissionPost(JSON.stringify({
+      agent_id: "deepseek-harness",
+      session_id: "deepseek-harness:remote",
+      tool_name: "execute_shell",
+      tool_input: {},
+      reason: "Needs a visible remote explanation",
+    }), {
+      ctx: {
+        hideBubbles: true,
+        maybeStartRemoteApproval(entry) { remoteCalls.push(entry); return true; },
+      },
+    });
+    assert.strictEqual(remote.statusCode, null);
+    assert.strictEqual(remote.ctx.pendingPermissions.length, 1);
+    assert.strictEqual(remote.ctx.pendingPermissions[0].remoteOnly, true);
+    assert.strictEqual(remote.ctx.pendingPermissions[0].isDsh, true);
+    assert.strictEqual(remoteCalls.length, 1);
+    assert.deepStrictEqual(remoteCalls[0].toolInput, {
+      description: "Needs a visible remote explanation",
+    });
+
+    const blockedCalls = [];
+    const blocked = await callPermissionPost(JSON.stringify({
+      agent_id: "deepseek-harness",
+      session_id: "deepseek-harness:blocked",
+      tool_name: "execute_shell",
+      tool_input: {},
+    }), {
+      ctx: {
+        hideBubbles: true,
+        isAgentPermissionsEnabled: () => false,
+        maybeStartRemoteApproval(entry) { blockedCalls.push(entry); return true; },
+      },
+    });
+    assert.strictEqual(blocked.statusCode, 204);
+    assert.deepStrictEqual(blockedCalls, []);
+    assert.deepStrictEqual(blocked.ctx.pendingPermissions, []);
+  });
+
+  it("returns DSH no-decision and removes the pending entry when bubble creation fails", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "deepseek-harness",
+      session_id: "deepseek-harness:bubble-fail",
+      tool_name: "execute_shell",
+      tool_input: {},
+    }), {
+      ctx: { showPermissionBubble() { throw new Error("no window"); } },
+    });
+    assert.strictEqual(res.statusCode, 204);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.deepStrictEqual(res.ctx.calls.removePendingPermission.map((item) => item.reason), ["dsh-bubble-failed"]);
+    assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, []);
+  });
+
+  it("returns DSH no-decision without enqueue when the session update fails", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "deepseek-harness",
+      session_id: "deepseek-harness:update-fail",
+      tool_name: "execute_shell",
+      tool_input: {},
+    }), {
+      ctx: { updateSession() { throw new Error("state unavailable"); } },
+    });
+    assert.strictEqual(res.statusCode, 204);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.deepStrictEqual(res.ctx.calls.addPendingPermission, []);
+    assert.deepStrictEqual(res.ctx.calls.removePendingPermission.map((item) => item.reason), [
+      "dsh-update-session-failed",
+    ]);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, []);
+  });
 });
 
 // ── Claude Code subagent requests (#451) ──
@@ -1786,6 +2504,220 @@ describe("server-route-permission POST", () => {
 // subagent. resolveHookAgentId normalizes that to claude-code, and the
 // per-agent subagent sub-gate decides whether to bubble or drop the
 // connection (CC terminal fallback).
+describe("server-route-permission Windows B1a Codex metadata", () => {
+  const generation = "permission-route-generation";
+  const headers = {
+    [CLAWD_HOOK_PID_HEADER.toLowerCase()]: "7654",
+    [CLAWD_PROCESS_INSTANCE_HEADER.toLowerCase()]: generation,
+  };
+  const runtime = (mode) => ({
+    version: 1,
+    instanceGeneration: generation,
+    agents: { codex: mode },
+  });
+  const body = (extra = {}) => JSON.stringify({
+    agent_id: "codex",
+    hook_source: "codex-official",
+    hook_event_name: "PermissionRequest",
+    session_id: "codex:b1a-permission",
+    tool_name: "Shell",
+    tool_input: { command: "echo ok" },
+    source_pid: 11,
+    agent_pid: 12,
+    pid_chain: [11, 12],
+    ...extra,
+  });
+
+  it("replaces bubble and transient-session focus with the fresh walk", async () => {
+    let resolverCalls = 0;
+    const res = await callPermissionPost(body(), {
+      headers,
+      options: {
+        isWinHost: true,
+        windowsProcessChainRuntime: runtime("b1a-authoritative"),
+        resolveWindowsProcessMetadata: ({ agentId, hookPid, preferAgentPid }) => {
+          resolverCalls++;
+          assert.deepStrictEqual({ agentId, hookPid, preferAgentPid }, {
+            agentId: "codex",
+            hookPid: 7654,
+            preferAgentPid: false,
+          });
+          return {
+            status: "ok",
+            sourcePid: 101,
+            agentPid: 202,
+            pidChain: [101, 202, 303],
+            editor: null,
+          };
+        },
+      },
+    });
+
+    assert.strictEqual(resolverCalls, 1);
+    const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.sourcePid, 101);
+    assert.strictEqual(entry.agentPid, 202);
+    assert.deepStrictEqual(entry.pidChain, [101, 202, 303]);
+    const opts = res.ctx.calls.updateSession[0][3];
+    assert.strictEqual(opts.sourcePid, 101);
+    assert.strictEqual(opts.agentPid, 202);
+    assert.deepStrictEqual(opts.pidChain, [101, 202, 303]);
+    assert.strictEqual(opts.replaceProcessMetadata, true);
+  });
+
+  it("persists an authoritative unavailable result as an explicit clear", async () => {
+    const res = await callPermissionPost(body(), {
+      headers,
+      options: {
+        isWinHost: true,
+        windowsProcessChainRuntime: runtime("b1a-authoritative"),
+        resolveWindowsProcessMetadata: () => ({ status: "unavailable", reason: "access-denied" }),
+      },
+    });
+
+    const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.sourcePid, null);
+    assert.strictEqual(entry.agentPid, null);
+    assert.strictEqual(entry.pidChain, null);
+    const opts = res.ctx.calls.updateSession[0][3];
+    assert.strictEqual(opts.sourcePid, null);
+    assert.strictEqual(opts.agentPid, null);
+    assert.strictEqual(opts.pidChain, null);
+    assert.strictEqual(opts.replaceProcessMetadata, true);
+  });
+
+  it("also resolves before native-mode updateSession and preserves no-decision", async () => {
+    const res = await callPermissionPost(body(), {
+      headers,
+      ctx: { isCodexPermissionInterceptEnabled: () => false },
+      options: {
+        isWinHost: true,
+        windowsProcessChainRuntime: runtime("b1a-authoritative"),
+        resolveWindowsProcessMetadata: () => ({
+          status: "ok",
+          sourcePid: 401,
+          agentPid: 402,
+          pidChain: [401, 402],
+          editor: null,
+        }),
+      },
+    });
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.ctx.pendingPermissions.length, 0);
+    const opts = res.ctx.calls.updateSession[0][3];
+    assert.strictEqual(opts.sourcePid, 401);
+    assert.strictEqual(opts.replaceProcessMetadata, true);
+    assert.strictEqual(opts.transientPermissionEvent, true);
+  });
+
+  it("does not resolve on DND/headless/disabled no-decision short circuits", async () => {
+    const variants = [
+      { ctx: { doNotDisturb: true }, extra: {} },
+      { ctx: {}, extra: { headless: true } },
+      { ctx: { isAgentEnabled: () => false }, extra: {} },
+    ];
+    for (const variant of variants) {
+      let resolverCalls = 0;
+      const res = await callPermissionPost(body(variant.extra), {
+        headers,
+        ctx: variant.ctx,
+        options: {
+          isWinHost: true,
+          windowsProcessChainRuntime: runtime("b1a-authoritative"),
+          resolveWindowsProcessMetadata: () => { resolverCalls++; return { status: "ok" }; },
+        },
+      });
+      assert.strictEqual(resolverCalls, 0);
+      assert.strictEqual(res.statusCode, 204);
+    }
+  });
+
+  it("keeps shadow metadata legacy-authoritative and records parity", async () => {
+    const records = [];
+    const res = await callPermissionPost(body({ editor: "code" }), {
+      headers,
+      options: {
+        isWinHost: true,
+        windowsProcessChainRuntime: runtime("shadow"),
+        resolveWindowsProcessMetadata: () => ({
+          status: "ok",
+          sourcePid: 21,
+          agentPid: 22,
+          pidChain: [21, 22],
+          editor: "code",
+        }),
+        recordWindowsProcessChainShadow: (record) => records.push(record),
+      },
+    });
+
+    assert.strictEqual(res.ctx.pendingPermissions[0].sourcePid, 11);
+    assert.strictEqual(res.ctx.calls.updateSession[0][3].replaceProcessMetadata, undefined);
+    assert.strictEqual(records.length, 1);
+    assert.strictEqual(records[0].comparison.all, false);
+    assert.strictEqual(records[0].comparison.editor, true);
+    assert.deepStrictEqual(records[0].legacyMetadata, {
+      sourcePid: 11, agentPid: 12, pidChain: [11, 12], editor: "code",
+    });
+    assert.deepStrictEqual(records[0].candidateMetadata, {
+      sourcePid: 21, agentPid: 22, pidChain: [21, 22], editor: "code",
+    });
+  });
+
+  it("drops an unrecognized legacy editor before permission shadow comparison", async () => {
+    const records = [];
+    await callPermissionPost(body({ editor: "notepad" }), {
+      headers,
+      options: {
+        isWinHost: true,
+        windowsProcessChainRuntime: runtime("shadow"),
+        resolveWindowsProcessMetadata: () => ({
+          status: "ok",
+          sourcePid: 11,
+          agentPid: 12,
+          pidChain: [11, 12],
+          editor: null,
+        }),
+        recordWindowsProcessChainShadow: (record) => records.push(record),
+      },
+    });
+    assert.strictEqual(records[0].legacyMetadata.editor, null);
+    assert.strictEqual(records[0].comparison.editor, true);
+  });
+
+  it("uses agentPid as the Codex Desktop source and rejects mismatched generations", async () => {
+    let preferAgentPid = null;
+    const desktop = await callPermissionPost(body({ codex_originator: "codex_work_desktop" }), {
+      headers,
+      options: {
+        isWinHost: true,
+        windowsProcessChainRuntime: runtime("b1a-authoritative"),
+        resolveWindowsProcessMetadata: (request) => {
+          preferAgentPid = request.preferAgentPid;
+          return { status: "ok", sourcePid: 99, agentPid: 99, pidChain: [99], editor: null };
+        },
+      },
+    });
+    assert.strictEqual(preferAgentPid, true);
+    assert.strictEqual(desktop.ctx.pendingPermissions[0].sourcePid, 99);
+
+    let mismatchCalls = 0;
+    const mismatch = await callPermissionPost(body(), {
+      headers: {
+        [CLAWD_HOOK_PID_HEADER.toLowerCase()]: "7654",
+        [CLAWD_PROCESS_INSTANCE_HEADER.toLowerCase()]: "old-generation",
+      },
+      options: {
+        isWinHost: true,
+        windowsProcessChainRuntime: runtime("b1a-authoritative"),
+        resolveWindowsProcessMetadata: () => { mismatchCalls++; return { status: "ok" }; },
+      },
+    });
+    assert.strictEqual(mismatchCalls, 0);
+    assert.strictEqual(mismatch.ctx.pendingPermissions[0].sourcePid, 11);
+  });
+});
+
 describe("server-route-permission POST — CC subagent requests (#451)", () => {
   const SUBAGENT_UUID = "0199f2c5-1bb8-7892-9e3b-1d6f4a1c2b3d";
 
@@ -1819,6 +2751,8 @@ describe("server-route-permission POST — CC subagent requests (#451)", () => {
       "PermissionRequest",
       {
         agentId: "claude-code",
+        profileId: "local",
+        rawSessionId: "sid",
         sessionAutomationIdentity: {
           eligible: false,
           reason: "identity-verification-required",

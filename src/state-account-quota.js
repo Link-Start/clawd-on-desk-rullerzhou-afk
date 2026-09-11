@@ -35,11 +35,14 @@ const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
 const { ANTIGRAVITY_QUOTA_FIELDS } = require("../hooks/antigravity-context-usage");
 const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
 const { CODEX_QUOTA_FIELDS } = require("../hooks/codex-rate-limits");
+const { KIMI_QUOTA_FIELDS } = require("./kimi-quota-normalizer");
 
 const QUOTA_PROVIDER_FIELDS = {
   antigravityQuota: ANTIGRAVITY_QUOTA_FIELDS,
   claudeQuota: CLAUDE_QUOTA_FIELDS,
   codexQuota: CODEX_QUOTA_FIELDS,
+  codexSparkQuota: CODEX_QUOTA_FIELDS,
+  kimiQuota: KIMI_QUOTA_FIELDS,
 };
 const QUOTA_PROVIDER_KEYS = Object.keys(QUOTA_PROVIDER_FIELDS);
 
@@ -106,6 +109,10 @@ function comparableGroup(group) {
 function hasReportedWindow(group) {
   return Object.values(group || {}).some((bucket) =>
     Number.isFinite(bucket && bucket.windowMinutes) && bucket.windowMinutes > 0);
+}
+
+function isWindowAwareCodexProvider(providerKey) {
+  return providerKey === "codexQuota" || providerKey === "codexSparkQuota";
 }
 
 function newestCapture(group) {
@@ -184,7 +191,7 @@ function createAccountQuotaStore(options = {}) {
     }
     const nowMs = now();
     const persistVersion = Number(raw && raw.version);
-    const legacyPersist = !Number.isFinite(persistVersion) || persistVersion < 2;
+    const preModelRoutingPersist = !Number.isFinite(persistVersion) || persistVersion < 6;
     const entries = raw && Array.isArray(raw.sources) ? raw.sources : [];
     for (const entry of entries) {
       if (!entry || typeof entry !== "object") continue;
@@ -198,17 +205,14 @@ function createAccountQuotaStore(options = {}) {
       for (const providerKey of QUOTA_PROVIDER_KEYS) {
         const stored = entry[providerKey];
         if (!stored || typeof stored !== "object") continue;
+        // Before v6, even the first identity-aware schema could still route a
+        // current Spark turn's generic limit_id="codex" into codexQuota. The
+        // persisted shape contains neither raw identity nor turn model (by
+        // design), so it is impossible to relabel safely during migration.
+        // Drop only that ambiguous cache; the next real main report restores
+        // it, while known Spark and unrelated provider caches remain intact.
+        if (providerKey === "codexQuota" && preModelRoutingPersist) continue;
         let group = normalizeQuotaGroup(stored.group, QUOTA_PROVIDER_FIELDS[providerKey]);
-        // v1 Codex buckets were assigned by primary/secondary position and
-        // did not retain window_minutes. After Codex removed the short
-        // window, that cache could resurrect a fabricated "5h" label on
-        // every app restart. Keep other providers intact, but discard only
-        // those unlabelable legacy Codex buckets.
-        if (providerKey === "codexQuota" && legacyPersist && group) {
-          group = Object.fromEntries(Object.entries(group).filter(([, bucket]) =>
-            Number.isFinite(bucket.windowMinutes) && bucket.windowMinutes > 0));
-          if (!Object.keys(group).length) group = null;
-        }
         if (!group) continue;
         const updatedAt = Number(stored.updatedAt);
         const lastSeenAt = Number(stored.lastSeenAt);
@@ -277,9 +281,9 @@ function createAccountQuotaStore(options = {}) {
   }
 
   function persistNow() {
-    if (!persistPath) return;
+    if (!persistPath) return true;
     const body = JSON.stringify({
-      version: 4,
+      version: 6,
       sources: Array.from(sources.entries()).map(([sourceKey, record]) => ({
         sourceKey,
         ...record,
@@ -291,9 +295,11 @@ function createAccountQuotaStore(options = {}) {
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(tmpPath, body, "utf8");
       fs.renameSync(tmpPath, persistPath);
+      return true;
     } catch (err) {
       try { fs.unlinkSync(tmpPath); } catch {}
       logWarn("Clawd: account-quota persist failed:", err && err.message);
+      return false;
     }
   }
 
@@ -314,7 +320,7 @@ function createAccountQuotaStore(options = {}) {
   // or lastSeenAt crossed a minute boundary (so freshness labels stay
   // honest for a reporter that keeps confirming the same numbers, at a
   // bounded ≤1 broadcast/min instead of one per statusline tick).
-  function update(source, quotas = {}) {
+  function updateDetailed(source, quotas = {}) {
     const nowMs = now();
     const sourceKey = normalizeSourceHost(source);
     const key = sourceKey || "";
@@ -325,16 +331,17 @@ function createAccountQuotaStore(options = {}) {
     let record = sources.get(key);
     if (!record && sources.size >= MAX_SOURCES) {
       logWarn("Clawd: account-quota source cap reached, dropping report from:", key || "(local)");
-      return false;
+      return { accepted: false, changed: false };
     }
     let changed = !!record && record.host !== sourceHost;
     let seenAdvanced = false;
+    let acceptedAny = false;
     if (record && record.host !== sourceHost) record.host = sourceHost;
     for (const providerKey of QUOTA_PROVIDER_KEYS) {
       const group = normalizeQuotaGroup(quotas[providerKey], QUOTA_PROVIDER_FIELDS[providerKey]);
       if (!group) continue;
       const existing = record && record[providerKey];
-      const windowAwareCodex = providerKey === "codexQuota" && hasReportedWindow(group);
+      const windowAwareCodex = isWindowAwareCodexProvider(providerKey) && hasReportedWindow(group);
       // A window-aware Codex payload is a complete rate_limits snapshot. A
       // newer single 7-day primary must retire the old short-window bucket,
       // not merge with it. Reject an older complete snapshot at provider
@@ -347,6 +354,7 @@ function createAccountQuotaStore(options = {}) {
       }
       const accepted = sanitizeIncomingGroup(group, existing && existing.group, nowMs);
       if (!accepted) continue;
+      acceptedAny = true;
       const observed = Object.fromEntries(Object.entries(accepted).map(([field, bucket]) => [
         field,
         { ...bucket, seenAt: nowMs },
@@ -384,7 +392,29 @@ function createAccountQuotaStore(options = {}) {
       if (valueChanged) changed = true;
     }
     if (changed || seenAdvanced) schedulePersist();
-    return changed || seenAdvanced;
+    return { accepted: acceptedAny, changed: changed || seenAdvanced };
+  }
+
+  function update(source, quotas = {}) {
+    return updateDetailed(source, quotas).changed;
+  }
+
+  // Remove one provider without disturbing sibling providers carried by the
+  // same source. The optional predicate receives the normalized source key
+  // ("" = this machine) and lets callers preserve independently-authorized
+  // sources such as Remote SSH profiles.
+  function clearProvider(providerKey, shouldClearSource = () => true) {
+    if (!Object.prototype.hasOwnProperty.call(QUOTA_PROVIDER_FIELDS, providerKey)) return 0;
+    const predicate = typeof shouldClearSource === "function" ? shouldClearSource : () => true;
+    let cleared = 0;
+    for (const [sourceKey, record] of sources) {
+      if (!record[providerKey] || !predicate(sourceKey, record)) continue;
+      delete record[providerKey];
+      cleared++;
+      if (!QUOTA_PROVIDER_KEYS.some((key) => !!record[key])) sources.delete(sourceKey);
+    }
+    if (cleared) schedulePersist();
+    return cleared;
   }
 
   // Renderer-facing view: expired buckets dropped (wall-clock window reset),
@@ -403,8 +433,13 @@ function createAccountQuotaStore(options = {}) {
     // Merge arbitration uses exact receive time, while snapshots expose only
     // minute-quantized stamps to avoid a broadcast on every statusline tick.
     const rawSeenByBucket = new WeakMap();
-    for (const record of sources.values()) {
-      const entry = { host: record.host };
+    for (const [sourceKey, record] of sources) {
+      // sourceKey, not host: `host` is a DISPLAY label and two trusted remote
+      // profiles are explicitly allowed to share one (see the "keeps trusted
+      // remote profile sources separate when display hosts match" test). Any
+      // renderer that keys per-source state off the label would collapse those
+      // two sources into one.
+      const entry = { sourceKey, host: record.host };
       let hasAny = false;
       for (const providerKey of QUOTA_PROVIDER_KEYS) {
         const stored = record[providerKey];
@@ -430,7 +465,8 @@ function createAccountQuotaStore(options = {}) {
     });
     if (options.mergeSources !== true || out.length <= 1) return out;
 
-    const merged = { host: null };
+    // The merged view is a single synthetic source; nothing can collide with it.
+    const merged = { sourceKey: null, host: null };
     let hasAny = false;
     for (const providerKey of QUOTA_PROVIDER_KEYS) {
       const providerCandidates = out
@@ -494,7 +530,7 @@ function createAccountQuotaStore(options = {}) {
       clearTimeout(persistTimer);
       persistTimer = null;
     }
-    persistNow();
+    return persistNow();
   }
 
   function prune() {
@@ -505,7 +541,7 @@ function createAccountQuotaStore(options = {}) {
 
   load();
 
-  return { update, snapshot, prune, flush };
+  return { update, updateDetailed, clearProvider, snapshot, prune, flush };
 }
 
 module.exports = {

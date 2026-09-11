@@ -262,6 +262,64 @@ describe("permission automation: showPermissionBubble chokepoint", () => {
     assert.equal(res.captured.statusCode, 200);
   });
 
+  it("requires an eligible route identity before global automation can allow a Codex Agent thread", () => {
+    const ctx = makeCtx({
+      getPermissionAutomationMode: () => "auto-tools",
+      isAgentEnabled: () => true,
+      isAgentPermissionsEnabled: () => true,
+      isAgentSubagentPermissionsEnabled: () => true,
+      isCodexPermissionInterceptEnabled: () => true,
+    });
+    const perm = initPermission(ctx);
+    const res = makeCapturingRes();
+    const entry = makePermEntry({
+      res,
+      agentId: "codex",
+      isCodex: true,
+      codexSessionRole: "subagent",
+      codexInteractiveSubagent: true,
+      subagentId: "session-test",
+      sessionAutomationIdentity: { eligible: false, reason: "unsupported-codex-originator" },
+    });
+    perm.pendingPermissions.push(entry);
+
+    assert.throws(() => perm.showPermissionBubble(entry));
+    assert.equal(perm.pendingPermissions.includes(entry), true);
+    assert.equal(res.captured.statusCode, null);
+  });
+
+  it("lets an eligible TUI Agent thread inherit global auto-tools", () => {
+    const ctx = makeCtx({
+      getPermissionAutomationMode: () => "auto-tools",
+      isAgentEnabled: () => true,
+      isAgentPermissionsEnabled: () => true,
+      isAgentSubagentPermissionsEnabled: () => true,
+      isCodexPermissionInterceptEnabled: () => true,
+      sessions: new Map([["session-test", { agentId: "codex", headless: true }]]),
+    });
+    const perm = initPermission(ctx);
+    const res = makeCapturingRes();
+    const entry = makePermEntry({
+      res,
+      agentId: "codex",
+      isCodex: true,
+      codexSessionRole: "subagent",
+      codexInteractiveSubagent: true,
+      subagentId: "session-test",
+      headless: false,
+      sessionAutomationIdentity: { eligible: true, reason: "eligible" },
+    });
+    perm.pendingPermissions.push(entry);
+
+    perm.showPermissionBubble(entry);
+    assert.equal(perm.pendingPermissions.includes(entry), false);
+    assert.equal(res.captured.statusCode, 200);
+    assert.equal(
+      JSON.parse(res.captured.body).hookSpecificOutput.decision.behavior,
+      "allow"
+    );
+  });
+
   it("fails safe when an entry reaches the chokepoint without a valid interaction", () => {
     const ctx = makeCtx({ getPermissionAutomationMode: () => "unattended" });
     const perm = initPermission(ctx);

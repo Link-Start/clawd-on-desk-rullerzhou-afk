@@ -50,6 +50,19 @@ describe("listIdleVisualOptions", () => {
     }));
     assert.deepStrictEqual(options.map((o) => o.file), ["clawd-idle-follow.svg", "ok.svg"]);
   });
+
+  it("does not expose conditional easter eggs as persistent idle choices", () => {
+    const options = listIdleVisualOptions(makeTheme({
+      idleEasterEggs: [{
+        file: "clawd-outlaw-bender.svg",
+        duration: 15000,
+        chance: 0.05,
+        cooldownMs: 1800000,
+        requiresAccessories: { head: "cowboy-hat", mouth: "cigarette" },
+      }],
+    }));
+    assert.ok(!options.some((option) => option.file === "clawd-outlaw-bender.svg"));
+  });
 });
 
 describe("resolveIdleVisualChoice", () => {

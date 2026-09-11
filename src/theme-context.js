@@ -100,6 +100,12 @@ function createThemeContext(theme, options = {}) {
         && theme._capabilities.accessories
         && theme.customization
       ) ? (theme.customization.accessories || null) : null,
+      mouthAccessorySupported: !!(theme._capabilities && theme._capabilities.mouthAccessories),
+      mouthAccessoryAttachments: (
+        theme._capabilities
+        && theme._capabilities.mouthAccessories
+        && theme.customization
+      ) ? (theme.customization.mouthAccessories || null) : null,
       objectScale: theme.objectScale,
       transitions: theme.transitions || {},
     };

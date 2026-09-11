@@ -114,18 +114,31 @@ function createRuntime(overrides = {}) {
   }];
   const runtime = createPetWindowRuntime({
     screen: {
-      getAllDisplays: () => displays,
+      getAllDisplays: () => (
+        typeof overrides.getAllDisplays === "function"
+          ? overrides.getAllDisplays()
+          : displays
+      ),
       getCursorScreenPoint: () => (
         typeof overrides.cursor === "function"
           ? overrides.cursor()
           : (overrides.cursor || { x: 100, y: 100 })
       ),
-      getDisplayNearestPoint: () => displays[0],
-      getPrimaryDisplay: () => displays[0],
+      getDisplayNearestPoint: (point) => (
+        typeof overrides.getDisplayNearestPoint === "function"
+          ? overrides.getDisplayNearestPoint(point)
+          : displays[0]
+      ),
+      getPrimaryDisplay: () => (
+        typeof overrides.getPrimaryDisplay === "function"
+          ? overrides.getPrimaryDisplay()
+          : displays[0]
+      ),
     },
     isWin: overrides.isWin ?? true,
     isMac: overrides.isMac ?? false,
     isLinux: overrides.isLinux ?? false,
+    windowsHitWindowFocusable: overrides.windowsHitWindowFocusable ?? false,
     linuxWindowType: "toolbar",
     topmostLevel: "pop-up-menu",
     getRenderWindow: () => renderWin,
@@ -142,8 +155,16 @@ function createRuntime(overrides = {}) {
     getCurrentPixelSize: () => overrides.currentPixelSize || { width: 100, height: 100 },
     getEffectiveCurrentPixelSize: () => overrides.effectivePixelSize || { width: 100, height: 100 },
     getAllowEdgePinning: () => overrides.allowEdgePinning || false,
-    getPrimaryWorkAreaSafe: () => displays[0].workArea,
-    getNearestWorkArea: () => displays[0].workArea,
+    getPrimaryWorkAreaSafe: () => (
+      typeof overrides.getPrimaryWorkAreaSafe === "function"
+        ? overrides.getPrimaryWorkAreaSafe()
+        : displays[0].workArea
+    ),
+    getNearestWorkArea: (x, y) => (
+      typeof overrides.getNearestWorkArea === "function"
+        ? overrides.getNearestWorkArea(x, y)
+        : displays[0].workArea
+    ),
     sendToRenderer: (...args) => calls.push(["sendToRenderer", ...args]),
     keepOutOfTaskbar: (win) => calls.push(["keepOutOfTaskbar", win]),
     repositionSessionHud: () => calls.push(["repositionSessionHud"]),
@@ -151,6 +172,9 @@ function createRuntime(overrides = {}) {
     repositionFloatingBubbles: () => calls.push(["repositionFloatingBubbles"]),
     showFloatingSurfacesForPet: () => calls.push(["showFloatingSurfacesForPet"]),
     hideFloatingSurfacesForPet: () => calls.push(["hideFloatingSurfacesForPet"]),
+    setFloatingSurfacesFullscreenSuppressed: (suppressed) => (
+      calls.push(["setFloatingSurfacesFullscreenSuppressed", suppressed])
+    ),
     syncSessionHudVisibilityAndBubbles: () => calls.push(["syncSessionHudVisibilityAndBubbles"]),
     syncPermissionShortcuts: () => calls.push(["syncPermissionShortcuts"]),
     buildTrayMenu: () => calls.push(["buildTrayMenu"]),
@@ -159,9 +183,10 @@ function createRuntime(overrides = {}) {
     ...(overrides.syncImeEditingPetDodge
       ? { syncImeEditingPetDodge: overrides.syncImeEditingPetDodge }
       : {}),
-    reassertWinTopmost: () => calls.push(["reassertWinTopmost"]),
+    reassertWinTopmost: (...args) => calls.push(["reassertWinTopmost", ...args]),
     scheduleHwndRecovery: () => calls.push(["scheduleHwndRecovery"]),
     ...(overrides.cloakInspector ? { cloakInspector: overrides.cloakInspector } : {}),
+    ...(overrides.noteManualPetShow ? { noteManualPetShow: overrides.noteManualPetShow } : {}),
     ...(overrides.isMiniAnimating ? { isMiniAnimating: overrides.isMiniAnimating } : {}),
     ...(overrides.isRoamAnimating ? { isRoamAnimating: overrides.isRoamAnimating } : {}),
     ...(overrides.isEdgeVirtualizationDisabled
@@ -193,6 +218,374 @@ function createRuntime(overrides = {}) {
     setHitWin: (win) => { hitWin = win; },
   };
 }
+
+describe("macOS physical edge pinning (#241)", () => {
+  const dockDisplay = {
+    id: 1,
+    bounds: { x: 0, y: 0, width: 1710, height: 1107 },
+    workArea: { x: 0, y: 34, width: 1710, height: 983 },
+  };
+
+  it("uses physical bounds for both drag and rest clamps when edge pinning is enabled", () => {
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays: [dockDisplay],
+    });
+
+    const rest = runtime.clampToScreenVisual(200, 10_000, 205, 205);
+    const drag = runtime.looseClampPetToDisplays(200, 10_000, 205, 205);
+
+    // Cross the 90px Dock inset, but keep the window on the physical display.
+    assert.equal(rest.y, 902);
+    assert.equal(drag.y, 902);
+    assert.equal(rest.y + 205, 1107);
+  });
+
+  it("keeps the work-area-safe rest clamp when macOS edge pinning is disabled", () => {
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: false,
+      displays: [dockDisplay],
+    });
+
+    const rest = runtime.clampToScreenVisual(200, 10_000, 205, 205);
+    assert.equal(rest.y, 812, "workArea bottom 1017 minus the 205px window");
+  });
+
+  it("aligns with the physical bottom when the Dock is hidden", () => {
+    const display = {
+      id: 1,
+      bounds: { x: 0, y: 0, width: 1000, height: 800 },
+      workArea: { x: 0, y: 0, width: 1000, height: 800 },
+    };
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays: [display],
+    });
+
+    assert.equal(runtime.clampToScreenVisual(0, 10_000, 200, 200).y, 600);
+    assert.equal(runtime.looseClampPetToDisplays(0, 10_000, 200, 200).y, 600);
+  });
+
+  it("honors a call-site edge-pinning override instead of the global macOS setting", () => {
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays: [dockDisplay],
+    });
+
+    const rest = runtime.clampToScreenVisual(200, 10_000, 205, 205, {
+      allowEdgePinning: false,
+    });
+    assert.equal(rest.y, 812);
+  });
+
+  it("uses the physical rectangle consistently for top, bottom, left, and right edges", () => {
+    const display = {
+      id: 1,
+      bounds: { x: 100, y: 50, width: 1000, height: 800 },
+      workArea: { x: 160, y: 90, width: 900, height: 700 },
+    };
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays: [display],
+    });
+
+    assert.deepStrictEqual(
+      runtime.clampToScreenVisual(-10_000, -10_000, 200, 200),
+      { x: 50, y: -70 },
+    );
+    assert.deepStrictEqual(
+      runtime.clampToScreenVisual(10_000, 10_000, 200, 200),
+      { x: 950, y: 650 },
+    );
+  });
+
+  it("materializes a normal-mode top pin at the physical display top", () => {
+    const display = {
+      id: 1,
+      bounds: { x: 100, y: 50, width: 1000, height: 800 },
+      workArea: { x: 160, y: 90, width: 900, height: 700 },
+    };
+    const fixture = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays: [display],
+    });
+    const logical = fixture.runtime.clampToScreenVisual(200, -10_000, 200, 200);
+
+    const physical = fixture.runtime.applyPetWindowBounds({
+      ...logical,
+      width: 200,
+      height: 200,
+    });
+
+    assert.deepStrictEqual(logical, { x: 200, y: -70 });
+    assert.deepStrictEqual(physical, { x: 200, y: 50, width: 200, height: 200 });
+    assert.equal(fixture.renderWin.getBounds().y, 50);
+    assert.equal(fixture.runtime.getViewportOffsetY(), 120);
+  });
+
+  it("materializes a saved normal-mode top pin against physical bounds at startup", () => {
+    const display = {
+      id: 1,
+      bounds: { x: 100, y: 50, width: 1000, height: 800 },
+      workArea: { x: 160, y: 90, width: 900, height: 700 },
+    };
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays: [display],
+    });
+
+    const placement = runtime.resolveStartupPlacement({
+      positionSaved: true,
+      miniMode: false,
+      x: 200,
+      y: -70,
+      positionDisplay: display,
+    }, { width: 200, height: 200 });
+
+    assert.equal(placement.initialVirtualBounds.y, -70);
+    assert.equal(placement.initialWindowBounds.y, 50);
+  });
+
+  it("keeps mini-mode Y materialization inside the work area", () => {
+    const display = {
+      id: 1,
+      bounds: { x: 100, y: 50, width: 1000, height: 800 },
+      workArea: { x: 160, y: 90, width: 900, height: 700 },
+    };
+    const fixture = createRuntime({
+      isWin: false,
+      isMac: true,
+      miniMode: true,
+      allowEdgePinning: true,
+      displays: [display],
+    });
+
+    const physical = fixture.runtime.applyPetWindowBounds(
+      { x: 200, y: -70, width: 200, height: 200 },
+      { workArea: display.workArea },
+    );
+
+    assert.deepStrictEqual(physical, { x: 200, y: 90, width: 200, height: 200 });
+    assert.equal(fixture.runtime.getViewportOffsetY(), 160);
+  });
+
+  it("maps a forced mini work area back to the same display's physical bounds", () => {
+    const displays = [
+      {
+        id: 1,
+        bounds: { x: 0, y: 0, width: 1000, height: 900 },
+        workArea: { x: 0, y: 30, width: 1000, height: 820 },
+      },
+      {
+        id: 2,
+        bounds: { x: 1000, y: 0, width: 1200, height: 900 },
+        workArea: { x: 1060, y: 30, width: 1140, height: 800 },
+      },
+    ];
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays,
+      getDisplayNearestPoint: ({ x }) => (x >= 1000 ? displays[1] : displays[0]),
+    });
+
+    assert.deepStrictEqual(
+      runtime.clampToScreenVisual(10_000, 10_000, 200, 200, {
+        workArea: displays[1].workArea,
+      }),
+      { x: 2050, y: 700 },
+    );
+  });
+
+  it("does not jump a forced secondary work area to primary when nearest lookup fails", () => {
+    const displays = [
+      {
+        id: 1,
+        bounds: { x: 0, y: 0, width: 1000, height: 800 },
+        workArea: { x: 0, y: 30, width: 1000, height: 700 },
+      },
+      {
+        id: 2,
+        bounds: { x: 1000, y: 0, width: 1000, height: 800 },
+        workArea: { x: 1100, y: 30, width: 800, height: 700 },
+      },
+    ];
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays,
+      getDisplayNearestPoint: () => { throw new Error("nearest unavailable"); },
+      getPrimaryDisplay: () => displays[0],
+    });
+
+    const rest = runtime.clampToScreenVisual(10_000, 300, 200, 200, {
+      workArea: displays[1].workArea,
+    });
+    assert.equal(rest.x, 1750, "fallback stays within the forced secondary work area");
+  });
+
+  it("uses a forced work area as the display hint during vertical multi-display materialization", () => {
+    const displays = [
+      {
+        id: 1,
+        bounds: { x: 0, y: 0, width: 1000, height: 800 },
+        workArea: { x: 0, y: 30, width: 1000, height: 740 },
+      },
+      {
+        id: 2,
+        bounds: { x: 0, y: 800, width: 1000, height: 800 },
+        workArea: { x: 0, y: 830, width: 1000, height: 700 },
+      },
+    ];
+    const fixture = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays,
+      getDisplayNearestPoint: ({ y }) => (y >= 800 ? displays[1] : displays[0]),
+      getNearestWorkArea: (_x, y) => (y >= 800 ? displays[1] : displays[0]).workArea,
+    });
+
+    const logical = fixture.runtime.clampToScreenVisual(200, -10_000, 200, 200, {
+      workArea: displays[1].workArea,
+    });
+    const physical = fixture.runtime.applyPetWindowBounds(
+      { ...logical, width: 200, height: 200 },
+      { workArea: displays[1].workArea },
+    );
+
+    assert.deepStrictEqual(logical, { x: 200, y: 680 });
+    assert.deepStrictEqual(physical, { x: 200, y: 800, width: 200, height: 200 });
+    assert.equal(fixture.runtime.getViewportOffsetY(), 120);
+  });
+
+  it("does not change Windows work-area edge behavior", () => {
+    const { runtime } = createRuntime({
+      isWin: true,
+      isMac: false,
+      allowEdgePinning: true,
+      displays: [dockDisplay],
+    });
+
+    const rest = runtime.clampToScreenVisual(200, 10_000, 205, 205);
+    const drag = runtime.looseClampPetToDisplays(200, 10_000, 205, 205);
+    assert.equal(rest.y, 863, "workArea bottom plus the capped 51px inset allowance");
+    assert.equal(drag.y, 863, "drag must not leak macOS physical bounds onto Windows");
+  });
+
+  it("does not change Linux work-area edge behavior", () => {
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: false,
+      isLinux: true,
+      allowEdgePinning: true,
+      displays: [dockDisplay],
+    });
+
+    const rest = runtime.clampToScreenVisual(200, 10_000, 205, 205);
+    const drag = runtime.looseClampPetToDisplays(200, 10_000, 205, 205);
+    assert.equal(rest.y, 863, "workArea bottom plus the capped 51px inset allowance");
+    assert.equal(drag.y, 863, "drag must not leak macOS physical bounds onto Linux");
+  });
+
+  it("falls back to the existing work-area clamp when physical bounds are unavailable", () => {
+    const display = {
+      id: 1,
+      bounds: null,
+      workArea: { x: 0, y: 0, width: 800, height: 600 },
+    };
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays: [display],
+    });
+
+    assert.equal(runtime.clampToScreenVisual(0, 10_000, 200, 200).y, 400);
+    assert.equal(runtime.looseClampPetToDisplays(0, 10_000, 200, 200).y, 400);
+  });
+
+  it("falls back safely when Electron display lookup throws", () => {
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays: [dockDisplay],
+      getDisplayNearestPoint: () => { throw new Error("screen unavailable"); },
+      getPrimaryDisplay: () => { throw new Error("primary unavailable"); },
+    });
+
+    const rest = runtime.clampToScreenVisual(200, 10_000, 205, 205);
+    assert.deepStrictEqual(rest, { x: 200, y: 812 });
+  });
+
+  it("keeps drag clamping finite when display enumeration throws", () => {
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      getAllDisplays: () => { throw new Error("topology unavailable"); },
+    });
+
+    assert.deepStrictEqual(
+      runtime.looseClampPetToDisplays(10_000, 10_000, 200, 200),
+      { x: 850, y: 600 },
+    );
+  });
+
+  it("filters malformed display entries before the drag fallback", () => {
+    const workArea = { x: 0, y: 0, width: 800, height: 600 };
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays: [null],
+      getPrimaryDisplay: () => null,
+      getPrimaryWorkAreaSafe: () => workArea,
+      getNearestWorkArea: () => workArea,
+    });
+
+    assert.deepStrictEqual(
+      runtime.looseClampPetToDisplays(10_000, 10_000, 200, 200),
+      { x: 650, y: 400 },
+    );
+  });
+
+  it("uses primary physical bounds when the display list is temporarily empty", () => {
+    const primary = {
+      id: 1,
+      bounds: { x: 0, y: 0, width: 1000, height: 800 },
+      workArea: { x: 0, y: 30, width: 1000, height: 700 },
+    };
+    const { runtime } = createRuntime({
+      isWin: false,
+      isMac: true,
+      allowEdgePinning: true,
+      displays: [],
+      getPrimaryDisplay: () => primary,
+      getPrimaryWorkAreaSafe: () => primary.workArea,
+      getNearestWorkArea: () => primary.workArea,
+    });
+
+    assert.equal(runtime.looseClampPetToDisplays(0, 10_000, 200, 200).y, 600);
+  });
+});
 
 // ── #690 Phase 0 fixture — Fedora 44 / GNOME Shell 50.3 / Mutter reproduction ──
 // docs/plans/plan-issue-690-gnome-mini-edge-snap.md §1.2 and §5 Phase 0.
@@ -597,6 +990,60 @@ describe("pet-window-runtime edge virtualization (#690 Phase 2 runtime)", () => 
       placement.initialWindowBounds.x,
       1717,
       "the physical bounds used to construct the BrowserWindow must already be Mutter-safe, not off-screen"
+    );
+  });
+
+  it("preserves the v0.13 Windows upgrade baseline through construction and the first definitive bounds write", () => {
+    const display = {
+      id: 772280490,
+      bounds: { x: 0, y: 0, width: 2294, height: 960 },
+      workArea: { x: 0, y: 0, width: 2294, height: 920 },
+      scaleFactor: 1.5,
+    };
+    const harness = createRuntime({
+      displays: [display],
+      theme: { _id: "calico", _variantId: "default" },
+      currentPixelSize: { width: 214, height: 214 },
+      effectivePixelSize: { width: 214, height: 214 },
+    });
+    const prefs = {
+      positionSaved: true,
+      miniMode: false,
+      x: 1693,
+      y: 465,
+      positionThemeId: "calico",
+      positionVariantId: "default",
+      positionDisplay: display,
+    };
+    const size = { width: 214, height: 214 };
+
+    const placement = harness.runtime.resolveStartupPlacement(prefs, size);
+    assert.strictEqual(placement.startupNeedsRegularize, false);
+    assert.deepStrictEqual(placement.initialVirtualBounds, {
+      x: 1693,
+      y: 465,
+      width: 214,
+      height: 214,
+    });
+    assert.deepStrictEqual(placement.initialWindowBounds, placement.initialVirtualBounds);
+
+    const instances = [];
+    harness.runtime.createRenderWindow({
+      BrowserWindow: makeBrowserWindow(instances),
+      size,
+      initialWindowBounds: placement.initialWindowBounds,
+      initialVirtualBounds: placement.initialVirtualBounds,
+      preloadPath: "preload.js",
+      loadFilePath: "index.html",
+      themeConfig: {},
+      setRenderWindow: harness.setRenderWin,
+    });
+
+    assert.strictEqual(instances.length, 1);
+    assert.deepStrictEqual(instances[0].getBounds(), placement.initialVirtualBounds);
+    assert.deepStrictEqual(
+      instances[0].calls.filter(([name]) => name === "setBounds").at(-1),
+      ["setBounds", placement.initialVirtualBounds],
     );
   });
 });
@@ -2359,18 +2806,29 @@ describe("pet-window-runtime", () => {
     assert.doesNotMatch(petRuntimeOptions, /[,{]\s*isNearWorkAreaEdge\s*,/);
   });
 
-  it("creates the hit window with the Windows drag focusability contract", () => {
+  it("prepares the Windows non-focusable hit window before its first show", () => {
     const instances = [];
     const harness = createRuntime();
+    let preparedWindow = null;
     harness.runtime.createHitWindow({
       BrowserWindow: makeBrowserWindow(instances),
       preloadPath: "preload-hit.js",
       loadFilePath: "hit.html",
       hitThemeConfig: { ok: true },
       guardAlwaysOnTop: (win) => harness.calls.push(["guard", win]),
+      prepareActivation: (win) => {
+        preparedWindow = win;
+        win.calls.push(["prepareActivation"]);
+      },
     });
 
-    assert.equal(instances[0].options.focusable, true);
+    assert.equal(instances[0].options.show, false);
+    assert.equal(instances[0].options.focusable, false);
+    assert.strictEqual(preparedWindow, instances[0]);
+    assert.ok(
+      instances[0].calls.findIndex((call) => call[0] === "prepareActivation")
+        < instances[0].calls.findIndex((call) => call[0] === "showInactive"),
+    );
     assert.deepStrictEqual(instances[0].calls.filter((call) => call[0] === "setIgnoreMouseEvents"), [
       ["setIgnoreMouseEvents", false],
     ]);
@@ -2379,6 +2837,37 @@ describe("pet-window-runtime", () => {
       true,
       "pop-up-menu",
     ]);
+  });
+
+  it("uses legacy Windows focusability when the native activation controller is unavailable", () => {
+    const instances = [];
+    const harness = createRuntime({ windowsHitWindowFocusable: true });
+    harness.runtime.createHitWindow({
+      BrowserWindow: makeBrowserWindow(instances),
+      preloadPath: "preload-hit.js",
+      loadFilePath: "hit.html",
+      hitThemeConfig: { ok: true },
+    });
+
+    assert.equal(instances[0].options.focusable, true);
+  });
+
+  it("falls back before show when per-window activation preparation fails", () => {
+    const instances = [];
+    const harness = createRuntime();
+    harness.runtime.createHitWindow({
+      BrowserWindow: makeBrowserWindow(instances),
+      preloadPath: "preload-hit.js",
+      loadFilePath: "hit.html",
+      hitThemeConfig: { ok: true },
+      prepareActivation: () => false,
+    });
+
+    const focusableIndex = instances[0].calls.findIndex(
+      (call) => call[0] === "setFocusable" && call[1] === true,
+    );
+    const showIndex = instances[0].calls.findIndex((call) => call[0] === "showInactive");
+    assert.ok(focusableIndex >= 0 && focusableIndex < showIndex);
   });
 
   it("reloadWindowWebContents ignores destroyed windows and webContents", () => {
@@ -2582,9 +3071,28 @@ describe("pet-window-runtime", () => {
     const harness = createRuntime();
 
     harness.runtime.setDragLocked(true);
-    harness.runtime.syncHitWin();
+    const outcome = harness.runtime.syncHitWin();
 
+    assert.deepStrictEqual(outcome, { applied: false, deferred: true });
     assert.deepStrictEqual(harness.hitWin.calls, []);
+  });
+
+  it("reports deferred when Linux edge clipping leaves only a transient hit sliver", () => {
+    const renderWin = makeWindow({ x: 0, y: 0, width: 5, height: 100 });
+    const harness = createRuntime({ isWin: false, isLinux: true, renderWin });
+
+    const outcome = harness.runtime.syncHitWin();
+
+    assert.deepStrictEqual(outcome, { applied: false, deferred: true });
+    assert.equal(
+      harness.hitWin.calls.some((call) => call[0] === "setBounds"),
+      false,
+      "a transient sliver must be retried rather than committed"
+    );
+    assert.ok(
+      harness.hitWin.calls.some((call) => call[0] === "setIgnoreMouseEvents" && call[1] === true),
+      "the deferred sliver must remain non-interactive"
+    );
   });
 
   it("I5: recovering from suppressed hit geometry must not re-enable input while petHidden is separately true", () => {
@@ -3318,5 +3826,208 @@ describe("pet-window-runtime cloak self-heal (#525)", () => {
     assert.equal(h.runtime.recoverIfCloaked(), "failed");    // streak must restart at 1
     clock += 10_001;                                         // fresh 10s window, not 20s
     assert.equal(h.runtime.recoverIfCloaked(), "failed");
+  });
+});
+
+// ── #935: fullscreen auto-hide visibility layer ──
+//
+// A second, runtime-only hide reason stacked on the manual petHidden flag:
+// effective hidden = petHidden || fullscreenAutoHidden. The manual flag is the
+// user's; the auto flag belongs to topmost-runtime's fullscreen sync. Neither
+// layer may clobber the other's intent — a manual hide survives the auto
+// restore, and a manual show (setPetHidden(false)) clears the auto flag so
+// "show" always means show NOW.
+describe("fullscreen auto-hide visibility layer (#935)", () => {
+  it("setFullscreenAutoHidden hides the pet without touching the manual state", () => {
+    const h = createRuntime();
+    const r = h.runtime.setFullscreenAutoHidden(true);
+    assert.deepEqual(r, { applied: true, deferred: false, changed: true });
+    assert.equal(h.runtime.isPetHidden(), false);
+    assert.equal(h.runtime.isFullscreenAutoHidden(), true);
+    assert.equal(h.runtime.isPetEffectivelyHidden(), true);
+    assert.ok(h.renderWin.calls.some((c) => c[0] === "hide"));
+    assert.ok(h.hitWin.calls.some((c) => c[0] === "hide"));
+    assert.ok(h.calls.some((c) => (
+      c[0] === "setFloatingSurfacesFullscreenSuppressed" && c[1] === true
+    )));
+  });
+
+  it("clearing the auto-hide restores the pet and its floating surfaces", () => {
+    const h = createRuntime();
+    h.runtime.setFullscreenAutoHidden(true);
+    const r = h.runtime.setFullscreenAutoHidden(false);
+    assert.deepEqual(r, { applied: true, deferred: false, changed: true });
+    assert.equal(h.runtime.isPetEffectivelyHidden(), false);
+    assert.ok(h.renderWin.calls.some((c) => c[0] === "showInactive"));
+    assert.ok(h.calls.some((c) => (
+      c[0] === "setFloatingSurfacesFullscreenSuppressed" && c[1] === false
+    )));
+    assert.ok(h.calls.some((c) => c[0] === "reassertWinTopmost"));
+  });
+
+  it("auto restore reasserts topmost with the focus poll's cached observation", () => {
+    const h = createRuntime();
+    h.runtime.setFullscreenAutoHidden(true, "game-1");
+    h.calls.length = 0;
+
+    h.runtime.setFullscreenAutoHidden(false, false);
+
+    assert.deepStrictEqual(
+      h.calls.filter((c) => c[0] === "reassertWinTopmost"),
+      [["reassertWinTopmost", false]],
+    );
+  });
+
+  it("treats an explicitly undefined observation as absent across wrapper seams", () => {
+    const h = createRuntime();
+    h.runtime.setFullscreenAutoHidden(true);
+    h.calls.length = 0;
+
+    h.runtime.setFullscreenAutoHidden(false, undefined);
+
+    assert.deepStrictEqual(
+      h.calls.filter((c) => c[0] === "reassertWinTopmost"),
+      [["reassertWinTopmost"]],
+    );
+  });
+
+  it("is idempotent when already in the target state", () => {
+    const h = createRuntime();
+    h.runtime.setFullscreenAutoHidden(true);
+    const before = h.renderWin.calls.length;
+    const r = h.runtime.setFullscreenAutoHidden(true);
+    assert.deepEqual(r, { applied: true, deferred: false, changed: false });
+    assert.equal(h.renderWin.calls.length, before);
+  });
+
+  it("is a visible no-op over a manually hidden pet", () => {
+    const h = createRuntime();
+    h.runtime.setPetHidden(true);
+    h.renderWin.calls.length = 0;
+    h.hitWin.calls.length = 0;
+
+    const hide = h.runtime.setFullscreenAutoHidden(true);
+    assert.deepEqual(hide, { applied: true, deferred: false, changed: false });
+    const show = h.runtime.setFullscreenAutoHidden(false);
+    assert.deepEqual(show, { applied: true, deferred: false, changed: false });
+
+    assert.deepStrictEqual(h.renderWin.calls, []);
+    assert.deepStrictEqual(h.hitWin.calls, []);
+    assert.equal(h.runtime.isPetHidden(), true);
+    assert.equal(h.runtime.isPetEffectivelyHidden(), true);
+  });
+
+  it("a manual hide placed during the auto-hide survives the auto restore", () => {
+    const h = createRuntime();
+    h.runtime.setFullscreenAutoHidden(true);
+    h.runtime.setPetHidden(true);
+    h.renderWin.calls.length = 0;
+
+    h.runtime.setFullscreenAutoHidden(false);
+
+    assert.ok(!h.renderWin.calls.some((c) => c[0] === "showInactive"));
+    assert.equal(h.runtime.isPetHidden(), true);
+    assert.equal(h.runtime.isPetEffectivelyHidden(), true);
+  });
+
+  it("setPetHidden(false) clears the auto flag and shows the pet immediately", () => {
+    const h = createRuntime();
+    h.runtime.setFullscreenAutoHidden(true);
+    const r = h.runtime.setPetHidden(false);
+    assert.deepEqual(r, { applied: true, deferred: false, changed: true });
+    assert.equal(h.runtime.isFullscreenAutoHidden(), false);
+    assert.equal(h.runtime.isPetEffectivelyHidden(), false);
+    assert.ok(h.renderWin.calls.some((c) => c[0] === "showInactive"));
+  });
+
+  it("togglePetVisibility acts on the effective state: one toggle shows an auto-hidden pet", () => {
+    const h = createRuntime();
+    h.runtime.setFullscreenAutoHidden(true);
+    h.runtime.togglePetVisibility();
+    assert.equal(h.runtime.isPetHidden(), false);
+    assert.equal(h.runtime.isFullscreenAutoHidden(), false);
+    assert.equal(h.runtime.isPetEffectivelyHidden(), false);
+    assert.ok(h.renderWin.calls.some((c) => c[0] === "showInactive"));
+  });
+
+  it("defers during a mini transition without changing the flag", () => {
+    const h = createRuntime({ miniTransitioning: true });
+    const r = h.runtime.setFullscreenAutoHidden(true);
+    assert.deepEqual(r, { applied: false, deferred: true, changed: false });
+    assert.equal(h.runtime.isFullscreenAutoHidden(), false);
+  });
+
+  it("keeps the hit window click-through while auto-hidden (I5 suppression reason)", () => {
+    const h = createRuntime();
+    h.runtime.setFullscreenAutoHidden(true);
+    assert.ok(h.hitWin.calls.some((c) => c[0] === "setIgnoreMouseEvents" && c[1] === true));
+    h.hitWin.calls.length = 0;
+    h.runtime.setFullscreenAutoHidden(false);
+    assert.ok(h.hitWin.calls.some((c) => c[0] === "setIgnoreMouseEvents" && c[1] === false));
+  });
+
+  it("recoverIfCloaked treats an auto-hidden pet as hidden (#525 strobe guard)", () => {
+    const h = createRuntime({ cloakInspector: makeCloakInspector({ flag: 2 }) });
+    h.runtime.setFullscreenAutoHidden(true);
+    assert.equal(h.runtime.recoverIfCloaked(), "hidden");
+  });
+
+  it("recoverVisiblePetAfterRendererLoad does not resurrect an auto-hidden pet", () => {
+    const h = createRuntime();
+    h.runtime.setFullscreenAutoHidden(true);
+    h.renderWin.calls.length = 0;
+    assert.equal(h.runtime.recoverVisiblePetAfterRendererLoad(), "hidden");
+    assert.ok(!h.renderWin.calls.some((c) => c[0] === "showInactive"));
+  });
+
+  it("bringPetToPrimaryDisplay clears the auto-hide (explicit show intent)", () => {
+    const h = createRuntime();
+    h.runtime.setFullscreenAutoHidden(true);
+    h.runtime.bringPetToPrimaryDisplay();
+    assert.equal(h.runtime.isFullscreenAutoHidden(), false);
+    assert.equal(h.runtime.isPetEffectivelyHidden(), false);
+    assert.ok(h.renderWin.calls.some((c) => c[0] === "showInactive"));
+  });
+});
+
+describe("manual show intent hook (#935 override latch)", () => {
+  it("setPetHidden(false) reports intent even when it is a visible no-op", () => {
+    const notes = [];
+    const h = createRuntime({ noteManualPetShow: () => notes.push("show") });
+    h.runtime.setPetHidden(false);
+    assert.deepStrictEqual(notes, ["show"], "a no-op show is still an intent (the stale-menu click)");
+    assert.ok(h.calls.some(([name]) => name === "reassertWinTopmost"),
+      "the real manual Show path must surface immediately instead of waiting for the watchdog");
+  });
+
+  it("setPetHidden(false) reports intent when it lifts an auto-hide", () => {
+    const notes = [];
+    const h = createRuntime({ noteManualPetShow: () => notes.push("show") });
+    h.runtime.setFullscreenAutoHidden(true);
+    h.runtime.setPetHidden(false);
+    assert.deepStrictEqual(notes, ["show"]);
+    assert.equal(h.runtime.isPetEffectivelyHidden(), false);
+    assert.ok(h.calls.some(([name]) => name === "reassertWinTopmost"));
+  });
+
+  it("setPetHidden(false) preserves intent when a mini transition defers the write", () => {
+    const notes = [];
+    const h = createRuntime({
+      miniTransitioning: true,
+      noteManualPetShow: () => notes.push("show"),
+    });
+    const result = h.runtime.setPetHidden(false);
+    assert.deepStrictEqual(result, { applied: false, deferred: true, changed: false });
+    assert.deepStrictEqual(notes, ["show"],
+      "the later fullscreen retry needs to know that the user explicitly requested Show");
+  });
+
+  it("hides and the auto-hide writer never report show intent", () => {
+    const notes = [];
+    const h = createRuntime({ noteManualPetShow: () => notes.push("show") });
+    h.runtime.setPetHidden(true);
+    h.runtime.setFullscreenAutoHidden(true);
+    h.runtime.setFullscreenAutoHidden(false);
+    assert.deepStrictEqual(notes, [], "only a manual SHOW is user intent");
   });
 });

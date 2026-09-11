@@ -14,6 +14,8 @@ function buildSettingsAgentOrderExports() {
     "workbuddy",
     "qoder",
     "qoderwork",
+    "traecode",
+    "qwenwork",
   ];
 
   const NON_COLLAPSIBLE_AGENT_PRIORITY = [
@@ -25,6 +27,7 @@ function buildSettingsAgentOrderExports() {
     "openclaw",
     "hermes",
     "reasonix",
+    "zcode",
   ];
 
   const COLLAPSIBLE_AGENT_PRIORITY_MAP = new Map(

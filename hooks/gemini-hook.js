@@ -54,6 +54,28 @@ function normalizeSessionId(value) {
   return raw.startsWith("gemini:") ? raw : `gemini:${raw}`;
 }
 
+// #634: lifecycle for the shared resolver's cross-process pid cache, keyed on
+// Gemini's RAW hook names (BeforeAgent = the UserPromptSubmit equivalent).
+// cacheable compares against the exact normalizeSessionId fallback so an
+// id-less payload ("gemini:default", cf. #583) never keys a shared entry.
+const EVENT_TO_LIFECYCLE = {
+  SessionStart: "start",
+  BeforeAgent: "prompt",
+  SessionEnd: "end",
+};
+
+function pidCacheContext(hookName, payload) {
+  const sessionId = normalizeSessionId(payload && payload.session_id);
+  const cwd = (payload && payload.cwd) || "";
+  return {
+    namespace: "gemini-cli",
+    sessionId,
+    cacheCwd: cwd,
+    lifecycle: EVENT_TO_LIFECYCLE[hookName] || "event",
+    cacheable: sessionId !== "gemini:default" && !!cwd,
+  };
+}
+
 function hasToolResponseError(payload) {
   const response = payload && payload.tool_response;
   if (!response || typeof response !== "object") return false;
@@ -127,7 +149,7 @@ function sendHookEvent(payload, argvEvent, deps = {}) {
     host: remote && deps.readHostPrefix ? deps.readHostPrefix() : undefined,
     env,
     pidMeta: shouldResolvePid(hookName, env)
-      ? (deps.resolvePid ? deps.resolvePid() : undefined)
+      ? (deps.resolvePid ? deps.resolvePid(pidCacheContext(hookName, payload)) : undefined)
       : undefined,
   });
 

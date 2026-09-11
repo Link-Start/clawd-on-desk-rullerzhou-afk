@@ -16,6 +16,11 @@ const REMOTE_IDENTITY_FILENAME = "clawd-remote.json";
 const SSH_SECURE_MARKER_FILENAME = "clawd-ssh-secure-v1";
 const HOST_PREFIX_FILENAME = "clawd-host-prefix";
 const REMOTE_LAST_LOG_FILENAME = "clawd-remote-last-error.log";
+const CODEX_AUTO_START_GATE_FILENAME = "codex-auto-start.json";
+const CODEX_AUTO_START_GATE_VERSION = 1;
+const CODEX_WSL_INTEROP_ARG = "--clawd-wsl-interop";
+const CODEX_WINDOWS_STABLE_ARG = "--clawd-windows-stable";
+const APPIMAGE_HOOK_MARKER_FILE = ".clawd-appimage-path";
 const REMOTE_FAILURE_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const ROUTING_NONCE_HEADER = "x-clawd-routing-nonce";
 const REMOTE_IDENTITY_VERSION = 2;
@@ -38,6 +43,49 @@ function normalizePort(value) {
 function defaultRuntimeConfigPath(options = {}) {
   const homeDir = typeof options.homeDir === "string" ? options.homeDir : os.homedir();
   return path.join(homeDir, ".clawd", "runtime.json");
+}
+
+function defaultCodexAutoStartGatePath(options = {}) {
+  const homeDir = typeof options.homeDir === "string" ? options.homeDir : os.homedir();
+  return path.join(homeDir, ".clawd", CODEX_AUTO_START_GATE_FILENAME);
+}
+
+function readCodexAutoStartGate(options = {}) {
+  const fsApi = options.fs || fs;
+  const filePath = options.gatePath || defaultCodexAutoStartGatePath(options);
+  try {
+    const parsed = JSON.parse(fsApi.readFileSync(filePath, "utf8"));
+    return !!(
+      parsed
+      && parsed.app === CLAWD_SERVER_ID
+      && parsed.version === CODEX_AUTO_START_GATE_VERSION
+      && parsed.enabled === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+function writeCodexAutoStartGate(enabled, options = {}) {
+  if (typeof enabled !== "boolean") return false;
+  const fsApi = options.fs || fs;
+  const filePath = options.gatePath || defaultCodexAutoStartGatePath(options);
+  const dir = path.dirname(filePath);
+  const tmpPath = path.join(dir, `.codex-auto-start.${process.pid}.${Date.now()}.tmp`);
+  const body = JSON.stringify({
+    app: CLAWD_SERVER_ID,
+    version: CODEX_AUTO_START_GATE_VERSION,
+    enabled,
+  }, null, 2);
+  try {
+    fsApi.mkdirSync(dir, { recursive: true });
+    fsApi.writeFileSync(tmpPath, body, "utf8");
+    fsApi.renameSync(tmpPath, filePath);
+    return true;
+  } catch {
+    try { fsApi.unlinkSync(tmpPath); } catch {}
+    return false;
+  }
 }
 
 function resolveCoLocatedPath(filename, options = {}, optionKey, envKey) {
@@ -198,23 +246,26 @@ function resolveSecureTransport(options = {}) {
 // init and matches `wsl -l -q` output exactly; /proc/version is the
 // fallback for unusual init setups. Cached — the answer cannot change
 // within one hook process.
+function detectWslDistro(options = {}) {
+  const platform = options.platform || process.platform;
+  const env = options.env || process.env;
+  const fsApi = options.fs || fs;
+  if (platform !== "linux") return null;
+  if (env && env.WSL_DISTRO_NAME) return env.WSL_DISTRO_NAME;
+  try {
+    if (/microsoft|wsl/i.test(fsApi.readFileSync("/proc/version", "utf8"))) {
+      // Inside WSL but WSL_DISTRO_NAME not set (older builds / custom
+      // init). Stable sentinel keeps the host prefix self-consistent.
+      return "wsl";
+    }
+  } catch {}
+  return null;
+}
+
 let cachedWslDistro;
 function resolveWslDistro() {
   if (cachedWslDistro !== undefined) return cachedWslDistro;
-  cachedWslDistro = null;
-  if (process.platform === "linux") {
-    if (process.env.WSL_DISTRO_NAME) {
-      cachedWslDistro = process.env.WSL_DISTRO_NAME;
-    } else {
-      try {
-        if (/microsoft|wsl/i.test(fs.readFileSync("/proc/version", "utf8"))) {
-          // Inside WSL but WSL_DISTRO_NAME not set (older builds / custom
-          // init). Stable sentinel keeps the host prefix self-consistent.
-          cachedWslDistro = "wsl";
-        }
-      } catch {}
-    }
-  }
+  cachedWslDistro = detectWslDistro();
   return cachedWslDistro;
 }
 
@@ -255,9 +306,36 @@ const RUNTIME_REASON_MISSING = "runtime-missing";
 const RUNTIME_REASON_APP_MISMATCH = "runtime-app-mismatch";
 const RUNTIME_REASON_PORT_INVALID = "runtime-port-invalid";
 const RUNTIME_REASON_OWNER_INVALID = "runtime-owner-invalid";
+const WINDOWS_PROCESS_CHAIN_VERSION = 1;
+const WINDOWS_PROCESS_CHAIN_AGENT_IDS = new Set([
+  "codex", "cursor-agent", "kiro-cli", "codebuddy", "reasonix",
+]);
+const WINDOWS_PROCESS_CHAIN_MODES = new Set(["legacy", "shadow", "b1a-authoritative"]);
+const PROCESS_INSTANCE_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const CLAWD_HOOK_PID_HEADER = "X-Clawd-Hook-Pid";
+const CLAWD_PROCESS_INSTANCE_HEADER = "X-Clawd-Process-Instance";
+const CLAWD_LEGACY_PROCESS_CACHE_HEADER = "X-Clawd-Legacy-Process-Cache";
 
 function normalizeOwnerPid(value) {
   return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function normalizeWindowsProcessChainConfig(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value.version !== WINDOWS_PROCESS_CHAIN_VERSION) return null;
+  if (typeof value.instanceGeneration !== "string"
+    || !PROCESS_INSTANCE_RE.test(value.instanceGeneration)) return null;
+  if (!value.agents || typeof value.agents !== "object" || Array.isArray(value.agents)) return null;
+  const agents = {};
+  for (const agentId of WINDOWS_PROCESS_CHAIN_AGENT_IDS) {
+    const mode = value.agents[agentId];
+    agents[agentId] = WINDOWS_PROCESS_CHAIN_MODES.has(mode) ? mode : "legacy";
+  }
+  return Object.freeze({
+    version: WINDOWS_PROCESS_CHAIN_VERSION,
+    instanceGeneration: value.instanceGeneration,
+    agents: Object.freeze(agents),
+  });
 }
 
 // Parse + validate in one place so readRuntimePort and readRuntimeIdentity can
@@ -282,7 +360,13 @@ function parseRuntimeConfig(options = {}) {
   if (!port) {
     return { ok: false, reason: RUNTIME_REASON_PORT_INVALID, port: null, ownerPid: null };
   }
-  return { ok: true, reason: null, port, ownerPid: normalizeOwnerPid(raw.ownerPid) };
+  return {
+    ok: true,
+    reason: null,
+    port,
+    ownerPid: normalizeOwnerPid(raw.ownerPid),
+    windowsProcessChain: normalizeWindowsProcessChainConfig(raw.windowsProcessChain),
+  };
 }
 
 function readRuntimeConfig(options = {}) {
@@ -306,7 +390,36 @@ function readRuntimeIdentity(options = {}) {
   if (!parsed.ownerPid) {
     return { ok: false, reason: RUNTIME_REASON_OWNER_INVALID, port: parsed.port, ownerPid: null };
   }
-  return { ok: true, reason: null, port: parsed.port, ownerPid: parsed.ownerPid };
+  const identity = { ok: true, reason: null, port: parsed.port, ownerPid: parsed.ownerPid };
+  if (parsed.windowsProcessChain) identity.windowsProcessChain = parsed.windowsProcessChain;
+  return identity;
+}
+
+function readWindowsProcessChainHookContext(agentId, options = {}) {
+  const readIdentity = typeof options.readRuntimeIdentity === "function"
+    ? options.readRuntimeIdentity
+    : () => readRuntimeIdentity(options);
+  const identity = readIdentity();
+  if (!identity || !identity.ok) {
+    return Object.freeze({ identity, observation: null });
+  }
+  const capability = identity.windowsProcessChain || null;
+  const agentMode = capability && WINDOWS_PROCESS_CHAIN_AGENT_IDS.has(agentId)
+    ? capability.agents[agentId]
+    : "legacy";
+  const observation = Object.freeze({
+    port: identity.port,
+    ownerPid: identity.ownerPid,
+    version: capability ? capability.version : null,
+    instanceGeneration: capability ? capability.instanceGeneration : null,
+    agentId,
+    agentMode,
+  });
+  return Object.freeze({ identity, observation });
+}
+
+function readWindowsProcessChainObservation(agentId, options = {}) {
+  return readWindowsProcessChainHookContext(agentId, options).observation;
 }
 
 // Boolean contract: returns true on success, false on ANY failure, and never
@@ -322,10 +435,17 @@ function writeRuntimeConfig(port, options = {}) {
   const ownerPid = normalizeOwnerPid(options.ownerPid) || process.pid;
   const dir = path.dirname(filePath);
   const tmpPath = path.join(dir, `.runtime.${process.pid}.${Date.now()}.tmp`);
-  const body = JSON.stringify({ app: CLAWD_SERVER_ID, port: safePort, ownerPid }, null, 2);
+  const runtimeBody = { app: CLAWD_SERVER_ID, port: safePort, ownerPid };
+  const windowsProcessChain = normalizeWindowsProcessChainConfig(options.windowsProcessChain);
+  if (windowsProcessChain) runtimeBody.windowsProcessChain = windowsProcessChain;
+  const body = JSON.stringify(runtimeBody, null, 2);
   try {
-    fsApi.mkdirSync(dir, { recursive: true });
-    fsApi.writeFileSync(tmpPath, body, "utf8");
+    fsApi.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Permission-capable plugins use this file to avoid disclosing their
+    // reverse-bridge bearer token to arbitrary listeners during a port scan.
+    // Keep the replacement owner-only on POSIX; Windows ignores this mode and
+    // relies on the user's profile ACL.
+    fsApi.writeFileSync(tmpPath, body, { encoding: "utf8", mode: 0o600 });
     fsApi.renameSync(tmpPath, filePath);
     return true;
   } catch {
@@ -492,6 +612,37 @@ function isRemoteHookMode(options = {}) {
   return envFlagEnabled(env && env.CLAWD_REMOTE);
 }
 
+function buildWindowsProcessChainHeaders(port, options = {}) {
+  const request = options.windowsProcessChain;
+  if (!request || typeof request !== "object" || Array.isArray(request)) return {};
+  const platform = options.platform || request.platform || process.platform;
+  if (platform !== "win32") return {};
+  if (isRemoteHookMode(options) || resolveSecureTransport(options).secure) return {};
+
+  const agentId = typeof request.agentId === "string" ? request.agentId : "";
+  const observation = request.runtimeObservation;
+  if (!WINDOWS_PROCESS_CHAIN_AGENT_IDS.has(agentId)
+    || !observation
+    || observation.agentId !== agentId
+    || normalizePort(observation.port) !== normalizePort(port)
+    || observation.version !== WINDOWS_PROCESS_CHAIN_VERSION
+    || !PROCESS_INSTANCE_RE.test(observation.instanceGeneration || "")
+    || !WINDOWS_PROCESS_CHAIN_MODES.has(observation.agentMode)
+    || observation.agentMode === "legacy") return {};
+
+  const hookPid = Number(request.hookPid);
+  if (!Number.isInteger(hookPid) || hookPid <= 0 || hookPid > 0xffffffff) return {};
+  const headers = {
+    [CLAWD_HOOK_PID_HEADER]: String(hookPid),
+    [CLAWD_PROCESS_INSTANCE_HEADER]: observation.instanceGeneration,
+  };
+  const cacheSource = request.legacyCacheSource;
+  if (cacheSource === "fresh" || cacheSource === "v2" || cacheSource === "v1" || cacheSource === "none") {
+    headers[CLAWD_LEGACY_PROCESS_CACHE_HEADER] = cacheSource;
+  }
+  return headers;
+}
+
 function normalizeHookHttpTimeout(value, fallback, options = {}) {
   const n = Number(value);
   const requested = Number.isFinite(n) && n > 0 ? n : fallback;
@@ -574,6 +725,7 @@ function postStateToPort(port, payload, timeoutMs, callback, options = {}) {
           ...options,
           remoteIdentity: secureTransport.identity || options.remoteIdentity,
         }),
+        ...buildWindowsProcessChainHeaders(port, options),
       },
       timeout: timeoutMs,
     },
@@ -706,6 +858,7 @@ function postPermissionToPort(port, payload, timeoutMs, callback, options = {}) 
           ...options,
           remoteIdentity: secureTransport.identity || options.remoteIdentity,
         }),
+        ...buildWindowsProcessChainHeaders(port, options),
       },
       timeout: timeoutMs,
     },
@@ -1210,8 +1363,13 @@ async function resolveNodeBinAsync(options = {}) {
 }
 
 module.exports = {
+  APPIMAGE_HOOK_MARKER_FILE,
   CLAWD_SERVER_HEADER,
   CLAWD_SERVER_ID,
+  CODEX_AUTO_START_GATE_FILENAME,
+  CODEX_AUTO_START_GATE_VERSION,
+  CODEX_WSL_INTEROP_ARG,
+  CODEX_WINDOWS_STABLE_ARG,
   DEFAULT_HOOK_HTTP_TIMEOUT_MS,
   DEFAULT_SERVER_PORT,
   HOST_PREFIX_FILENAME,
@@ -1227,8 +1385,14 @@ module.exports = {
   SERVER_PORTS,
   SSH_SECURE_MARKER_FILENAME,
   STATE_PATH,
+  CLAWD_HOOK_PID_HEADER,
+  CLAWD_PROCESS_INSTANCE_HEADER,
+  CLAWD_LEGACY_PROCESS_CACHE_HEADER,
+  WINDOWS_PROCESS_CHAIN_VERSION,
   buildPermissionUrl,
+  buildWindowsProcessChainHeaders,
   clearRuntimeConfig,
+  defaultCodexAutoStartGatePath,
   defaultRuntimeConfigPath,
   isManagedPermissionUrl,
   isRemoteHookMode,
@@ -1242,6 +1406,7 @@ module.exports = {
   postStateToRunningServer,
   probePort,
   readHostPrefix,
+  readCodexAutoStartGate,
   readRemoteIdentity,
   resolveRemoteIdentityPath,
   resolveRemoteLastLogPath,
@@ -1253,6 +1418,9 @@ module.exports = {
   readRuntimeConfig,
   readRuntimeIdentity,
   readRuntimePort,
+  readWindowsProcessChainHookContext,
+  readWindowsProcessChainObservation,
+  detectWslDistro,
   resolveNodeBin,
   resolveNodeBinAsync,
   resolveWindowsNodeBinSync,
@@ -1260,5 +1428,7 @@ module.exports = {
   validateWindowsNodeCandidate,
   splitPortCandidates,
   postStateToPort,
+  normalizeWindowsProcessChainConfig,
   writeRuntimeConfig,
+  writeCodexAutoStartGate,
 };

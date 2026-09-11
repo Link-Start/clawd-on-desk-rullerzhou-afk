@@ -20,8 +20,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onViewportOffsetX: (cb) => ipcRenderer.on("viewport-offset-x", (_, offsetX) => cb(Number.isFinite(offsetX) ? offsetX : 0)),
   onPetTintChange: (cb) => ipcRenderer.on("pet-tint-change", (_, payload) => cb(payload)),
   onPetAccessoryChange: (cb) => ipcRenderer.on("pet-accessory-change", (_, payload) => cb(payload)),
+  onPetAccessorySlotsChange: (cb) => ipcRenderer.on("pet-accessory-slots-change", (_, snapshot) => cb(snapshot)),
   // State sync from main
-  onStateChange: (callback) => ipcRenderer.on("state-change", (_, state, svg) => callback(state, svg)),
+  onStateChange: (callback) => ipcRenderer.on("state-change", (_, requestOrState, legacySvg) => callback(requestOrState, legacySvg)),
   onKimiPermissionPulse: (callback) => ipcRenderer.on("kimi-permission-pulse", () => callback()),
   onEyeMove: (callback) => ipcRenderer.on("eye-move", (_, dx, dy) => callback(dx, dy)),
   onCloudlingPointer: (callback) => ipcRenderer.on("cloudling-pointer", (_, payload) => callback(payload)),
@@ -33,9 +34,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onLowPowerIdleModeChange: (cb) => ipcRenderer.on("low-power-idle-mode-change", (_, enabled) => cb(enabled)),
   onSystemWake: (cb) => ipcRenderer.on("system-wake", (_, payload) => cb(payload)),
   // Reaction control (from main, relayed from hit window)
-  onStartDragReaction: (cb) => ipcRenderer.on("start-drag-reaction", (_, direction) => cb(direction)),
+  onStartDragReaction: (cb) => ipcRenderer.on("start-drag-reaction", (_, requestOrDirection, legacyDirection) => cb(requestOrDirection, legacyDirection)),
   onEndDragReaction: (cb) => ipcRenderer.on("end-drag-reaction", () => cb()),
-  onPlayClickReaction: (cb) => ipcRenderer.on("play-click-reaction", (_, svg, duration) => cb(svg, duration)),
+  onPlayClickReaction: (cb) => ipcRenderer.on("play-click-reaction", (_, requestOrSvg, duration) => cb(requestOrSvg, duration)),
+  onPlayTestReaction: (cb) => ipcRenderer.on("play-test-reaction", (_, result) => {
+    if (result === "pass" || result === "fail") cb(result);
+  }),
   // Sound playback (from main)
   onPreloadSounds: (cb) => ipcRenderer.on("preload-sounds", (_, payload) => cb(payload)),
   onPlaySound: (cb) => ipcRenderer.on("play-sound", (_, payload) => cb(payload)),
@@ -45,6 +49,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
   pauseCursorPolling: () => ipcRenderer.send("pause-cursor-polling"),
   resumeFromReaction: () => ipcRenderer.send("resume-from-reaction"),
   notifyPetVisualReady: () => ipcRenderer.send("pet-visual-ready"),
+  notifyPetVisualSettled: (payload) => {
+    if (!payload || typeof payload !== "object") return;
+    const safe = {
+      themeId: typeof payload.themeId === "string" ? payload.themeId : null,
+      displayState: typeof payload.displayState === "string" ? payload.displayState : null,
+      requestedFile: typeof payload.requestedFile === "string" ? payload.requestedFile : null,
+      actualFile: typeof payload.actualFile === "string" ? payload.actualFile : null,
+      channel: typeof payload.channel === "string" ? payload.channel : null,
+      verified: payload.verified === true,
+      visualGeneration: Number.isSafeInteger(payload.visualGeneration) ? payload.visualGeneration : null,
+      outcome: typeof payload.outcome === "string" ? payload.outcome : null,
+    };
+    ipcRenderer.send("pet-visual-settled", safe);
+  },
   setLowPowerIdlePaused: (paused) => ipcRenderer.send("low-power-idle-paused", !!paused),
   reportSystemWakeStatus: (payload) => ipcRenderer.send("system-wake-status", payload),
+  reportAccessoryMirror: (mirrored) => ipcRenderer.send("accessory-mirror", !!mirrored),
 });

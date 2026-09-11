@@ -9,13 +9,18 @@ const motionStage = document.getElementById("pet-motion-stage") || container;
 const assetDirectionStage = document.getElementById("pet-asset-direction-stage") || container;
 const mediaLayer = document.getElementById("pet-media-layer") || container;
 const accessoryLayer = document.getElementById("pet-accessory-layer") || container;
+const particleLayer = document.getElementById("pet-particle-layer") || container;
 const accessoryEl = document.getElementById("clawd-accessory");
+const mouthAccessoryEl = document.getElementById("clawd-mouth-accessory");
 const accessoryLayout = globalThis.petAccessoryLayout || null;
+const accessoryDescriptor = globalThis.petAccessoryDescriptor || null;
+const visualSwapPolicy = globalThis.petVisualSwapPolicy || {};
 let clawdEl = document.getElementById("clawd");
 let pendingNext = null;
 const LOW_POWER_IDLE_PAUSE_MS = 5000;
-const SWAP_LOAD_FALLBACK_MS = 3000;
-const SWAP_VISIBILITY_RESCUE_BUFFER_MS = 750;
+const SWAP_LOAD_FALLBACK_MS = visualSwapPolicy.SWAP_LOAD_FALLBACK_MS || 3000;
+const ACCESSORY_SETTLE_TIMEOUT_MS = visualSwapPolicy.ACCESSORY_SETTLE_TIMEOUT_MS || 3000;
+const SWAP_VISIBILITY_RESCUE_BUFFER_MS = visualSwapPolicy.SWAP_VISIBILITY_RESCUE_BUFFER_MS || 750;
 const EYE_ATTACH_RETRY_MS = 16;
 const EYE_ATTACH_MAX_ATTEMPTS = 60;
 const WAKE_OBJECT_RELOAD_RETRIES = 1;
@@ -23,6 +28,19 @@ const LOW_POWER_PAUSE_STYLE_ID = "clawd-low-power-pause-svg";
 const LOW_POWER_PAUSE_STATES = new Set(["idle", "mini-idle", "dozing"]);
 const LOW_POWER_BOUNDARY_EPSILON_MS = 80;
 const CLOUDLING_POINTER_BRIDGE_STATES = new Set(["idle", "mini-idle", "mini-peek"]);
+const CODEX_PET_VISUAL_BY_FILE = Object.freeze({
+  "codex-pet-idle-loop.svg": "idle-loop",
+  "codex-pet-idle-static.svg": "idle-static",
+  "codex-pet-waving-loop.svg": "waving-loop",
+  "codex-pet-waving-once.svg": "waving-once",
+  "codex-pet-jumping-loop.svg": "jumping-loop",
+  "codex-pet-jumping-once.svg": "jumping-once",
+  "codex-pet-failed-loop.svg": "failed-loop",
+  "codex-pet-waiting-loop.svg": "waiting-loop",
+  "codex-pet-running-loop.svg": "running-loop",
+  "codex-pet-review-loop.svg": "review-loop",
+  "codex-pet-drag-directional-loop.svg": "drag-directional",
+});
 let lowPowerIdleMode = false;
 let lowPowerIdlePauseTimer = null;
 let lowPowerSvgPaused = false;
@@ -34,24 +52,32 @@ let queuedSystemWakeReplayTimer = null;
 let _lowPowerStaticImageOverrides = {};
 let _petTintPayload = { id: "none", filter: "" };
 let _petTintSupported = false;
-let _accessoryPayload = {
-  id: "none",
-  assetFile: null,
-  aspect: 1,
-  widthScale: 1,
-  offsetY: 0,
+const ACCESSORY_SLOT_NAMES = Object.freeze(["head", "mouth"]);
+function createAccessorySlotRuntime(element) {
+  return {
+    element,
+    supported: false,
+    attachments: null,
+    payload: { id: "none", assetFile: null, aspect: 1, widthScale: 1, offsetY: 0 },
+    assetFile: null,
+    assetReady: false,
+    assetSettled: true,
+    assetLoadTimer: null,
+    assetWaiters: [],
+    raf: null,
+    lastLayout: null,
+    followKey: null,
+    pausedRoot: null,
+    documentPaused: false,
+    diagnostics: new Set(),
+  };
+}
+const _accessorySlots = {
+  head: createAccessorySlotRuntime(accessoryEl),
+  mouth: createAccessorySlotRuntime(mouthAccessoryEl),
 };
-let _accessorySupported = false;
-let _accessoryAttachments = null;
-let _accessoryAssetFile = null;
-let _accessoryAssetReady = false;
-let _accessoryAssetSettled = true;
-let _accessoryAssetLoadTimer = null;
-let _accessoryAssetWaiters = [];
-let _accessoryRaf = null;
-let _accessoryLastLayout = null;
-let _accessoryFollowKey = null;
-const _accessoryDiagnostics = new Set();
+let _accessoryThemeId = null;
+let _lastAccessoryGeneration = 0;
 const PET_TINT_FILTER_TOKEN_RE =
   /^(?:hue-rotate\(-?\d+(?:\.\d+)?deg\)|(?:saturate|brightness|contrast|sepia|grayscale)\(\d+(?:\.\d+)?\))$/;
 
@@ -71,25 +97,50 @@ function initWithConfig(cfg) {
   _eyeTrackingStates = (tc.eyeTrackingStates) || ["idle", "dozing", "mini-idle"];
   _trustedScriptedSvgFiles = new Set(Array.isArray(tc.trustedScriptedSvgFiles) ? tc.trustedScriptedSvgFiles : []);
   _forceSvgObjectChannel = !!(tc.rendering && tc.rendering.svgChannel === "object");
+  _objectChannelFiles = new Set(
+    tc.rendering && Array.isArray(tc.rendering.objectChannelFiles)
+      ? tc.rendering.objectChannelFiles
+      : []
+  );
   _lowPowerStaticImageOverrides = (tc.rendering && tc.rendering.lowPowerStaticImageOverrides) || {};
   _petTintSupported = tc.petTintSupported === true;
   if (Object.prototype.hasOwnProperty.call(tc, "petTintPayload")) {
     _petTintPayload = normalizePetTintPayload(tc.petTintPayload);
   }
-  _accessorySupported = tc.accessorySupported === true;
-  _accessoryAttachments = (
-    _accessorySupported
-    && tc.accessoryAttachments
-    && typeof tc.accessoryAttachments === "object"
-  ) ? tc.accessoryAttachments : null;
-  if (Object.prototype.hasOwnProperty.call(tc, "accessoryPayload")) {
-    _accessoryPayload = normalizeAccessoryPayload(tc.accessoryPayload);
+  const configuredSlots = tc.accessorySlots && typeof tc.accessorySlots === "object"
+    ? tc.accessorySlots
+    : null;
+  _accessoryThemeId = configuredSlots
+    && (configuredSlots.themeId === null || typeof configuredSlots.themeId === "string")
+    ? configuredSlots.themeId
+    : null;
+  _lastAccessoryGeneration = configuredSlots
+    && Number.isSafeInteger(configuredSlots.accessoryGeneration)
+    && configuredSlots.accessoryGeneration >= 0
+    ? configuredSlots.accessoryGeneration
+    : 0;
+  for (const slotName of ACCESSORY_SLOT_NAMES) {
+    const slot = _accessorySlots[slotName];
+    const configured = configuredSlots && configuredSlots[slotName];
+    const legacyHead = slotName === "head" && !configuredSlots;
+    slot.supported = configured
+      ? configured.supported === true
+      : (legacyHead && tc.accessorySupported === true);
+    slot.attachments = slot.supported
+      ? ((configured && configured.attachments) || (legacyHead && tc.accessoryAttachments) || null)
+      : null;
+    slot.payload = normalizeAccessoryPayload(
+      (configured && configured.payload) || (legacyHead && tc.accessoryPayload)
+    );
   }
   _imgCacheBustSeq = 0;
   _miniViewBox = tc.miniModeViewBox || null;
   _fileViewBoxes = tc.fileViewBoxes || {};
   _dragSvg = tc.dragSvg || null;
   _dragSvgs = tc.dragSvgs || {};
+  isDragReacting = false;
+  currentDragSvg = null;
+  currentDragDirection = null;
   _idleFollowSvg = tc.idleFollowSvg || "clawd-idle-follow.svg";
   // Pre-IPC first frame rests on the user-selected idle visual when one is set.
   _initialIdleSvg = tc.idleDefaultVisual || _idleFollowSvg;
@@ -122,8 +173,9 @@ function initWithConfig(cfg) {
 
   applyObjectScaleStyle(clawdEl, getObjectSvgName(clawdEl), null);
   applyObjectScaleStyle(pendingNext, getObjectSvgName(pendingNext), null);
-  if (_accessorySupported && _accessoryPayload.id !== "none") {
-    ensureAccessoryAsset();
+  for (const slotName of ACCESSORY_SLOT_NAMES) {
+    const slot = _accessorySlots[slotName];
+    if (slot.supported && slot.payload.id !== "none") ensureAccessoryAsset(slotName);
   }
 }
 
@@ -154,13 +206,66 @@ function applyObjectScaleStyle(el, file, state) {
   }
 }
 
-function getCurrentSvgRoot() {
-  if (!clawdEl || clawdEl.tagName !== "OBJECT") return null;
+function getObjectSvgRoot(objectEl) {
+  if (!objectEl || objectEl.tagName !== "OBJECT") return null;
   try {
-    const svgDoc = clawdEl.contentDocument;
+    const svgDoc = objectEl.contentDocument;
     return svgDoc ? svgDoc.documentElement : null;
   } catch {
     return null;
+  }
+}
+
+function getCurrentSvgRoot() {
+  return getObjectSvgRoot(clawdEl);
+}
+
+function setSvgRootLowPowerPaused(root, paused) {
+  if (!root) return false;
+  try {
+    const svgDoc = root.ownerDocument;
+    const existingStyle = svgDoc && svgDoc.getElementById(LOW_POWER_PAUSE_STYLE_ID);
+    if (paused) {
+      if (!existingStyle && svgDoc) {
+        const style = svgDoc.createElementNS("http://www.w3.org/2000/svg", "style");
+        style.id = LOW_POWER_PAUSE_STYLE_ID;
+        style.textContent = `
+          *, *::before, *::after {
+            animation-play-state: paused !important;
+            transition-property: none !important;
+          }
+        `;
+        root.appendChild(style);
+      }
+      if (typeof root.pauseAnimations === "function") root.pauseAnimations();
+    } else {
+      if (existingStyle) existingStyle.remove();
+      if (typeof root.unpauseAnimations === "function") root.unpauseAnimations();
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function setAccessorySvgLowPowerPaused(slotName, paused) {
+  const slot = _accessorySlots[slotName];
+  if (!slot || !slot.element || slot.element.tagName !== "OBJECT") return false;
+  const root = getObjectSvgRoot(slot.element);
+  if (!root) return false;
+  const next = !!paused;
+  if (slot.pausedRoot === root && slot.documentPaused === next) return true;
+  if (!setSvgRootLowPowerPaused(root, next)) return false;
+  slot.pausedRoot = root;
+  slot.documentPaused = next;
+  return true;
+}
+
+function syncAccessorySvgLowPowerPaused(paused) {
+  for (const slotName of ACCESSORY_SLOT_NAMES) {
+    const slot = getAccessorySlot(slotName);
+    const hidden = !!(slot && slot.element && slot.element.style.display === "none");
+    setAccessorySvgLowPowerPaused(slotName, paused || hidden);
   }
 }
 
@@ -188,10 +293,11 @@ function setLowPowerSvgPaused(paused) {
   lowPowerSvgPaused = next;
   if (next) {
     _cancelLayerAnimLoop();
-    cancelAccessoryFollow();
+    for (const slotName of ACCESSORY_SLOT_NAMES) cancelAccessoryFollow(slotName);
   } else {
     refreshAccessoryLayout();
   }
+  syncAccessorySvgLowPowerPaused(next);
   if (window.electronAPI && typeof window.electronAPI.setLowPowerIdlePaused === "function") {
     window.electronAPI.setLowPowerIdlePaused(next);
   }
@@ -252,8 +358,7 @@ function getLowPowerAnimationBoundaryDelayMs(root) {
 function pauseCurrentSvgForLowPower({ waitForBoundary = false } = {}) {
   if (!shouldPauseForLowPower()) return;
   const root = getCurrentSvgRoot();
-  if (!root) return;
-  if (waitForBoundary) {
+  if (root && waitForBoundary) {
     const delayMs = getLowPowerAnimationBoundaryDelayMs(root);
     if (delayMs > 0) {
       lowPowerIdlePauseTimer = setTimeout(() => {
@@ -263,21 +368,7 @@ function pauseCurrentSvgForLowPower({ waitForBoundary = false } = {}) {
       return;
     }
   }
-  const svgDoc = root.ownerDocument;
-  if (svgDoc && !svgDoc.getElementById(LOW_POWER_PAUSE_STYLE_ID)) {
-    const style = svgDoc.createElementNS("http://www.w3.org/2000/svg", "style");
-    style.id = LOW_POWER_PAUSE_STYLE_ID;
-    style.textContent = `
-      *, *::before, *::after {
-        animation-play-state: paused !important;
-        transition-property: none !important;
-      }
-    `;
-    root.appendChild(style);
-  }
-  try {
-    if (typeof root.pauseAnimations === "function") root.pauseAnimations();
-  } catch {}
+  setSvgRootLowPowerPaused(root, true);
   setCurrentScriptedSvgLowPowerPaused(true);
   setLowPowerSvgPaused(true);
 }
@@ -288,14 +379,7 @@ function resumeCurrentSvgForLowPower() {
     lowPowerIdlePauseTimer = null;
   }
   const root = getCurrentSvgRoot();
-  if (root) {
-    try {
-      const svgDoc = root.ownerDocument;
-      const style = svgDoc && svgDoc.getElementById(LOW_POWER_PAUSE_STYLE_ID);
-      if (style) style.remove();
-      if (typeof root.unpauseAnimations === "function") root.unpauseAnimations();
-    } catch {}
-  }
+  setSvgRootLowPowerPaused(root, false);
   setCurrentScriptedSvgLowPowerPaused(false);
   setLowPowerSvgPaused(false);
 }
@@ -340,7 +424,6 @@ function setLowPowerIdleMode(enabled) {
   } else {
     resumeCurrentSvgForLowPower();
   }
-  refreshCurrentStateForLowPowerStaticImage();
 }
 
 function isSvgFile(file) {
@@ -417,12 +500,17 @@ let _shadowShift;
 let _eyeTrackingStates;
 let _trustedScriptedSvgFiles = new Set();
 let _forceSvgObjectChannel = false;
+let _objectChannelFiles = new Set();
 let _imgCacheBustSeq = 0;
 let _miniViewBox = null;
 let _fileViewBoxes = {};
 let _dragSvg;
 let _dragSvgs;
+let isDragReacting = false;
 let currentDragSvg = null;
+let currentDragDirection = null;
+const directionalDragBridgeWarnings = new Set();
+const codexPetVisualBridgeWarnings = new Set();
 let _idleFollowSvg;
 let _initialIdleSvg;
 let _glyphFlipDefs;
@@ -472,16 +560,42 @@ function setViewportOffsetX(offsetX) {
   if (container) container.style.translate = `${_viewportOffsetX}px 0`;
 }
 
+// Shared with the main process's hit geometry via src/pet-accessory-mirror.js
+// so the two sides cannot drift apart.
+function miniFlipContext() {
+  return {
+    hasRoamVisual: _hasRoamVisual,
+    roamHeadingLeft: _roamHeadingLeft,
+    roamFlipAssets: _roamFlipAssets,
+    miniFlipAssets: _miniFlipAssets,
+    inMiniMode: _inMiniMode,
+    miniPreEntryMode: _miniPreEntryMode,
+    miniLeftFlip,
+  };
+}
+
 function shouldApplyMiniAssetFlip(state) {
-  // Free roam: the dedicated roam visual is drawn facing right; mirror it
-  // while the walk heads left (heading pushed from main via roam-heading).
-  // Themes whose roam asset faces left (roamFlipAssets) invert the mirror.
-  if (state === "roam") return _hasRoamVisual && (_roamHeadingLeft !== _roamFlipAssets);
-  // Only mini-family visuals mirror with flipAssets. mini-mode-change can land
-  // while a transitional visual (idle, drag reaction) is still on screen —
-  // those keep their orientation until the mini swap happens.
-  if (!state || !state.startsWith("mini-")) return false;
-  return _miniFlipAssets && (_inMiniMode || (_miniPreEntryMode && state === "mini-crabwalk"));
+  return petAccessoryMirror.shouldFlipAssetDirection(state, miniFlipContext());
+}
+
+// Main owns the native hit window but cannot see either flip stage, so it used
+// to re-derive the accessory's facing from mini edge + theme flags — which got
+// free roam and the mini walk-in wrong, because neither is gated on miniMode.
+// Report the composed answer instead. #pet-facing-stage (.mini-left) and
+// #pet-asset-direction-stage both wrap #pet-accessory-layer, so the accessory
+// ends up mirrored exactly when the two stages disagree.
+let _reportedAccessoryMirror = null;
+function reportAccessoryMirror(mirrored) {
+  const next = !!mirrored;
+  if (_reportedAccessoryMirror === next) return;
+  try {
+    window.electronAPI.reportAccessoryMirror(next);
+  } catch {
+    // Memo only a delivered value: remembering a send that never landed would
+    // dedupe every later attempt and strand main on the stale facing.
+    return;
+  }
+  _reportedAccessoryMirror = next;
 }
 
 function applyMiniFlip(el, state = currentState) {
@@ -489,6 +603,7 @@ function applyMiniFlip(el, state = currentState) {
   const activeFlip = shouldApplyMiniAssetFlip(state);
   if (el) el.__clawdAssetDirectionFlip = activeFlip;
   assetDirectionStage.style.scale = activeFlip ? "-1 1" : "none";
+  reportAccessoryMirror(petAccessoryMirror.isAccessoryMirrored(state, miniFlipContext()));
 
   // A media crossfade can leave older children alive after the shared stage
   // adopts the new file's direction. Counter-flip only those older children
@@ -531,7 +646,7 @@ window.electronAPI.onThemeConfig((newConfig) => {
   // Clean up layered tracking before reinitializing
   _cleanupLayeredTracking();
   cancelPendingSwap("theme-config");
-  clearAccessoryRuntime({ clearAsset: true });
+  clearAllAccessoryRuntimes({ clearAsset: true });
   initWithConfig(newConfig);
   applyPetTintToAllMedia();
 });
@@ -618,66 +733,105 @@ function normalizeAccessoryPayload(payload) {
   return { id, assetFile, aspect, widthScale, offsetY };
 }
 
-function cancelAccessoryFollow() {
-  if (_accessoryRaf != null) {
-    cancelAnimationFrame(_accessoryRaf);
-    _accessoryRaf = null;
+function getAccessorySlot(slotName) {
+  return _accessorySlots[slotName] || null;
+}
+
+function cancelAccessoryFollow(slotName) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot) return;
+  if (slot.raf != null) {
+    cancelAnimationFrame(slot.raf);
+    slot.raf = null;
   }
-  _accessoryFollowKey = null;
+  slot.followKey = null;
 }
 
-function hideAccessory() {
-  cancelAccessoryFollow();
-  _accessoryLastLayout = null;
-  if (!accessoryEl) return;
-  accessoryEl.style.display = "none";
-  accessoryEl.style.transform = "";
+function hideAccessory(slotName) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot) return;
+  cancelAccessoryFollow(slotName);
+  slot.lastLayout = null;
+  if (!slot.element) return;
+  slot.element.style.visibility = "hidden";
+  // A document-backed accessory that is still loading must stay mounted;
+  // otherwise a fast state change to a hidden pose can abort its first load
+  // and leave the slot unable to recover when a visible pose returns.
+  slot.element.style.display = (
+    slot.element.tagName === "OBJECT" && !slot.assetSettled
+  ) ? "block" : "none";
+  slot.element.style.transform = "";
+  // Hidden document-backed accessories must not keep advancing their SMIL
+  // timeline behind a sprite that declares the slot hidden.
+  setAccessorySvgLowPowerPaused(slotName, true);
 }
 
-function clearAccessoryAssetLoadTimer() {
-  if (_accessoryAssetLoadTimer == null) return;
-  clearTimeout(_accessoryAssetLoadTimer);
-  _accessoryAssetLoadTimer = null;
+function clearAccessoryAssetLoadTimer(slotName) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot || slot.assetLoadTimer == null) return;
+  clearTimeout(slot.assetLoadTimer);
+  slot.assetLoadTimer = null;
 }
 
-function clearAccessoryRuntime(options = {}) {
-  hideAccessory();
-  _accessoryDiagnostics.clear();
+function flushAccessoryAssetWaiters(slotName) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot) return;
+  const waiters = slot.assetWaiters;
+  slot.assetWaiters = [];
+  for (const waiter of waiters) {
+    if (waiter.timer) clearTimeout(waiter.timer);
+    waiter.callback();
+  }
+}
+
+function clearAccessoryRuntime(slotName, options = {}) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot) return;
+  hideAccessory(slotName);
+  slot.diagnostics.clear();
   if (!options.clearAsset) return;
-  // Fully detach the old request before releasing pet-swap waiters. A waiter
-  // may synchronously re-enter ensureAccessoryAsset() for a newly selected
-  // accessory; no old cleanup is allowed to clear that new request afterward.
-  clearAccessoryAssetLoadTimer();
-  if (accessoryEl) {
-    accessoryEl.onload = null;
-    accessoryEl.onerror = null;
-    try { accessoryEl.src = ""; } catch {}
+  clearAccessoryAssetLoadTimer(slotName);
+  if (slot.element) {
+    setAccessorySvgLowPowerPaused(slotName, false);
+    slot.element.onload = null;
+    slot.element.onerror = null;
+    try {
+      if (slot.element.tagName === "OBJECT") slot.element.data = "";
+      else slot.element.src = "";
+    } catch {}
   }
-  _accessoryAssetFile = null;
-  _accessoryAssetReady = false;
-  _accessoryAssetSettled = true;
-  flushAccessoryAssetWaiters();
+  slot.pausedRoot = null;
+  slot.documentPaused = false;
+  slot.assetFile = null;
+  slot.assetReady = false;
+  slot.assetSettled = true;
+  flushAccessoryAssetWaiters(slotName);
 }
 
-function noteAccessoryDiagnostic(file, reason) {
+function clearAllAccessoryRuntimes(options = {}) {
+  for (const slotName of ACCESSORY_SLOT_NAMES) clearAccessoryRuntime(slotName, options);
+}
+
+function noteAccessoryDiagnostic(slotName, file, reason) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot) return;
   const key = `${file || "unknown"}|${reason}`;
-  if (_accessoryDiagnostics.has(key)) return;
-  _accessoryDiagnostics.add(key);
-  try { console.warn(`Clawd: accessory fallback for ${file || "unknown"}: ${reason}`); } catch {}
+  if (slot.diagnostics.has(key)) return;
+  slot.diagnostics.add(key);
+  try { console.warn(`Clawd: ${slotName} accessory fallback for ${file || "unknown"}: ${reason}`); } catch {}
 }
 
-function getAccessoryDescriptor(file, state) {
-  if (!_accessorySupported || !_accessoryAttachments || !file) return null;
-  const safeFile = String(file).replace(/^.*[\/\\]/, "");
-  const files = _accessoryAttachments.files;
-  if (files && typeof files === "object"
-      && Object.prototype.hasOwnProperty.call(files, safeFile)) {
-    return files[safeFile];
-  }
-  if (state && state.startsWith("mini-") && _accessoryAttachments.mini) {
-    return _accessoryAttachments.mini;
-  }
-  return _accessoryAttachments.default || null;
+function getAccessoryDescriptor(slotName, file, state) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot || !slot.supported || !slot.attachments || !file) return null;
+  if (!accessoryDescriptor || typeof accessoryDescriptor.resolveAccessoryDescriptor !== "function") return null;
+  return accessoryDescriptor.resolveAccessoryDescriptor({
+    attachments: slot.attachments,
+    slot: slotName,
+    itemId: slot.payload.id,
+    file: String(file).replace(/^.*[\/\\]/, ""),
+    state,
+  });
 }
 
 function getAccessoryStageSize() {
@@ -697,93 +851,108 @@ function getMediaLayoutBox(media) {
   return { x, y, width, height };
 }
 
-function ensureAccessoryAsset() {
-  if (!accessoryEl || !_accessoryPayload.assetFile) return false;
-  const file = _accessoryPayload.assetFile;
-  if (_accessoryAssetFile === file) return _accessoryAssetReady;
+function ensureAccessoryAsset(slotName) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot || !slot.element || !slot.payload.assetFile) return false;
+  const file = slot.payload.assetFile;
+  if (slot.assetFile === file) return slot.assetReady;
 
-  _accessoryAssetFile = file;
-  _accessoryAssetReady = false;
-  _accessoryAssetSettled = false;
-  accessoryEl.style.display = "none";
-  accessoryEl.onload = () => {
-    if (_accessoryAssetFile !== file) return;
-    clearAccessoryAssetLoadTimer();
-    _accessoryAssetReady = true;
-    _accessoryAssetSettled = true;
-    refreshAccessoryLayout();
-    flushAccessoryAssetWaiters();
+  slot.assetFile = file;
+  slot.assetReady = false;
+  slot.assetSettled = false;
+  // Chromium does not create an <object>'s nested SVG document while the
+  // element is display:none. Keep document-backed accessories mounted but
+  // visually hidden until their load event and first layout complete.
+  slot.element.style.visibility = "hidden";
+  slot.element.style.display = slot.element.tagName === "OBJECT" ? "block" : "none";
+  slot.element.onload = () => {
+    if (slot.assetFile !== file) return;
+    clearAccessoryAssetLoadTimer(slotName);
+    slot.assetReady = true;
+    slot.assetSettled = true;
+    if (lowPowerSvgPaused) setAccessorySvgLowPowerPaused(slotName, true);
+    refreshAccessoryLayout(slotName);
+    flushAccessoryAssetWaiters(slotName);
   };
-  accessoryEl.onerror = () => {
-    if (_accessoryAssetFile !== file) return;
-    clearAccessoryAssetLoadTimer();
-    _accessoryAssetReady = false;
-    _accessoryAssetSettled = true;
-    hideAccessory();
-    noteAccessoryDiagnostic(file, "asset-load-failed");
-    flushAccessoryAssetWaiters();
+  slot.element.onerror = () => {
+    if (slot.assetFile !== file) return;
+    clearAccessoryAssetLoadTimer(slotName);
+    slot.assetReady = false;
+    slot.assetSettled = true;
+    hideAccessory(slotName);
+    noteAccessoryDiagnostic(slotName, file, "asset-load-failed");
+    flushAccessoryAssetWaiters(slotName);
   };
   const loadTimer = setTimeout(() => {
-    if (_accessoryAssetLoadTimer !== loadTimer || _accessoryAssetFile !== file) return;
-    _accessoryAssetLoadTimer = null;
-    _accessoryAssetReady = false;
-    _accessoryAssetSettled = true;
-    hideAccessory();
-    noteAccessoryDiagnostic(file, "asset-load-timeout");
-    flushAccessoryAssetWaiters();
-  }, SWAP_LOAD_FALLBACK_MS);
-  _accessoryAssetLoadTimer = loadTimer;
-  accessoryEl.src = `../assets/accessories/${file}`;
+    if (slot.assetLoadTimer !== loadTimer || slot.assetFile !== file) return;
+    slot.assetLoadTimer = null;
+    slot.assetReady = false;
+    slot.assetSettled = true;
+    hideAccessory(slotName);
+    noteAccessoryDiagnostic(slotName, file, "asset-load-timeout");
+    flushAccessoryAssetWaiters(slotName);
+  }, ACCESSORY_SETTLE_TIMEOUT_MS);
+  slot.assetLoadTimer = loadTimer;
+  const assetUrl = `../assets/accessories/${file}`;
+  // The mouth slot uses a document-backed <object> so low-power mode can pause
+  // and resume its bounded SMIL timeline through contentDocument. The static
+  // head slot remains a cheaper <img>.
+  if (slot.element.tagName === "OBJECT") slot.element.data = assetUrl;
+  else slot.element.src = assetUrl;
   return false;
 }
 
-function flushAccessoryAssetWaiters() {
-  const waiters = _accessoryAssetWaiters;
-  _accessoryAssetWaiters = [];
-  for (const waiter of waiters) {
-    if (waiter.timer) clearTimeout(waiter.timer);
-    waiter.callback();
-  }
-}
-
-function shouldWaitForAccessoryAsset(file, state) {
-  if (!_accessorySupported || _accessoryPayload.id === "none") return false;
-  const descriptor = getAccessoryDescriptor(file, state);
+function shouldWaitForAccessoryAsset(slotName, file, state) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot || !slot.supported || slot.payload.id === "none") return false;
+  const descriptor = getAccessoryDescriptor(slotName, file, state);
   if (!descriptor || descriptor.visibility === "hidden") return false;
-  ensureAccessoryAsset();
-  return !_accessoryAssetSettled;
+  ensureAccessoryAsset(slotName);
+  return !slot.assetSettled;
 }
 
 function deferSwapUntilAccessorySettles(file, state, next, callback) {
-  if (!shouldWaitForAccessoryAsset(file, state)) return false;
+  const waitingSlots = ACCESSORY_SLOT_NAMES.filter((slotName) => (
+    shouldWaitForAccessoryAsset(slotName, file, state)
+  ));
+  if (waitingSlots.length === 0) return false;
   if (next.__clawdWaitingForAccessory) return true;
   next.__clawdWaitingForAccessory = true;
   let settled = false;
+  let remaining = waitingSlots.length;
   const resume = () => {
     if (settled) return;
+    remaining--;
+    if (remaining > 0) return;
     settled = true;
     next.__clawdWaitingForAccessory = false;
     callback();
   };
-  const waiter = {
-    callback: resume,
-    timer: setTimeout(() => {
-      const index = _accessoryAssetWaiters.indexOf(waiter);
-      if (index >= 0) _accessoryAssetWaiters.splice(index, 1);
-      resume();
-    }, SWAP_LOAD_FALLBACK_MS),
-  };
-  _accessoryAssetWaiters.push(waiter);
+  for (const slotName of waitingSlots) {
+    const slot = getAccessorySlot(slotName);
+    const waiter = {
+      callback: resume,
+      timer: setTimeout(() => {
+        const index = slot.assetWaiters.indexOf(waiter);
+        if (index >= 0) slot.assetWaiters.splice(index, 1);
+        resume();
+      }, ACCESSORY_SETTLE_TIMEOUT_MS),
+    };
+    slot.assetWaiters.push(waiter);
+  }
   return true;
 }
 
-function getCurrentAccessoryContext() {
-  if (!_accessorySupported || !_accessoryAttachments) return null;
-  if (!_accessoryPayload || _accessoryPayload.id === "none" || !_accessoryPayload.assetFile) return null;
+function getCurrentAccessoryContext(slotName) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot || !slot.supported || !slot.attachments) return null;
+  if (!slot.payload || slot.payload.id === "none" || !slot.payload.assetFile) return null;
   if (!clawdEl || !clawdEl.isConnected || !currentDisplayedSvg) return null;
-  const descriptor = getAccessoryDescriptor(currentDisplayedSvg, currentDisplayedState);
+  const descriptor = getAccessoryDescriptor(slotName, currentDisplayedSvg, currentDisplayedState);
   if (!descriptor || typeof descriptor !== "object") return null;
   return {
+    slotName,
+    slot,
     file: currentDisplayedSvg,
     state: currentDisplayedState,
     media: clawdEl,
@@ -802,7 +971,7 @@ function computeStaticAccessoryLayout(context) {
     mediaBox,
     viewBox,
     frame,
-    accessory: _accessoryPayload,
+    accessory: context.slot.payload,
     stageSize,
   });
 }
@@ -830,74 +999,90 @@ function computeFollowAccessoryLayout(context) {
     mediaOffset: { x: mediaBox.x, y: mediaBox.y },
     matrix,
     frame: followTarget.frame,
-    accessory: _accessoryPayload,
+    accessory: context.slot.payload,
+    normalizeReflection: followTarget.normalizeReflection,
     stageSize,
   });
 }
 
-function applyAccessoryLayout(layout) {
-  if (!accessoryEl || !_accessoryAssetReady || !layout) return false;
+function applyAccessoryLayout(context, layout) {
+  const slot = context && context.slot;
+  if (!slot || !slot.element || !slot.assetReady || !layout) return false;
   const unchanged = accessoryLayout
     && typeof accessoryLayout.layoutsEqual === "function"
-    && accessoryLayout.layoutsEqual(_accessoryLastLayout, layout);
+    && accessoryLayout.layoutsEqual(slot.lastLayout, layout);
   if (!unchanged) {
     const matrix = layout.matrix;
-    accessoryEl.style.width = `${layout.width}px`;
-    accessoryEl.style.height = `${layout.height}px`;
-    accessoryEl.style.transform =
+    slot.element.style.width = `${layout.width}px`;
+    slot.element.style.height = `${layout.height}px`;
+    slot.element.style.transform =
       `matrix(${matrix.a}, ${matrix.b}, ${matrix.c}, ${matrix.d}, ${matrix.e}, ${matrix.f})`;
-    _accessoryLastLayout = layout;
+    slot.lastLayout = layout;
   }
-  accessoryEl.style.filter = "none";
-  accessoryEl.style.display = "block";
+  slot.element.style.filter = "none";
+  // hideAccessory() pauses object-backed assets. Restore this document to the
+  // global low-power state before making it visible again.
+  setAccessorySvgLowPowerPaused(context.slotName, lowPowerSvgPaused);
+  slot.element.style.visibility = "visible";
+  slot.element.style.display = "block";
   return true;
 }
 
-function accessoryFollowTick(expectedKey) {
-  _accessoryRaf = null;
+function accessoryFollowTick(slotName, expectedKey) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot) return;
+  slot.raf = null;
   if (document.hidden === true || shouldSuppressPassiveTrackingForLowPower()) return;
-  const context = getCurrentAccessoryContext();
+  const context = getCurrentAccessoryContext(slotName);
   if (!context || context.descriptor.visibility === "hidden") {
-    hideAccessory();
+    hideAccessory(slotName);
     return;
   }
   const follow = context.descriptor.followTarget;
   const key = follow
-    ? `${context.file}|${_accessoryPayload.id}|${follow.id}`
+    ? `${context.file}|${slot.payload.id}|${follow.id}`
     : null;
-  if (!key || key !== expectedKey || key !== _accessoryFollowKey) {
-    refreshAccessoryLayout();
+  if (!key || key !== expectedKey || key !== slot.followKey) {
+    refreshAccessoryLayout(slotName);
     return;
   }
   const layout = computeFollowAccessoryLayout(context);
   if (!layout) {
-    noteAccessoryDiagnostic(context.file, `follow-target-unavailable:${follow.id}`);
-    cancelAccessoryFollow();
-    applyAccessoryLayout(computeStaticAccessoryLayout(context));
+    noteAccessoryDiagnostic(slotName, context.file, `follow-target-unavailable:${follow.id}`);
+    cancelAccessoryFollow(slotName);
+    applyAccessoryLayout(context, computeStaticAccessoryLayout(context));
     return;
   }
-  applyAccessoryLayout(layout);
-  _accessoryRaf = requestAnimationFrame(() => accessoryFollowTick(expectedKey));
+  applyAccessoryLayout(context, layout);
+  slot.raf = requestAnimationFrame(() => accessoryFollowTick(slotName, expectedKey));
 }
 
 function startAccessoryFollow(context) {
+  const { slotName, slot } = context;
   const follow = context.descriptor.followTarget;
   if (!follow || shouldSuppressPassiveTrackingForLowPower()) return;
-  const key = `${context.file}|${_accessoryPayload.id}|${follow.id}`;
-  cancelAccessoryFollow();
-  _accessoryFollowKey = key;
-  _accessoryRaf = requestAnimationFrame(() => accessoryFollowTick(key));
+  const key = `${context.file}|${slot.payload.id}|${follow.id}`;
+  cancelAccessoryFollow(slotName);
+  slot.followKey = key;
+  slot.raf = requestAnimationFrame(() => accessoryFollowTick(slotName, key));
 }
 
-function refreshAccessoryLayout() {
-  cancelAccessoryFollow();
-  const context = getCurrentAccessoryContext();
-  if (!context || context.descriptor.visibility === "hidden") {
-    hideAccessory();
+function refreshAccessoryLayout(slotName = null) {
+  if (!slotName) {
+    for (const name of ACCESSORY_SLOT_NAMES) refreshAccessoryLayout(name);
     return;
   }
-  if (!ensureAccessoryAsset()) {
-    hideAccessory();
+  cancelAccessoryFollow(slotName);
+  const context = getCurrentAccessoryContext(slotName);
+  if (!context || context.descriptor.visibility === "hidden") {
+    hideAccessory(slotName);
+    return;
+  }
+  if (!ensureAccessoryAsset(slotName)) {
+    // A pending <object> must remain mounted for Chromium to load its nested
+    // document. It is already visibility:hidden, so there is no pre-layout
+    // flash. Failed/timed-out assets are settled and stay fully hidden.
+    if (context.slot.assetSettled) hideAccessory(slotName);
     return;
   }
 
@@ -905,47 +1090,145 @@ function refreshAccessoryLayout() {
   if (follow && context.media.tagName === "OBJECT") {
     const dynamicLayout = computeFollowAccessoryLayout(context);
     if (dynamicLayout) {
-      applyAccessoryLayout(dynamicLayout);
+      applyAccessoryLayout(context, dynamicLayout);
       startAccessoryFollow(context);
       return;
     }
-    noteAccessoryDiagnostic(context.file, `follow-target-unavailable:${follow.id}`);
+    noteAccessoryDiagnostic(slotName, context.file, `follow-target-unavailable:${follow.id}`);
   }
   const staticLayout = computeStaticAccessoryLayout(context);
-  if (!applyAccessoryLayout(staticLayout)) {
-    hideAccessory();
-    noteAccessoryDiagnostic(context.file, "static-layout-unavailable");
+  if (!applyAccessoryLayout(context, staticLayout)) {
+    hideAccessory(slotName);
+    noteAccessoryDiagnostic(slotName, context.file, "static-layout-unavailable");
   }
 }
 
-function setAccessoryPayload(payload) {
+function applyAccessorySlotPayload(slotName, payload) {
+  const slot = getAccessorySlot(slotName);
+  if (!slot) return;
   const next = normalizeAccessoryPayload(payload);
-  const fileChanged = next.assetFile !== _accessoryAssetFile;
-  _accessoryPayload = next;
-  if (next.id === "none" || !_accessorySupported) {
-    clearAccessoryRuntime({ clearAsset: true });
-    refreshAccessoryMediaChannel();
+  const fileChanged = next.assetFile !== slot.assetFile;
+  slot.payload = next;
+  if (next.id === "none" || !slot.supported) {
+    clearAccessoryRuntime(slotName, { clearAsset: true });
     return;
   }
-  if (fileChanged) clearAccessoryRuntime({ clearAsset: true });
-  refreshAccessoryLayout();
+  if (fileChanged) clearAccessoryRuntime(slotName, { clearAsset: true });
+  refreshAccessoryLayout(slotName);
+}
+
+function setAccessorySlotsSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return false;
+  if (snapshot.themeId !== _accessoryThemeId) return false;
+  if (!Number.isSafeInteger(snapshot.accessoryGeneration) || snapshot.accessoryGeneration < 0) return false;
+  if (snapshot.accessoryGeneration < _lastAccessoryGeneration) return false;
+  if (!snapshot.payloads || typeof snapshot.payloads !== "object") return false;
+  _lastAccessoryGeneration = snapshot.accessoryGeneration;
+  for (const slotName of ACCESSORY_SLOT_NAMES) {
+    applyAccessorySlotPayload(slotName, snapshot.payloads[slotName]);
+  }
   refreshAccessoryMediaChannel();
+  return true;
 }
 
 if (window.electronAPI && typeof window.electronAPI.onPetAccessoryChange === "function") {
-  window.electronAPI.onPetAccessoryChange(setAccessoryPayload);
+  window.electronAPI.onPetAccessoryChange((payload) => {
+    applyAccessorySlotPayload("head", payload);
+    refreshAccessoryMediaChannel();
+  });
+}
+if (window.electronAPI && typeof window.electronAPI.onPetAccessorySlotsChange === "function") {
+  window.electronAPI.onPetAccessorySlotsChange(setAccessorySlotsSnapshot);
 }
 
 if (document && typeof document.addEventListener === "function") {
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden === true) cancelAccessoryFollow();
+    if (document.hidden === true) {
+      for (const slotName of ACCESSORY_SLOT_NAMES) cancelAccessoryFollow(slotName);
+    }
     else refreshAccessoryLayout();
   });
 }
 
 if (window && typeof window.addEventListener === "function") {
-  window.addEventListener("resize", refreshAccessoryLayout);
-  window.addEventListener("beforeunload", () => clearAccessoryRuntime({ clearAsset: true }));
+  window.addEventListener("resize", () => refreshAccessoryLayout());
+  window.addEventListener("beforeunload", () => {
+    clearAllAccessoryRuntimes({ clearAsset: true });
+    clearTestReactionVisuals();
+  });
+}
+
+// ── Test-result reactions ──
+// Theme-independent decorative overlays. They never swap the current state
+// SVG, pause cursor tracking, or enter the click/drag reaction state machine.
+const TEST_CONFETTI_COLORS = ["#ff5d8f", "#ffd166", "#4ec3e0", "#8a5cff", "#5ad17a"];
+const testConfettiTimers = new Map();
+let testShakeTimer = null;
+
+function clearTestConfetti() {
+  for (const [particle, timer] of testConfettiTimers) {
+    if (timer) clearTimeout(timer);
+    try { particle.remove(); } catch {}
+  }
+  testConfettiTimers.clear();
+}
+
+function clearTestShake() {
+  if (testShakeTimer) {
+    clearTimeout(testShakeTimer);
+    testShakeTimer = null;
+  }
+  if (facingStage) facingStage.classList.remove("clawd-test-shake");
+}
+
+function clearTestReactionVisuals() {
+  clearTestConfetti();
+  clearTestShake();
+}
+
+function burstTestConfetti() {
+  clearTestReactionVisuals();
+  if (!particleLayer) return;
+  const count = 18;
+  for (let i = 0; i < count; i++) {
+    const particle = document.createElement("div");
+    const startX = 30 + Math.floor((i / count) * 40);
+    const dx = (i % 2 === 0 ? 1 : -1) * (10 + (i * 7) % 60);
+    const delay = (i % 6) * 40;
+    particle.className = "clawd-test-confetti";
+    particle.style.left = `${startX}%`;
+    particle.style.background = TEST_CONFETTI_COLORS[i % TEST_CONFETTI_COLORS.length];
+    particle.style.setProperty("--test-confetti-dx", `${dx}px`);
+    particle.style.animationDelay = `${delay}ms`;
+    particleLayer.appendChild(particle);
+    const timer = setTimeout(() => {
+      testConfettiTimers.delete(particle);
+      try { particle.remove(); } catch {}
+    }, 1500 + delay);
+    testConfettiTimers.set(particle, timer);
+  }
+}
+
+function shakePetForTestFailure() {
+  clearTestReactionVisuals();
+  if (!facingStage) return;
+  // Force a style flush so consecutive failed test runs restart the wobble.
+  void facingStage.offsetWidth;
+  facingStage.classList.add("clawd-test-shake");
+  testShakeTimer = setTimeout(() => {
+    testShakeTimer = null;
+    try { facingStage.classList.remove("clawd-test-shake"); } catch {}
+  }, 650);
+}
+
+function playTestReaction(result) {
+  if (dndEnabled) return;
+  if (result === "pass") burstTestConfetti();
+  else if (result === "fail") shakePetForTestFailure();
+}
+
+if (window.electronAPI && typeof window.electronAPI.onPlayTestReaction === "function") {
+  window.electronAPI.onPlayTestReaction(playTestReaction);
 }
 
 // Release an <object> SVG element: navigate away to unload the SVG document
@@ -965,11 +1248,9 @@ function releaseImg(el) {
 
 // --- Reaction state (visual side) ---
 let isReacting = false;
-let isDragReacting = false;
 let reactTimer = null;
 let currentIdleSvg = null;    // tracks which SVG is currently showing
 let currentState = null;      // last state name received from main (for re-pulse)
-let currentRequestedSvg = null; // original state file from main, before low-power substitution
 let lastCloudlingPointerPayload = null;
 let dndEnabled = false;
 let miniLeftFlip = false;
@@ -978,12 +1259,16 @@ if (window.electronAPI && typeof window.electronAPI.onLowPowerIdleModeChange ===
   window.electronAPI.onLowPowerIdleModeChange(setLowPowerIdleMode);
 }
 
-window.electronAPI.onDndChange((enabled) => { dndEnabled = enabled; });
+window.electronAPI.onDndChange((enabled) => {
+  dndEnabled = enabled;
+  if (dndEnabled) clearTestReactionVisuals();
+});
 
 window.electronAPI.onMiniModeChange((enabled, edge, options) => {
   const preEntry = !!(options && options.preEntry);
   _miniPreEntryMode = !!enabled && preEntry;
   _inMiniMode = !!enabled && !preEntry;
+  if (enabled) clearTestReactionVisuals();
   miniLeftFlip = !!enabled && edge === "left";
   container.classList.toggle("mini-left", miniLeftFlip);
   applyMiniFlip(clawdEl, currentState);
@@ -1103,13 +1388,13 @@ function tracksEyesForFile(state, file) {
  */
 function needsObjectChannel(state, file) {
   if (!isSvgFile(file)) return false;
-  const accessoryDescriptor = getAccessoryDescriptor(file, state);
-  const needsAccessoryFollow = !!(
-    _accessoryPayload.id !== "none"
-    && accessoryDescriptor
-    && accessoryDescriptor.followTarget
-  );
+  const needsAccessoryFollow = ACCESSORY_SLOT_NAMES.some((slotName) => {
+    const slot = getAccessorySlot(slotName);
+    const descriptor = getAccessoryDescriptor(slotName, file, state);
+    return !!(slot && slot.payload.id !== "none" && descriptor && descriptor.followTarget);
+  });
   return _forceSvgObjectChannel
+    || _objectChannelFiles.has(file)
     || needsEyeTracking(state)
     || _trustedScriptedSvgFiles.has(file)
     || needsAccessoryFollow;
@@ -1122,9 +1407,11 @@ function refreshAccessoryMediaChannel() {
     const pendingIsObject = pendingNext.tagName === "OBJECT";
     if (wantsObject !== pendingIsObject) {
       const file = pendingSvgFile;
-      cancelPendingSwap();
+      const visualRequest = pendingNext.__clawdVisualRequest || null;
+      const fallbackFromObject = pendingNext.__clawdFallbackFromObject === true;
+      cancelPendingSwap("channel-refresh", { retainedRequest: visualRequest });
       detachEyeTracking();
-      swapToFile(file, pendingState);
+      swapToFile(file, pendingState, undefined, { visualRequest, fallbackFromObject });
       return true;
     }
   }
@@ -1147,11 +1434,6 @@ function resolveLowPowerStaticImageOverride(state, file) {
   const override = _lowPowerStaticImageOverrides && _lowPowerStaticImageOverrides[state];
   if (!override || override.from !== file || !override.to) return null;
   return override.to;
-}
-
-function hasLowPowerStaticImageOverride(state, file) {
-  const override = _lowPowerStaticImageOverrides && _lowPowerStaticImageOverrides[state];
-  return !!(override && override.from === file && override.to);
 }
 
 function shouldUseCloudlingPointerBridge(state, file) {
@@ -1221,11 +1503,13 @@ function getAssetUrl(file) {
 }
 
 // --- IPC-triggered reactions (from hit window via main relay) ---
-window.electronAPI.onStartDragReaction((direction) => startDragReaction(direction));
+window.electronAPI.onStartDragReaction((requestOrDirection, legacyDirection) => startDragReaction(requestOrDirection, legacyDirection));
 window.electronAPI.onEndDragReaction(() => endDragReaction());
 window.electronAPI.onPlayClickReaction((svg, duration) => playReaction(svg, duration));
 
-function playReaction(svgFile, durationMs) {
+function playReaction(requestOrFile, durationMs) {
+  const visualRequest = normalizeVisualRequest(requestOrFile);
+  const svgFile = visualRequest ? visualRequest.file : requestOrFile;
   isReacting = true;
   detachEyeTracking();
   resumeCurrentSvgForLowPower();
@@ -1233,7 +1517,7 @@ function playReaction(svgFile, durationMs) {
 
   // Reactions do not attach eye tracking, but some themes force SVGs through
   // <object> so their SVG documents can load local sub-resources.
-  swapToFile(svgFile, null);
+  swapToFile(svgFile, null, undefined, { visualRequest });
 
   reactTimer = setTimeout(() => endReaction(), durationMs);
 }
@@ -1253,14 +1537,162 @@ function cancelReaction() {
   if (isDragReacting) {
     isDragReacting = false;
   }
+  currentDragSvg = null;
+  currentDragDirection = null;
 }
 
 // --- Drag reaction (loops while dragging) ---
-function startDragReaction(direction) {
-  if (dndEnabled) return;
-  const dragSvg = (direction && _dragSvgs[direction]) || _dragSvg;
+function normalizeDragDirection(direction) {
+  return direction === "left" || direction === "right" ? direction : null;
+}
+
+function usesDirectionalDragBridge(file) {
+  return !!(
+    file
+    && _dragSvgs.left === file
+    && _dragSvgs.right === file
+  );
+}
+
+function warnDirectionalDragBridgeOnce(reason) {
+  if (directionalDragBridgeWarnings.has(reason)) return;
+  directionalDragBridgeWarnings.add(reason);
+  console.warn(`Clawd: directional drag bridge unavailable (${reason}); keeping the fallback direction.`);
+}
+
+function applyDirectionalDragToObject(objectEl, direction, options = {}) {
+  const normalized = normalizeDragDirection(direction);
+  if (!normalized) return false;
+  const warn = options.warn === true;
+  if (!objectEl || objectEl.tagName !== "OBJECT") {
+    if (warn) warnDirectionalDragBridgeOnce("non-object media channel");
+    return false;
+  }
+  try {
+    const root = objectEl.contentDocument && objectEl.contentDocument.documentElement;
+    if (!root) {
+      if (warn) warnDirectionalDragBridgeOnce("contentDocument unavailable");
+      return false;
+    }
+    if (root.getAttribute("data-clawd-drag-directional") !== "v1") {
+      if (warn) warnDirectionalDragBridgeOnce("v1 marker missing");
+      return false;
+    }
+    if (root.getAttribute("data-clawd-drag-direction") !== normalized) {
+      root.setAttribute("data-clawd-drag-direction", normalized);
+    }
+    return true;
+  } catch {
+    if (warn) warnDirectionalDragBridgeOnce("contentDocument access denied");
+    return false;
+  }
+}
+
+function getCodexPetVisualForFile(file) {
+  if (!file) return null;
+  const basename = String(file).replace(/\\/g, "/").split("/").pop().split(/[?#]/, 1)[0];
+  return CODEX_PET_VISUAL_BY_FILE[basename] || null;
+}
+
+function getAssetDirectoryUrl(url) {
+  const value = String(url || "").replace(/\\/g, "/");
+  const slash = value.lastIndexOf("/");
+  return slash >= 0 ? value.slice(0, slash) : "";
+}
+
+function restartCodexPetVisualAnimation(root) {
+  if (!root || typeof root.getAnimations !== "function") return;
+  let animations = [];
+  try {
+    animations = root.getAnimations({ subtree: true });
+  } catch {
+    return;
+  }
+  for (const animation of animations) {
+    try {
+      animation.currentTime = 0;
+    } catch {}
+  }
+}
+
+function warnCodexPetVisualBridgeOnce(reason) {
+  if (codexPetVisualBridgeWarnings.has(reason)) return;
+  codexPetVisualBridgeWarnings.add(reason);
+  console.warn(`Clawd: Codex Pet visual bridge unavailable (${reason}); using a normal media swap.`);
+}
+
+function applyCodexPetVisualToObject(objectEl, file, options = {}) {
+  const visual = getCodexPetVisualForFile(file);
+  if (!visual) return false;
+  const warn = options.warn === true;
+  if (!objectEl || objectEl.tagName !== "OBJECT") {
+    if (warn) warnCodexPetVisualBridgeOnce("non-object media channel");
+    return false;
+  }
+  try {
+    const root = objectEl.contentDocument && objectEl.contentDocument.documentElement;
+    if (!root) {
+      if (warn) warnCodexPetVisualBridgeOnce("contentDocument unavailable");
+      return false;
+    }
+    if (root.getAttribute("data-clawd-codex-pet-visuals") !== "v1") {
+      if (warn) warnCodexPetVisualBridgeOnce("v1 marker missing");
+      return false;
+    }
+    const unchanged = root.getAttribute("data-clawd-codex-pet-visual") === visual;
+    if (!unchanged) root.setAttribute("data-clawd-codex-pet-visual", visual);
+    if (visual === "drag-directional") {
+      const direction = normalizeDragDirection(options.direction);
+      if (direction && root.getAttribute("data-clawd-drag-direction") !== direction) {
+        root.setAttribute("data-clawd-drag-direction", direction);
+      }
+    }
+    if (unchanged && options.restart === true) restartCodexPetVisualAnimation(root);
+    return true;
+  } catch {
+    if (warn) warnCodexPetVisualBridgeOnce("contentDocument access denied");
+    return false;
+  }
+}
+
+function startDragReaction(requestOrDirection, legacyDirection) {
+  const visualRequest = normalizeVisualRequest(requestOrDirection);
+  const direction = legacyDirection !== undefined ? legacyDirection : requestOrDirection;
+  if (dndEnabled) {
+    notifyVisualSettlement(visualRequest, "failed", {
+      actualFile: currentDisplayedSvg || null,
+      channel: clawdEl && clawdEl.tagName === "OBJECT" ? "object" : "img",
+      verified: false,
+    });
+    return;
+  }
+  const normalizedDirection = normalizeDragDirection(direction);
+  const dragSvg = visualRequest
+    ? visualRequest.file
+    : ((normalizedDirection && _dragSvgs[normalizedDirection]) || _dragSvg);
   if (!dragSvg) return;
-  if (isDragReacting && currentDragSvg === dragSvg) return;
+  currentDragDirection = normalizedDirection;
+  if (isDragReacting && currentDragSvg === dragSvg) {
+    if (usesDirectionalDragBridge(dragSvg) && currentDisplayedSvg === dragSvg) {
+      applyDirectionalDragToObject(clawdEl, currentDragDirection, { warn: true });
+    }
+    if (usesDirectionalDragBridge(dragSvg) && pendingNext && pendingSvgFile === dragSvg) {
+      applyDirectionalDragToObject(pendingNext, currentDragDirection);
+    }
+    if (!visualRequest) return;
+    if (pendingNext && pendingSvgFile === dragSvg) {
+      pendingNext.__clawdVisualRequest = visualRequest;
+      return;
+    }
+    if (clawdEl && clawdEl.isConnected && currentDisplayedSvg === dragSvg) {
+      notifyVisualSettlement(visualRequest, "already-displayed", {
+        actualFile: dragSvg,
+        channel: clawdEl.tagName === "OBJECT" ? "object" : "img",
+        verified: true,
+      });
+      return;
+    }
+  }
 
   if (!isDragReacting && isReacting) {
     if (reactTimer) { clearTimeout(reactTimer); reactTimer = null; }
@@ -1272,13 +1704,15 @@ function startDragReaction(direction) {
   detachEyeTracking();
   resumeCurrentSvgForLowPower();
   window.electronAPI.pauseCursorPolling();
-  swapToFile(dragSvg, null);
+  swapToFile(dragSvg, null, undefined, { visualRequest });
 }
 
 function endDragReaction() {
-  if (!isDragReacting) return;
+  const wasDragReacting = isDragReacting;
   isDragReacting = false;
   currentDragSvg = null;
+  currentDragDirection = null;
+  if (!wasDragReacting) return;
   window.electronAPI.resumeFromReaction();
 }
 
@@ -1298,6 +1732,64 @@ function notifyPetVisualReadyOnce() {
   if (!window.electronAPI || typeof window.electronAPI.notifyPetVisualReady !== "function") return;
   petVisualReadyNotified = true;
   window.electronAPI.notifyPetVisualReady();
+}
+
+function normalizeVisualRequest(value) {
+  if (!value || typeof value !== "object") return null;
+  if (
+    (value.themeId !== null && typeof value.themeId !== "string")
+    || typeof value.logicalState !== "string"
+    || typeof value.displayState !== "string"
+    || typeof value.file !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(value.file)
+    || typeof value.source !== "string"
+    || !Number.isSafeInteger(value.visualGeneration)
+    || value.visualGeneration <= 0
+  ) return null;
+  return Object.freeze({
+    themeId: value.themeId,
+    logicalState: value.logicalState,
+    displayState: value.displayState,
+    file: value.file,
+    source: value.source,
+    visualGeneration: value.visualGeneration,
+  });
+}
+
+const settledVisualGenerations = new Set();
+function notifyVisualSettlement(request, outcome, options = {}) {
+  if (!request || settledVisualGenerations.has(request.visualGeneration)) return false;
+  if (!window.electronAPI || typeof window.electronAPI.notifyPetVisualSettled !== "function") return false;
+  const channel = options.channel;
+  if (!["object", "img", "bridge"].includes(channel)) return false;
+  const actualFile = typeof options.actualFile === "string" ? options.actualFile : null;
+  settledVisualGenerations.add(request.visualGeneration);
+  while (settledVisualGenerations.size > 128) {
+    settledVisualGenerations.delete(settledVisualGenerations.values().next().value);
+  }
+  window.electronAPI.notifyPetVisualSettled({
+    themeId: request.themeId,
+    displayState: request.displayState,
+    requestedFile: request.file,
+    actualFile,
+    channel,
+    verified: options.verified === true,
+    visualGeneration: request.visualGeneration,
+    outcome,
+  });
+  return true;
+}
+
+function settleSuccessfulVisual(request, actualFile, channel, options = {}) {
+  if (!request) return false;
+  const outcome = options.fallback === true || actualFile !== request.file
+    ? "fallback"
+    : "swapped";
+  return notifyVisualSettlement(request, outcome, {
+    actualFile,
+    channel,
+    verified: true,
+  });
 }
 
 /**
@@ -1363,7 +1855,12 @@ function scheduleSwapVisibilityRescue(token, file, state) {
     if (hasVisiblePetElement()) return;
 
     if (pendingNext && pendingSvgFile === file) {
-      forceImageChannelReload(file, getPendingSwapState(pendingNext, state));
+      // A verified media load can remain pending solely while an accessory's
+      // bounded waiter settles. Restarting here discards that progress.
+      if (pendingNext.__clawdWaitingForAccessory) return;
+      forceImageChannelReload(file, getPendingSwapState(pendingNext, state), true, {
+        visualRequest: pendingNext.__clawdVisualRequest || null,
+      });
       return;
     }
 
@@ -1383,20 +1880,36 @@ function getPendingSwapState(next, fallbackState) {
   return fallbackState;
 }
 
-function forceImageChannelReload(file, state, allowImageFallback = true) {
+function forceImageChannelReload(file, state, allowImageFallback = true, options = {}) {
   if (!allowImageFallback) return false;
   if (!file) return false;
-  if (hasVisiblePetElement()) return false;
   console.warn("Clawd: animation stayed invisible; reloading through the image channel:", file);
-  swapToFile(file, state, false, { allowImageFallback: false });
+  swapToFile(file, state, false, {
+    allowImageFallback: false,
+    visualRequest: options.visualRequest || null,
+    fallbackFromObject: true,
+    onReady: options.onReady,
+    onError: options.onError,
+  });
   return true;
 }
 
-function cancelPendingSwap(reason = "superseded") {
+function cancelPendingSwap(reason = "superseded", options = {}) {
   const next = pendingNext;
   if (!next) return false;
+  const visualRequest = normalizeVisualRequest(next.__clawdVisualRequest);
+  const retainedRequest = normalizeVisualRequest(options.retainedRequest);
+  const requestRetained = !!(
+    visualRequest
+    && retainedRequest
+    && visualRequest.visualGeneration === retainedRequest.visualGeneration
+  );
   if (typeof next.__clawdSwapCancelled === "function") {
     next.__clawdSwapCancelled(reason);
+  }
+  if (next.__clawdImageLoadTimer) {
+    clearTimeout(next.__clawdImageLoadTimer);
+    next.__clawdImageLoadTimer = null;
   }
   if (next.tagName === "OBJECT") releaseObject(next);
   else releaseImg(next);
@@ -1405,17 +1918,56 @@ function cancelPendingSwap(reason = "superseded") {
     pendingSvgFile = null;
     pendingAssetUrl = null;
   }
+  if (visualRequest && !requestRetained) {
+    notifyVisualSettlement(visualRequest, "failed", {
+      actualFile: currentDisplayedSvg || null,
+      channel: next.tagName === "OBJECT" ? "object" : "img",
+      verified: false,
+    });
+  }
   return true;
 }
 
 function swapToFile(file, state, useObjectChannel, options = {}) {
-  const swapToken = ++activeSwapToken;
   const allowImageFallback = options.allowImageFallback !== false;
-  cancelPendingSwap();
-
-  pendingSvgFile = file; // track what's loading for dedup
+  const visualRequest = normalizeVisualRequest(options.visualRequest);
   const useObj = useObjectChannel !== undefined ? useObjectChannel : needsObjectChannel(state, file);
   const url = getAssetUrl(file);
+  const canReuseCodexPetDocument = useObj
+    && options.forceDocumentReload !== true
+    && currentDisplayedAssetUrl
+    && getAssetDirectoryUrl(currentDisplayedAssetUrl) === getAssetDirectoryUrl(url)
+    && applyCodexPetVisualToObject(clawdEl, file, {
+      direction: isDragReacting && currentDragSvg === file ? currentDragDirection : null,
+      restart: true,
+      warn: true,
+    });
+  if (canReuseCodexPetDocument) {
+    cancelPendingSwap("superseded", { retainedRequest: visualRequest });
+    clearSwapVisibilityRescueTimer();
+    currentDisplayedSvg = file;
+    currentDisplayedState = state;
+    currentDisplayedAssetUrl = url;
+    applyObjectScaleStyle(clawdEl, file, state);
+    applyPetTintToElement(clawdEl);
+    applyMiniFlip(clawdEl, state);
+    refreshAccessoryLayout();
+    notifyPetVisualReadyOnce();
+    settleSuccessfulVisual(visualRequest, file, "bridge", {
+      fallback: options.fallbackFromObject === true,
+    });
+    if (state && tracksEyesForFile(state, file)) attachEyeTracking(clawdEl);
+    else detachEyeTracking();
+    if (miniLeftFlip) applyGlyphFlipCompensation(clawdEl);
+    scheduleLowPowerIdlePause();
+    if (typeof options.onReady === "function") options.onReady(clawdEl);
+    return;
+  }
+
+  const swapToken = ++activeSwapToken;
+  cancelPendingSwap("superseded", { retainedRequest: visualRequest });
+
+  pendingSvgFile = file; // track what's loading for dedup
   pendingAssetUrl = url;
 
   if (useObj) {
@@ -1426,6 +1978,8 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
     next.id = "clawd";
     next.style.opacity = "0";
     next.__clawdPendingState = state;
+    next.__clawdVisualRequest = visualRequest;
+    next.__clawdFallbackFromObject = options.fallbackFromObject === true;
     applyObjectScaleStyle(next, file, state);
     applyPetTintToElement(next);
     let swapCallbackSettled = false;
@@ -1457,6 +2011,9 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       } else {
         next.style.transition = "none";
       }
+      if (isDragReacting && currentDragSvg === file && usesDirectionalDragBridge(file)) {
+        applyDirectionalDragToObject(next, currentDragDirection, { warn: true });
+      }
       next.style.opacity = "1";
 
       for (const child of [...mediaLayer.querySelectorAll("object.clawd-object, img.clawd-img")]) {
@@ -1476,6 +2033,9 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       applyMiniFlip(next, commitState);
       refreshAccessoryLayout();
       notifyPetVisualReadyOnce();
+      settleSuccessfulVisual(next.__clawdVisualRequest, file, "object", {
+        fallback: next.__clawdFallbackFromObject === true,
+      });
 
       if (commitState && tracksEyesForFile(commitState, file)) {
         attachEyeTracking(next);
@@ -1488,7 +2048,33 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       finishSwapReady();
     };
 
+    const retryThroughImage = (reason) => {
+      if (pendingNext !== next) return;
+      const retryState = getPendingSwapState(next, state);
+      const retryRequest = next.__clawdVisualRequest;
+      releaseObject(next);
+      if (pendingNext === next) {
+        pendingNext = null;
+        pendingSvgFile = null;
+        pendingAssetUrl = null;
+      }
+      if (!pendingNext && forceImageChannelReload(file, retryState, allowImageFallback, {
+        visualRequest: retryRequest,
+        onReady: options.onReady,
+        onError: options.onError,
+      })) return;
+      finishSwapError(reason);
+      notifyVisualSettlement(retryRequest, "failed", {
+        actualFile: currentDisplayedSvg || null,
+        channel: "object",
+        verified: false,
+      });
+    };
+    // A load event verifies that Chromium accepted and rendered the object.
+    // contentDocument can still be transiently null at this exact callback;
+    // reserve that check for the no-load timeout path below.
     next.addEventListener("load", swap, { once: true });
+    next.addEventListener("error", () => retryThroughImage("object-load-error"), { once: true });
     // Same cache-bust as the <img> channel below. Chromium reuses the SVG
     // document (and its CSS animation timeline) across loads of the same
     // URL on the object channel too, so one-shot animations for scripted /
@@ -1504,18 +2090,13 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       if (pendingNext !== next) return;
       try {
         if (!next.contentDocument) {
-          const retryState = getPendingSwapState(next, state);
-          releaseObject(next);
-          if (pendingNext === next) {
-            pendingNext = null;
-            pendingSvgFile = null;
-            pendingAssetUrl = null;
-          }
-          finishSwapError("object-document-unavailable");
-          if (!pendingNext) forceImageChannelReload(file, retryState, allowImageFallback);
+          retryThroughImage("object-document-unavailable");
           return;
         }
-      } catch {}
+      } catch {
+        retryThroughImage("object-document-inaccessible");
+        return;
+      }
       swap();
     }, SWAP_LOAD_FALLBACK_MS);
   } else {
@@ -1525,6 +2106,8 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
     next.id = "clawd";
     next.style.opacity = "0";
     next.__clawdPendingState = state;
+    next.__clawdVisualRequest = visualRequest;
+    next.__clawdFallbackFromObject = options.fallbackFromObject === true;
     applyObjectScaleStyle(next, file, state);
     applyPetTintToElement(next);
 
@@ -1532,6 +2115,10 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       if (pendingNext !== next) return;
       const commitState = getPendingSwapState(next, state);
       if (deferSwapUntilAccessorySettles(file, commitState, next, swap)) return;
+      if (next.__clawdImageLoadTimer) {
+        clearTimeout(next.__clawdImageLoadTimer);
+        next.__clawdImageLoadTimer = null;
+      }
       if (swapToken === activeSwapToken) clearSwapVisibilityRescueTimer();
       const fadeInMs = (_transitions[file] && _transitions[file].in) || 0;
       const fadeOutMs = (currentDisplayedSvg && _transitions[currentDisplayedSvg] && _transitions[currentDisplayedSvg].out) || 0;
@@ -1561,10 +2148,35 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       applyMiniFlip(next, commitState);
       refreshAccessoryLayout();
       notifyPetVisualReadyOnce();
+      settleSuccessfulVisual(next.__clawdVisualRequest, file, "img", {
+        fallback: next.__clawdFallbackFromObject === true,
+      });
       scheduleLowPowerIdlePause();
+      if (typeof options.onReady === "function") options.onReady(next);
     };
 
     next.addEventListener("load", swap, { once: true });
+    const failImageSwap = (reason) => {
+      if (pendingNext !== next) return;
+      if (next.__clawdImageLoadTimer) {
+        clearTimeout(next.__clawdImageLoadTimer);
+        next.__clawdImageLoadTimer = null;
+      }
+      if (next.tagName === "IMG") releaseImg(next);
+      if (pendingNext === next) {
+        pendingNext = null;
+        pendingSvgFile = null;
+        pendingAssetUrl = null;
+      }
+      clearSwapVisibilityRescueTimer();
+      notifyVisualSettlement(next.__clawdVisualRequest, "failed", {
+        actualFile: currentDisplayedSvg || null,
+        channel: "img",
+        verified: false,
+      });
+      if (typeof options.onError === "function") options.onError(reason);
+    };
+    next.addEventListener("error", () => failImageSwap("image-load-error"), { once: true });
     // Cache-bust query param: Chromium reuses the SVG document (and its CSS
     // animation timeline) across <img> elements pointing at the same URL, so
     // one-shot animations (`animation: foo 3.2s 1 forwards`) that already ran
@@ -1580,21 +2192,29 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
     mediaLayer.appendChild(next);
     pendingNext = next;
     scheduleSwapVisibilityRescue(swapToken, file, state);
-    // Timeout fallback for images that fail to load
-    setTimeout(() => {
+    // A timed-out image is not verified and must never replace the visible
+    // element merely to force progress.
+    next.__clawdImageLoadTimer = setTimeout(() => {
       if (pendingNext !== next) return;
-      swap();
+      if (next.__clawdWaitingForAccessory) return;
+      failImageSwap("image-load-timeout");
     }, SWAP_LOAD_FALLBACK_MS);
   }
 }
 
-function renderStateFile(state, svg) {
+function renderStateFile(requestOrState, legacySvg) {
+  const visualRequest = normalizeVisualRequest(requestOrState);
+  if (requestOrState && typeof requestOrState === "object" && !visualRequest) {
+    try { console.warn("Clawd: ignored malformed visual request"); } catch {}
+    return;
+  }
+  const state = visualRequest ? visualRequest.displayState : requestOrState;
+  const svg = visualRequest ? visualRequest.file : legacySvg;
   // Main process state change → cancel any active click reaction
   cancelReaction();
   // Track the latest state name so the Kimi permission pulse can re-trigger
   // swapToFile() with the matching state for eye-tracking decisions.
   currentState = state;
-  currentRequestedSvg = svg;
   const requestedSvg = svg;
   const lowPowerStaticImageOverride = resolveLowPowerStaticImageOverride(state, requestedSvg);
   const effectiveSvg = lowPowerStaticImageOverride || requestedSvg;
@@ -1628,7 +2248,20 @@ function renderStateFile(state, svg) {
   const pendingChannelMatches = !alreadyPending || ((pendingNext.tagName === "OBJECT") === desiredObjectChannel);
 
   if (alreadyPending && !pendingChannelMatches) {
-    cancelPendingSwap();
+    cancelPendingSwap("channel-mismatch", { retainedRequest: visualRequest });
+  }
+
+  // A request that returns to the currently displayed file is terminal now,
+  // but an older different-file load may still be pending. Cancel that load
+  // before acknowledging the displayed request; otherwise its later load
+  // event can overwrite the visual after the `already-displayed` ACK.
+  if (
+    alreadyDisplayed
+    && displayedChannelMatches
+    && pendingNext
+    && !(alreadyPending && pendingChannelMatches)
+  ) {
+    cancelPendingSwap("superseded");
   }
 
   if ((alreadyDisplayed && displayedChannelMatches) || (alreadyPending && pendingChannelMatches)) {
@@ -1647,6 +2280,7 @@ function renderStateFile(state, svg) {
       // attachment descriptor, layout, and eye-tracking decision all use the
       // newest state rather than the state captured when loading began.
       pendingNext.__clawdPendingState = state;
+      pendingNext.__clawdVisualRequest = visualRequest;
       applyObjectScaleStyle(pendingNext, effectiveSvg, state);
     }
     if (alreadyDisplayed) {
@@ -1661,31 +2295,42 @@ function renderStateFile(state, svg) {
       scheduleLowPowerIdlePause();
     }
     currentIdleSvg = effectiveSvg;
+    if (alreadyDisplayed) {
+      const channel = clawdEl.tagName === "OBJECT" ? "object" : "img";
+      notifyVisualSettlement(visualRequest, effectiveSvg === visualRequest?.file
+        ? "already-displayed"
+        : "fallback", {
+        actualFile: effectiveSvg,
+        channel,
+        verified: true,
+      });
+    }
     return;
   }
 
   // Different file — cancel pending, detach, and swap
-  cancelPendingSwap();
+  cancelPendingSwap("superseded", { retainedRequest: visualRequest });
   detachEyeTracking();
 
-  swapToFile(effectiveSvg, state, lowPowerStaticImageOverride ? false : undefined);
+  swapToFile(effectiveSvg, state, lowPowerStaticImageOverride ? false : undefined, {
+    visualRequest,
+    fallbackFromObject: !!lowPowerStaticImageOverride,
+  });
   currentIdleSvg = effectiveSvg;
 }
 
-function refreshCurrentStateForLowPowerStaticImage() {
-  if (!currentState || !currentRequestedSvg) return;
-  if (!hasLowPowerStaticImageOverride(currentState, currentRequestedSvg)) return;
-  renderStateFile(currentState, currentRequestedSvg);
-}
-
 // --- State change → switch animation (preload + instant swap) ---
-window.electronAPI.onStateChange((state, svg) => {
-  renderStateFile(state, svg);
+window.electronAPI.onStateChange((requestOrState, legacySvg) => {
+  renderStateFile(requestOrState, legacySvg);
 });
 
 // Kimi CLI permission hold: re-trigger the current animation so it loops
 // while the user is reviewing the permission prompt.
 window.electronAPI.onKimiPermissionPulse(() => {
+  // applyResolvedDisplayState() sends the notification visual immediately
+  // before this pulse. Its pending media already owns a fresh animation
+  // timeline; replacing it here would terminally fail that generation.
+  if (pendingNext) return;
   if (clawdEl && clawdEl.isConnected && currentDisplayedSvg) {
     swapToFile(currentDisplayedSvg, currentState);
   }
@@ -2108,6 +2753,7 @@ function recoverFromSystemWake(payload) {
       }
       swapToFile(wakeContext.wakeSvg, wakeContext.wakeState, true, {
         allowImageFallback: false,
+        forceDocumentReload: true,
         onReady: finishWakeEyeObjectReload,
         onError: (reason) => {
           if (pendingSystemWakeId !== wakeContext.id) return;

@@ -124,8 +124,33 @@ function isQwenAgentCommandLine(cmd) {
     || /(^|[\s"'/])qwen(\.js)?($|[\s"'/])/.test(normalized);
 }
 
-function applyLocalProcessFields(body, resolve) {
-  const { stablePid, agentPid, detectedEditor, pidChain, tmuxSocket, tmuxClient } = resolve();
+// #634: lifecycle for the shared resolver's cross-process pid cache. Stop is
+// deliberately NOT "end" (turn completion, not session end). PermissionRequest
+// falls through to "event" like any other mid-session hook.
+const EVENT_TO_LIFECYCLE = {
+  SessionStart: "start",
+  UserPromptSubmit: "prompt",
+  SessionEnd: "end",
+};
+
+// cacheable keys off the RAW session id: normalizeQwenSessionId prefixes, so
+// its "qwen-code:default" fallback would defeat the #583 same-key guard; a
+// literal raw "default" is rejected for the same reason.
+function pidCacheContext(hookName, payload, body) {
+  const raw = payload && payload.session_id != null && payload.session_id !== ""
+    ? String(payload.session_id)
+    : "";
+  return {
+    namespace: "qwen-code",
+    sessionId: body.session_id,
+    cacheCwd: body.cwd || "",
+    lifecycle: EVENT_TO_LIFECYCLE[hookName] || "event",
+    cacheable: !!raw && raw !== "default" && !!body.cwd,
+  };
+}
+
+function applyLocalProcessFields(body, resolve, ctx) {
+  const { stablePid, agentPid, detectedEditor, pidChain, tmuxSocket, tmuxClient } = resolve(ctx);
   if (Number.isFinite(stablePid) && stablePid > 0) body.source_pid = Math.floor(stablePid);
   if (detectedEditor) body.editor = detectedEditor;
   if (Number.isFinite(agentPid) && agentPid > 0) body.agent_pid = Math.floor(agentPid);
@@ -173,7 +198,7 @@ function buildStateBody(hookName, payload, resolve, options = {}) {
     applyOrcaPaneKey(body, options.env);
   } else {
     applyWslSourceFields(body);
-    applyLocalProcessFields(body, resolve);
+    applyLocalProcessFields(body, resolve, pidCacheContext(hookName, payload, body));
   }
 
   return body;
@@ -259,7 +284,7 @@ function buildPermissionBody(hookName, payload, resolve, options = {}) {
     applyOrcaPaneKey(body, options.env);
   } else {
     applyWslSourceFields(body);
-    applyLocalProcessFields(body, resolve);
+    applyLocalProcessFields(body, resolve, pidCacheContext(hookName, payload, body));
   }
   return body;
 }

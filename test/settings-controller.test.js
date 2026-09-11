@@ -7,7 +7,12 @@ const path = require("path");
 const os = require("os");
 
 const prefs = require("../src/prefs");
+const {
+  createCodexAutoStartGateEvaluator,
+  isCodexAutoStartEnabled,
+} = require("../src/agent-gate");
 const { createSettingsController } = require("../src/settings-controller");
+const { commandRegistry, updateRegistry } = require("../src/settings-actions");
 
 const tempDirs = [];
 function makeTempPath() {
@@ -15,6 +20,16 @@ function makeTempPath() {
   tempDirs.push(dir);
   return path.join(dir, "clawd-prefs.json");
 }
+
+function createDeferred() {
+  const deferred = {};
+  deferred.promise = new Promise((resolve, reject) => {
+    deferred.resolve = resolve;
+    deferred.reject = reject;
+  });
+  return deferred;
+}
+
 afterEach(() => {
   while (tempDirs.length) {
     fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
@@ -31,6 +46,7 @@ describe("createSettingsController construction", () => {
     assert.strictEqual(ctrl.get("lang"), "en");
     assert.strictEqual(ctrl.get("soundMuted"), false);
     assert.strictEqual(ctrl.isLocked(), false);
+    assert.strictEqual(ctrl.hasReadFailure(), false);
   });
 
   it("respects locked state from future-version files", () => {
@@ -41,9 +57,38 @@ describe("createSettingsController construction", () => {
     try {
       const ctrl = createSettingsController({ prefsPath: p });
       assert.strictEqual(ctrl.isLocked(), true);
+      assert.strictEqual(ctrl.hasReadFailure(), false);
     } finally {
       console.warn = originalWarn;
     }
+  });
+});
+
+describe("quota ring display mode persistence", () => {
+  it("accepts remaining through the controller and restores it after relaunch", async () => {
+    const p = makeTempPath();
+    const ctrl = createSettingsController({ prefsPath: p });
+
+    const result = await ctrl.applyUpdate("quotaRingDisplayMode", "remaining");
+
+    assert.deepStrictEqual(result, { status: "ok" });
+    assert.strictEqual(ctrl.get("quotaRingDisplayMode"), "remaining");
+    assert.strictEqual(prefs.load(p).snapshot.quotaRingDisplayMode, "remaining");
+
+    const relaunched = createSettingsController({ prefsPath: p });
+    assert.strictEqual(relaunched.get("quotaRingDisplayMode"), "remaining");
+  });
+});
+
+describe("Kimi quota collection opt-in", () => {
+  it("persists only through its command path", async () => {
+    const prefsPath = makeTempPath();
+    const ctrl = createSettingsController({ prefsPath });
+    const enabled = await ctrl.applyCommand("setKimiQuotaCollectionEnabled", { enabled: true });
+    assert.strictEqual(enabled.status, "ok");
+    assert.strictEqual(ctrl.get("kimiQuotaCollectionEnabled"), true);
+    const relaunched = createSettingsController({ prefsPath });
+    assert.strictEqual(relaunched.get("kimiQuotaCollectionEnabled"), true);
   });
 });
 
@@ -148,6 +193,7 @@ describe("permission automation safe startup persistence", () => {
       ctrl.applyBulk({ permissionAutomationAutoToolsWarningDismissed: true }),
       ctrl.hydrate({ permissionAutomationUnattendedWarningDismissed: true }),
       ctrl.applyUpdate("autoApproveAllPermissions", true),
+      ctrl.applyUpdate("kimiQuotaCollectionEnabled", true),
     ];
     for (const result of cases) {
       assert.strictEqual((await result).status, "error");
@@ -163,6 +209,277 @@ describe("permission automation safe startup persistence", () => {
       false
     );
     assert.strictEqual(ctrl.get("autoApproveAllPermissions"), false);
+    assert.strictEqual(ctrl.get("kimiQuotaCollectionEnabled"), false);
+  });
+});
+
+describe("Codex auto-start gate commit ordering", () => {
+  function createFailingController(snapshot, gateWrites) {
+    const writeCodexAutoStartGate = (enabled) => {
+      gateWrites.push(enabled);
+      return true;
+    };
+    const ctrl = createSettingsController({
+      prefsPath: "unused-in-memory-path",
+      prefs: {
+        load: () => ({ snapshot, locked: false }),
+        save: () => {
+          throw new Error("prefs read only");
+        },
+      },
+      injectedDeps: {
+        syncIntegrationForAgent: async () => ({ status: "ok" }),
+        startMonitorForAgent() {},
+        writeCodexAutoStartGate,
+      },
+    });
+    // Mirrors main.js: an enabled gate is published only from the agents
+    // subscriber, after the controller has persisted and committed the store.
+    ctrl.subscribeKey("agents", (_agents, nextSnapshot) => {
+      writeCodexAutoStartGate(isCodexAutoStartEnabled(nextSnapshot));
+    });
+    return ctrl;
+  }
+
+  it("does not enable the external gate when enabling Codex cannot persist", async () => {
+    const snapshot = prefs.getDefaults();
+    snapshot.agents.codex = {
+      ...snapshot.agents.codex,
+      integrationInstalled: true,
+      enabled: false,
+    };
+    const gateWrites = [];
+    const ctrl = createFailingController(snapshot, gateWrites);
+
+    const result = await ctrl.applyCommand("setAgentFlag", {
+      agentId: "codex",
+      flag: "enabled",
+      value: true,
+    });
+
+    assert.strictEqual(result.status, "error");
+    assert.match(result.message, /prefs read only/);
+    assert.strictEqual(ctrl.get("agents").codex.enabled, false);
+    assert.deepStrictEqual(gateWrites, []);
+  });
+
+  it("does not enable the external gate when installing Codex cannot persist", async () => {
+    const snapshot = prefs.getDefaults();
+    snapshot.agents.codex = {
+      ...snapshot.agents.codex,
+      integrationInstalled: false,
+      enabled: false,
+    };
+    const gateWrites = [];
+    const ctrl = createFailingController(snapshot, gateWrites);
+
+    const result = await ctrl.applyCommand("installAgentIntegration", {
+      agentId: "codex",
+    });
+
+    assert.strictEqual(result.status, "error");
+    assert.match(result.message, /prefs read only/);
+    assert.strictEqual(ctrl.get("agents").codex.integrationInstalled, false);
+    assert.strictEqual(ctrl.get("agents").codex.enabled, false);
+    assert.deepStrictEqual(gateWrites, []);
+  });
+
+  it("does not publish an enabled gate from future-version locked prefs", async () => {
+    const snapshot = prefs.getDefaults();
+    snapshot.agents.codex = {
+      ...snapshot.agents.codex,
+      integrationInstalled: true,
+      enabled: false,
+    };
+    const gateWrites = [];
+    const ctrl = createSettingsController({
+      prefsPath: "unused-locked-path",
+      prefs: {
+        load: () => ({ snapshot, locked: true }),
+        save: () => {
+          throw new Error("locked prefs must not be persisted");
+        },
+      },
+      injectedDeps: {
+        syncIntegrationForAgent: async () => ({ status: "ok" }),
+        startMonitorForAgent() {},
+        writeCodexAutoStartGate(enabled) {
+          gateWrites.push(enabled);
+          return true;
+        },
+      },
+    });
+    ctrl.subscribeKey("agents", (_agents, nextSnapshot) => {
+      if (ctrl.isLocked()) return;
+      gateWrites.push(isCodexAutoStartEnabled(nextSnapshot));
+    });
+
+    const result = await ctrl.applyCommand("setAgentFlag", {
+      agentId: "codex",
+      flag: "enabled",
+      value: true,
+    });
+
+    assert.strictEqual(result.status, "ok");
+    assert.strictEqual(ctrl.get("agents").codex.enabled, true);
+    assert.deepStrictEqual(gateWrites, []);
+  });
+
+  it("does not publish an enabled gate when installing under future-version locked prefs", async () => {
+    const snapshot = prefs.getDefaults();
+    snapshot.agents.codex = {
+      ...snapshot.agents.codex,
+      integrationInstalled: false,
+      enabled: false,
+    };
+    const gateWrites = [];
+    const ctrl = createSettingsController({
+      prefsPath: "unused-locked-path",
+      prefs: {
+        load: () => ({ snapshot, locked: true }),
+        save: () => {
+          throw new Error("locked prefs must not be persisted");
+        },
+      },
+      injectedDeps: {
+        syncIntegrationForAgent: async () => ({ status: "ok" }),
+        startMonitorForAgent() {},
+        writeCodexAutoStartGate(enabled) {
+          gateWrites.push(enabled);
+          return true;
+        },
+      },
+    });
+    ctrl.subscribeKey("agents", (_agents, nextSnapshot) => {
+      if (ctrl.isLocked()) return;
+      gateWrites.push(isCodexAutoStartEnabled(nextSnapshot));
+    });
+
+    const result = await ctrl.applyCommand("installAgentIntegration", {
+      agentId: "codex",
+    });
+
+    assert.strictEqual(result.status, "ok");
+    assert.strictEqual(ctrl.get("agents").codex.integrationInstalled, true);
+    assert.strictEqual(ctrl.get("agents").codex.enabled, true);
+    assert.deepStrictEqual(gateWrites, []);
+  });
+
+  it("publishes true only after the dedicated preference commits", async () => {
+    const gateWrites = [];
+    const ctrl = createSettingsController({
+      prefsPath: makeTempPath(),
+      injectedDeps: {
+        writeCodexAutoStartGate(enabled) {
+          gateWrites.push(enabled);
+          return true;
+        },
+      },
+    });
+    ctrl.subscribeKey("autoStartWithCodex", (_enabled, nextSnapshot) => {
+      gateWrites.push(isCodexAutoStartEnabled(nextSnapshot));
+    });
+
+    const enabled = await ctrl.applyUpdate("autoStartWithCodex", true);
+    assert.strictEqual(enabled.status, "ok");
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), true);
+    assert.deepStrictEqual(gateWrites, [false, true]);
+
+    gateWrites.length = 0;
+    const disabled = await ctrl.applyUpdate("autoStartWithCodex", false);
+    assert.strictEqual(disabled.status, "ok");
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), false);
+    assert.deepStrictEqual(gateWrites, [false, false]);
+  });
+
+  it("keeps the preference unchanged when the fail-closed pre-commit write fails", async () => {
+    const ctrl = createSettingsController({
+      prefsPath: makeTempPath(),
+      injectedDeps: {
+        writeCodexAutoStartGate: () => false,
+      },
+    });
+
+    const result = await ctrl.applyUpdate("autoStartWithCodex", true);
+    assert.strictEqual(result.status, "error");
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), false);
+  });
+
+  it("never reopens the gate after startup authority was lost", async () => {
+    const p = makeTempPath();
+    fs.writeFileSync(p, JSON.stringify({
+      version: prefs.CURRENT_VERSION,
+      autoStartWithCodex: true,
+      agents: {
+        codex: { integrationInstalled: "yes", enabled: true },
+      },
+    }));
+    const loaded = prefs.load(p);
+    assert.strictEqual(loaded.codexAutoStartAuthoritative, false);
+
+    const evaluateGate = createCodexAutoStartGateEvaluator({
+      authorityLost: loaded.codexAutoStartAuthoritative === false,
+    });
+    const gateWrites = [evaluateGate(loaded.snapshot)];
+    const ctrl = createSettingsController({ prefsPath: p, loadResult: loaded });
+    ctrl.subscribeKey("agents", (_agents, nextSnapshot) => {
+      gateWrites.push(evaluateGate(nextSnapshot));
+    });
+
+    const result = await ctrl.applyCommand("setAgentFlag", {
+      agentId: "claude-code",
+      flag: "notificationHookEnabled",
+      value: false,
+    });
+
+    assert.strictEqual(result.status, "ok");
+    assert.deepStrictEqual(gateWrites, [false, false]);
+    assert.strictEqual(gateWrites.includes(true), false);
+  });
+
+  it("serializes the preference behind an in-flight Codex uninstall", async () => {
+    assert.strictEqual(updateRegistry.autoStartWithCodex.lockKey, "agentIntegration");
+    assert.strictEqual(
+      updateRegistry.autoStartWithCodex.lockKey,
+      commandRegistry.uninstallAgentIntegration.lockKey
+    );
+
+    const uninstallStarted = createDeferred();
+    const finishUninstall = createDeferred();
+    const gateWrites = [];
+    const ctrl = createSettingsController({
+      prefsPath: makeTempPath(),
+      injectedDeps: {
+        writeCodexAutoStartGate(enabled) {
+          gateWrites.push(enabled);
+          return true;
+        },
+        uninstallIntegrationForAgent() {
+          uninstallStarted.resolve();
+          return finishUninstall.promise;
+        },
+      },
+    });
+    const publishEffectiveGate = (_value, nextSnapshot) => {
+      gateWrites.push(isCodexAutoStartEnabled(nextSnapshot));
+    };
+    ctrl.subscribeKey("agents", publishEffectiveGate);
+    ctrl.subscribeKey("autoStartWithCodex", publishEffectiveGate);
+
+    const uninstall = ctrl.applyCommand("uninstallAgentIntegration", { agentId: "codex" });
+    await uninstallStarted.promise;
+    const enablePreference = ctrl.applyUpdate("autoStartWithCodex", true);
+
+    await Promise.resolve();
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), false);
+    assert.deepStrictEqual(gateWrites, [false]);
+
+    finishUninstall.resolve({ status: "ok" });
+    assert.strictEqual((await uninstall).status, "ok");
+    assert.strictEqual((await enablePreference).status, "ok");
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), true);
+    assert.strictEqual(ctrl.get("agents").codex.integrationInstalled, false);
+    assert.strictEqual(gateWrites.includes(true), false);
   });
 });
 
@@ -412,6 +729,26 @@ describe("applyUpdate", () => {
     assert.strictEqual(prefs.load(p).snapshot.tutorialSeen, true);
   });
 
+  it("persists Settings window bounds through the controller-only write path", async () => {
+    const p = makeTempPath();
+    const ctrl = createSettingsController({ prefsPath: p });
+    const bounds = { x: -1180, y: 90, width: 920, height: 680 };
+    const r = await ctrl.applyUpdate("settingsWindowBounds", bounds);
+    assert.strictEqual(r.status, "ok");
+    assert.deepStrictEqual(ctrl.get("settingsWindowBounds"), bounds);
+    assert.deepStrictEqual(prefs.load(p).snapshot.settingsWindowBounds, bounds);
+  });
+
+
+  it("persists Dashboard window bounds through the controller-only write path", async () => {
+    const p = makeTempPath();
+    const ctrl = createSettingsController({ prefsPath: p });
+    const bounds = { x: 240, y: 130, width: 640, height: 720 };
+    const r = await ctrl.applyUpdate("dashboardWindowBounds", bounds);
+    assert.strictEqual(r.status, "ok");
+    assert.deepStrictEqual(ctrl.get("dashboardWindowBounds"), bounds);
+    assert.deepStrictEqual(prefs.load(p).snapshot.dashboardWindowBounds, bounds);
+  });
 
   it("persists Codex hook health notification prefs through applyUpdate", async () => {
     const p = makeTempPath();
@@ -425,6 +762,15 @@ describe("applyUpdate", () => {
     const loaded = prefs.load(p).snapshot;
     assert.strictEqual(loaded.codexHookHealthLastNotified, "feature-disabled");
     assert.strictEqual(loaded.codexHookHealthNotifyEnabled, false);
+  });
+
+  it("persists the Telegram migration nudge signature through applyUpdate", async () => {
+    const p = makeTempPath();
+    const ctrl = createSettingsController({ prefsPath: p });
+    const result = await ctrl.applyUpdate("telegramMigrationLastNotified", "legacy-migration");
+    assert.strictEqual(result.status, "ok");
+    assert.strictEqual(ctrl.get("telegramMigrationLastNotified"), "legacy-migration");
+    assert.strictEqual(prefs.load(p).snapshot.telegramMigrationLastNotified, "legacy-migration");
   });
   it("enforces cross-field constraints (showTray/showDock)", async () => {
     const ctrl = createSettingsController({
@@ -737,6 +1083,159 @@ describe("applyCommand", () => {
   });
 });
 
+describe("Feishu resolved-approver commit linearization", () => {
+  function createFixture({ failPersistence = false } = {}) {
+    const entered = createDeferred();
+    const release = createDeferred();
+    const saves = [];
+    let subscriberCalls = 0;
+    let secretsRevision = 1;
+    let secrets = {
+      credentialPlatform: "feishu",
+      appId: "cli_saved",
+      appSecret: "saved-secret",
+    };
+    const gate = async () => {
+      entered.resolve();
+      await release.promise;
+      return { status: "ok" };
+    };
+    gate.lockKey = "feishuApproval";
+    const ctrl = createSettingsController({
+      prefsPath: "in-memory-settings",
+      prefs: {
+        load: () => ({
+          snapshot: {
+            ...prefs.getDefaults(),
+            feishuApproval: {
+              ...prefs.getDefaults().feishuApproval,
+              platform: "feishu",
+            },
+          },
+          locked: false,
+        }),
+        save: (_path, snapshot) => {
+          if (failPersistence) throw new Error("synthetic disk failure");
+          saves.push(snapshot);
+        },
+      },
+      commands: { ...commandRegistry, gate },
+      injectedDeps: {
+        getFeishuApprovalSecrets: () => ({ ...secrets }),
+        getFeishuApprovalSecretsRevision: () => secretsRevision,
+        writeFeishuApprovalSecrets: (next) => {
+          secrets = { ...next };
+          secretsRevision += 1;
+          return { status: "ok", secretsStored: true };
+        },
+      },
+    });
+    ctrl.subscribe(() => { subscriberCalls += 1; });
+    return {
+      ctrl,
+      entered,
+      release,
+      saves,
+      subscriberCalls: () => subscriberCalls,
+      commitPayload: (signal) => ({
+        signal,
+        approverId: "ou_resolved",
+        platform: "feishu",
+        appId: "cli_saved",
+        secretsRevision: 1,
+      }),
+    };
+  }
+
+  for (const [label, patch, field, expected] of [
+    ["enabled", { enabled: true }, "enabled", true],
+    ["timeout", { connectionTimeoutSeconds: 30 }, "connectionTimeoutSeconds", 30],
+  ]) {
+    for (const order of ["patch-first", "commit-first"]) {
+      it(`preserves ${label} when ${order} under the Feishu lock`, async () => {
+        const fixture = createFixture();
+        const signal = new AbortController().signal;
+        const gate = fixture.ctrl.applyCommand("gate");
+        await fixture.entered.promise;
+        const operations = order === "patch-first"
+          ? [
+              fixture.ctrl.applyCommand("feishuApproval.updateConfig", patch),
+              fixture.ctrl.applyCommand("feishuApproval.commitResolvedApprover", fixture.commitPayload(signal)),
+            ]
+          : [
+              fixture.ctrl.applyCommand("feishuApproval.commitResolvedApprover", fixture.commitPayload(signal)),
+              fixture.ctrl.applyCommand("feishuApproval.updateConfig", patch),
+            ];
+        fixture.release.resolve();
+        await gate;
+        const results = await Promise.all(operations);
+        assert.equal(results.every((result) => result.status === "ok"), true);
+        assert.equal(fixture.ctrl.get("feishuApproval")[field], expected);
+        assert.equal(fixture.ctrl.get("feishuApproval").approverId, "ou_resolved");
+      });
+    }
+  }
+
+  it("rejects a commit cancelled while it waits for the Feishu lock", async () => {
+    const fixture = createFixture();
+    const abort = new AbortController();
+    const gate = fixture.ctrl.applyCommand("gate");
+    await fixture.entered.promise;
+    const commit = fixture.ctrl.applyCommand(
+      "feishuApproval.commitResolvedApprover",
+      fixture.commitPayload(abort.signal),
+    );
+    abort.abort();
+    fixture.release.resolve();
+    await gate;
+
+    assert.deepStrictEqual(await commit, { status: "error", code: "lookup-cancelled" });
+    assert.equal(fixture.ctrl.get("feishuApproval").approverId, "");
+    assert.equal(fixture.saves.length, 0);
+    assert.equal(fixture.subscriberCalls(), 0);
+  });
+
+  it("rejects a queued commit after saved credentials change", async () => {
+    const fixture = createFixture();
+    const signal = new AbortController().signal;
+    const gate = fixture.ctrl.applyCommand("gate");
+    await fixture.entered.promise;
+    const credentials = fixture.ctrl.applyCommand("feishuApproval.setSecrets", {
+      appId: "cli_replaced",
+      appSecret: "replacement-secret",
+      confirmReplace: true,
+    });
+    const commit = fixture.ctrl.applyCommand(
+      "feishuApproval.commitResolvedApprover",
+      fixture.commitPayload(signal),
+    );
+    fixture.release.resolve();
+    await gate;
+
+    assert.equal((await credentials).status, "ok");
+    assert.deepStrictEqual(await commit, { status: "error", code: "lookup-credentials-changed" });
+    assert.equal(fixture.ctrl.get("feishuApproval").approverId, "");
+  });
+
+  it("does not publish a successful commit when persistence fails", async () => {
+    const fixture = createFixture({ failPersistence: true });
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    let result;
+    try {
+      result = await fixture.ctrl.applyCommand(
+        "feishuApproval.commitResolvedApprover",
+        fixture.commitPayload(new AbortController().signal),
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.equal(result.status, "error");
+    assert.equal(fixture.ctrl.get("feishuApproval").approverId, "");
+    assert.equal(fixture.subscriberCalls(), 0);
+  });
+});
+
 describe("subscribe / subscribeKey", () => {
   it("subscribeKey only fires for matching key changes", async () => {
     const ctrl = createSettingsController({ prefsPath: makeTempPath() });
@@ -970,6 +1469,103 @@ describe("locked controller (future-version files)", () => {
     const onDisk = JSON.parse(fs.readFileSync(p, "utf8"));
     assert.strictEqual(onDisk.version, 999);
     assert.strictEqual(onDisk.lang, "en");
+  });
+});
+
+describe("unreadable prefs safe mode", () => {
+  function createControllerWithReadFailure(p, injectedDeps = {}) {
+    const originalReadFileSync = fs.readFileSync;
+    const originalWarn = console.warn;
+    fs.readFileSync = (target, ...args) => {
+      if (target === p) {
+        const err = new Error("injected prefs read failure");
+        err.code = "EACCES";
+        throw err;
+      }
+      return originalReadFileSync(target, ...args);
+    };
+    console.warn = () => {};
+    try {
+      return createSettingsController({ prefsPath: p, injectedDeps });
+    } finally {
+      fs.readFileSync = originalReadFileSync;
+      console.warn = originalWarn;
+    }
+  }
+
+  it("blocks updates and commands before any external effect on every platform", async () => {
+    const p = makeTempPath();
+    const original = JSON.stringify({
+      version: prefs.CURRENT_VERSION,
+      lang: "en",
+      agents: {
+        "qwen-code": {
+          integrationInstalled: false,
+          enabled: false,
+        },
+      },
+    });
+    fs.writeFileSync(p, original, "utf8");
+
+    const calls = [];
+    const ctrl = createControllerWithReadFailure(p, {
+      setOpenAtLogin: (enabled) => calls.push(["openAtLogin", enabled]),
+      syncIntegrationForAgent: async (agentId) => {
+        calls.push(["sync", agentId]);
+        return { status: "ok" };
+      },
+      startMonitorForAgent: (agentId) => calls.push(["monitor", agentId]),
+    });
+
+    assert.strictEqual(ctrl.isLocked(), true);
+    assert.strictEqual(ctrl.hasReadFailure(), true);
+
+    const pureUpdate = ctrl.applyUpdate("lang", "zh");
+    assert.strictEqual(pureUpdate.status, "error");
+    assert.strictEqual(pureUpdate.code, "prefs-read-failure");
+
+    const effectUpdate = ctrl.applyUpdate("openAtLogin", true);
+    assert.strictEqual(effectUpdate.status, "error");
+    assert.strictEqual(effectUpdate.code, "prefs-read-failure");
+
+    const bulk = ctrl.applyBulk({ soundMuted: true, showTray: false });
+    assert.strictEqual(bulk.status, "error");
+    assert.strictEqual(bulk.code, "prefs-read-failure");
+
+    const command = await ctrl.applyCommand("installAgentIntegration", {
+      agentId: "qwen-code",
+    });
+    assert.strictEqual(command.status, "error");
+    assert.strictEqual(command.code, "prefs-read-failure");
+
+    assert.deepStrictEqual(calls, [], "safe mode must stop external effects before they start");
+    assert.strictEqual(ctrl.get("lang"), "en");
+    assert.strictEqual(ctrl.get("openAtLogin"), false);
+    assert.strictEqual(ctrl.get("agents")["qwen-code"].integrationInstalled, false);
+    assert.strictEqual(fs.readFileSync(p, "utf8"), original);
+  });
+
+  it("allows side-effect-free startup hydration without making prefs writable", () => {
+    const p = makeTempPath();
+    const original = JSON.stringify({ version: prefs.CURRENT_VERSION, lang: "en" });
+    fs.writeFileSync(p, original, "utf8");
+    const ctrl = createControllerWithReadFailure(p);
+
+    const result = ctrl.hydrate({
+      openAtLogin: true,
+      openAtLoginHydrated: true,
+    });
+
+    assert.strictEqual(result.status, "ok");
+    assert.strictEqual(ctrl.get("openAtLogin"), true);
+    assert.strictEqual(ctrl.get("openAtLoginHydrated"), true);
+    assert.deepStrictEqual(ctrl.persist(), {
+      status: "ok",
+      noop: true,
+      locked: true,
+      readFailure: true,
+    });
+    assert.strictEqual(fs.readFileSync(p, "utf8"), original);
   });
 });
 

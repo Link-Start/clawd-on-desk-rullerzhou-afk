@@ -132,6 +132,42 @@ describe("permission session automation live gate", () => {
     }
   });
 
+  it("allows an interactive Codex subagent to inherit automation despite its state-only headless marker", () => {
+    const { permission, entry } = makeRuntime({
+      sessions: new Map([["session-live", { agentId: "codex", headless: true }]]),
+    }, {
+      agentId: "codex",
+      isCodex: true,
+      codexInteractiveSubagent: true,
+      codexSessionRole: "subagent",
+      codexAgentNickname: "Halley",
+      subagentId: "session-live",
+      headless: false,
+      interaction: classifyPermissionInteraction({ agentId: "codex", toolName: "Bash" }),
+    });
+
+    assert.strictEqual(
+      permission.canAutoResolvePendingPermission(entry, {
+        sessionOnly: true,
+        mode: "auto-tools",
+      }),
+      true
+    );
+
+    const payload = permission.buildPermissionBubblePayload(entry);
+    assert.strictEqual(payload.isCodexSubagent, true);
+    assert.strictEqual(payload.codexAgentNickname, "Halley");
+
+    entry.headless = true;
+    assert.strictEqual(
+      permission.canAutoResolvePendingPermission(entry, {
+        sessionOnly: true,
+        mode: "auto-tools",
+      }),
+      false
+    );
+  });
+
   it("uses an explicit session mode and never reads the global mode for session-only checks", () => {
     const { permission, entry } = makeRuntime({
       getPermissionAutomationMode: () => "auto-tools",
@@ -198,6 +234,8 @@ describe("permission session automation live gate", () => {
     );
     assert.match(source, /data\.canOfferSessionTrust === true/);
     assert.match(source, /decide\("session-trust"\)/);
+    assert.match(source, /data\.isCodexSubagent/);
+    assert.match(source, /data\.codexAgentNickname \|\| bubbleText\(data\.lang, "agent"\)/);
     assert.doesNotMatch(source, /sessionAutomationIdentity/);
   });
 });

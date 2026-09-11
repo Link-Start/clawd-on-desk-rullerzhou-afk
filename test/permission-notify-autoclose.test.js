@@ -44,6 +44,7 @@ function createPermissionHarness({
   const createdWindows = [];
   class FakeBrowserWindow {
     constructor() {
+      if (loadBehavior === "constructor-throw") throw new Error("BrowserWindow unavailable");
       this.destroyed = false;
       this.bounds = null;
       this._closedHandler = null;
@@ -115,6 +116,7 @@ function createPermissionHarness({
   const permissionFactory = loadPermissionWithElectron(fakeElectron);
   let notificationAutoCloseMs = 10_000;
   const focused = [];
+  const slackAnnouncements = [];
   const api = permissionFactory({
     win: { isDestroyed() { return false; } },
     permDebugLog: logPath,
@@ -139,6 +141,7 @@ function createPermissionHarness({
     getHudReservedOffset: () => 0,
     repositionUpdateBubble: () => {},
     focusTerminalForSession: (...args) => focused.push(args),
+    notifySlackPermission: (payload) => slackAnnouncements.push(payload),
     guardAlwaysOnTop: () => {},
     reapplyMacVisibility: () => {},
   });
@@ -146,6 +149,7 @@ function createPermissionHarness({
   return {
     api,
     focused,
+    slackAnnouncements,
     createdWindows,
     setNotificationAutoCloseMs(value) {
       notificationAutoCloseMs = value;
@@ -290,6 +294,47 @@ describe("permission passive notify auto-close refresh", () => {
     assert.strictEqual(api.pendingPermissions.length, 0);
     assert.strictEqual(harness.focused.length, 1);
     assert.strictEqual(harness.focused[0][0], "codex-a");
+  });
+
+  it("turns a stale Codex question expansion request into native focus", () => {
+    const harness = createPermissionHarness();
+    const { api } = harness;
+    api.showCodexUserInputBubble({
+      sessionId: "codex-expand",
+      callId: "call_expand",
+      questions: [{ id: "q", question: "Pick one", options: [] }],
+      sourcePid: 42,
+      cwd: "/repo",
+    });
+    const entry = api.pendingPermissions[0];
+
+    assert.strictEqual(
+      api.handleBubbleExpanded({ sender: { __window: entry.bubble } }, true),
+      false
+    );
+    assert.strictEqual(api.pendingPermissions.length, 0);
+    assert.strictEqual(harness.focused.length, 1);
+    assert.strictEqual(harness.focused[0][0], "codex-expand");
+  });
+
+  it("dismisses a stale remote Codex expansion without focusing a local terminal", () => {
+    const harness = createPermissionHarness();
+    const { api } = harness;
+    api.showCodexUserInputBubble({
+      sessionId: "codex-remote-expand",
+      callId: "call_remote_expand",
+      questions: [{ id: "q", question: "Pick one", options: [] }],
+      host: "remote.example",
+      cwd: "/repo",
+    });
+    const entry = api.pendingPermissions[0];
+
+    assert.strictEqual(
+      api.handleBubbleExpanded({ sender: { __window: entry.bubble } }, true),
+      false
+    );
+    assert.strictEqual(api.pendingPermissions.length, 0);
+    assert.deepStrictEqual(harness.focused, []);
   });
 
   it("clears only the matching Codex user-input call", () => {
@@ -614,6 +659,15 @@ describe("interactive permission bubble fatal fallback", () => {
     };
   }
 
+  it("does not announce when BrowserWindow construction fails", () => {
+    const harness = createPermissionHarness({ loadBehavior: "constructor-throw" });
+    const { entry } = makeBlockingEntry();
+    harness.api.pendingPermissions.push(entry);
+
+    assert.throws(() => harness.api.showPermissionBubble(entry), /BrowserWindow unavailable/);
+    assert.deepStrictEqual(harness.slackAnnouncements, []);
+  });
+
   it("returns no-decision immediately when bubble.html cannot be loaded", () => {
     const harness = createPermissionHarness({ loadBehavior: "throw" });
     const { entry, response } = makeBlockingEntry();
@@ -622,6 +676,7 @@ describe("interactive permission bubble fatal fallback", () => {
     assert.doesNotThrow(() => harness.api.showPermissionBubble(entry));
     assert.strictEqual(harness.api.pendingPermissions.length, 0);
     assert.strictEqual(response.destroyed, true);
+    assert.deepStrictEqual(harness.slackAnnouncements, []);
   });
 
   it("returns no-decision when loadFile rejects asynchronously", async () => {
@@ -636,6 +691,7 @@ describe("interactive permission bubble fatal fallback", () => {
     assert.strictEqual(harness.api.pendingPermissions.length, 0);
     assert.strictEqual(response.destroyed, true);
     assert.strictEqual(response.destroyCalls, 1);
+    assert.deepStrictEqual(harness.slackAnnouncements, []);
   });
 
   it("returns no-decision when the main frame emits did-fail-load", () => {
@@ -648,6 +704,7 @@ describe("interactive permission bubble fatal fallback", () => {
     assert.strictEqual(harness.api.pendingPermissions.length, 0);
     assert.strictEqual(response.destroyed, true);
     assert.strictEqual(response.destroyCalls, 1);
+    assert.deepStrictEqual(harness.slackAnnouncements, []);
   });
 
   it("does not turn a fatal no-decision into a second deny when closed fires", () => {
@@ -694,6 +751,7 @@ describe("interactive permission bubble fatal fallback", () => {
 
     assert.strictEqual(harness.api.pendingPermissions.length, 0);
     assert.strictEqual(response.destroyed, true);
+    assert.deepStrictEqual(harness.slackAnnouncements, []);
   });
 
   it("dismisses a passive notification safely when its renderer process exits", () => {

@@ -1,5 +1,10 @@
 "use strict";
 
+const path = require("node:path");
+const { pathToFileURL } = require("node:url");
+
+const DASHBOARD_PAGE_URL = pathToFileURL(path.join(__dirname, "dashboard.html")).toString();
+
 function requiredDependency(value, name) {
   if (!value) throw new Error(`registerSessionIpc requires ${name}`);
   return value;
@@ -24,6 +29,13 @@ function registerSessionIpc(options = {}) {
     options.clearSessionAutomationGrant,
     "clearSessionAutomationGrant"
   );
+  const getDashboardWebContents = requiredDependency(
+    options.getDashboardWebContents,
+    "getDashboardWebContents"
+  );
+  const getKimiQuotaStatus = requiredDependency(options.getKimiQuotaStatus, "getKimiQuotaStatus");
+  const refreshKimiQuota = requiredDependency(options.refreshKimiQuota, "refreshKimiQuota");
+  const quickMode = options.quickMode || null;
   const disposers = [];
 
   function handle(channel, listener) {
@@ -36,8 +48,40 @@ function registerSessionIpc(options = {}) {
     disposers.push(() => ipcMain.removeListener(channel, listener));
   }
 
+  // The one owned Dashboard WebContents, its current real main frame, and the
+  // exact local page URL. Resolving through a window would break once the page
+  // lives in a WebContentsView, and loosening any of the three would widen the
+  // Kimi manual-quota capability — neither is acceptable.
+  function isTrustedDashboardEvent(event) {
+    const contents = getDashboardWebContents();
+    if (!contents) return false;
+    if (typeof contents.isDestroyed === "function" && contents.isDestroyed()) return false;
+    const frame = event && event.senderFrame;
+    return event.sender === contents
+      && !!frame
+      && frame === contents.mainFrame
+      && frame.url === DASHBOARD_PAGE_URL;
+  }
+
+  function rejectUntrustedDashboardEvent(event) {
+    return isTrustedDashboardEvent(event)
+      ? null
+      : { status: "error", reason: "untrusted-dashboard-sender" };
+  }
+
   handle("dashboard:get-snapshot", () => getSessionSnapshot());
   handle("dashboard:get-i18n", () => getI18n());
+  // Dashboard gets a narrow, secret-free manual refresh capability. The API
+  // key remains inside kimiQuotaRuntime, and only the real local Dashboard
+  // main frame may ask for status or trigger the existing refresh path.
+  handle("dashboard:get-kimi-quota-status", (event) => {
+    const rejected = rejectUntrustedDashboardEvent(event);
+    return rejected || getKimiQuotaStatus();
+  });
+  handle("dashboard:refresh-kimi-quota", (event) => {
+    const rejected = rejectUntrustedDashboardEvent(event);
+    return rejected || refreshKimiQuota();
+  });
   on("dashboard:focus-session", (_event, sessionId) =>
     focusSession(sessionId, { requestSource: "dashboard" })
   );
@@ -85,6 +129,38 @@ function registerSessionIpc(options = {}) {
     }
     return clearSessionAutomationGrant({ grantId: payload.grantId });
   });
+
+  // Dashboard keyboard mode. Every call is restricted to the trusted page and
+  // carries the exact round it belongs to; a stale round can neither activate
+  // a jump nor cancel the current one.
+  //
+  // On a platform where the mode is not offered the channels are never
+  // registered at all — there is no capability to reach, not merely a handler
+  // that answers "unsupported".
+  const quickSupported = !!(quickMode
+    && typeof quickMode.isSupported === "function"
+    && quickMode.isSupported());
+
+  if (quickSupported) {
+    const quickResult = (handlerName, event, payload) => {
+      const rejected = rejectUntrustedDashboardEvent(event);
+      if (rejected) return rejected;
+      if (typeof quickMode[handlerName] !== "function") return { status: "unsupported" };
+      return quickMode[handlerName](payload);
+    };
+
+    handle("dashboard:quick-pending", (event) => {
+      const rejected = rejectUntrustedDashboardEvent(event);
+      if (rejected) return rejected;
+      return { status: "ok", revision: quickMode.getPendingRevision() };
+    });
+    handle("dashboard:quick-enter", (event, payload) => quickResult("enter", event, payload));
+    handle("dashboard:quick-ready", (event, payload) => quickResult("ready", event, payload));
+    handle("dashboard:quick-activate", (event, payload) =>
+      quickResult("activate", event, payload));
+    handle("dashboard:quick-dismiss", (event, payload) =>
+      quickResult("dismissFromRenderer", event, payload));
+  }
 
   handle("session-hud:get-i18n", () => getI18n());
   handle("session-hud:open-session-folder", (_event, sessionId) => {

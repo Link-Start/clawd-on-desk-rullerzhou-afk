@@ -4,6 +4,7 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 
 const initPermission = require("../src/permission");
+const { FeishuApprovalClient } = require("../src/feishu-approval-client");
 const { prepareElicitationToolInput } = require("../src/server-permission-utils");
 const { classifyPermissionInteraction } = require("../src/permission-automation-policy");
 
@@ -137,10 +138,17 @@ describe("permission telegram remote approval", () => {
     assert.match(requests[0].payload.detail, /Tool: Bash/);
     assert.match(requests[0].payload.detail, /Folder: project-alpha/);
     assert.match(requests[0].payload.detail, /Summary: Run project tests/);
+    assert.deepEqual(requests[0].payload.fields, [
+      { label: "Agent", value: "claude-code" },
+      { label: "Tool", value: "Bash" },
+      { label: "Folder", value: "project-alpha" },
+      { label: "Summary", value: "Run project tests for chat <redacted:id> and <redacted:id>" },
+    ]);
     assert.equal(requests[0].payload.detail.includes("npm test"), false);
     assert.equal(requests[0].payload.detail.includes("sk-1234567890123456"), false);
     assert.equal(requests[0].payload.detail.includes("987654321"), false);
     assert.equal(requests[0].payload.detail.includes("telegram:123456789"), false);
+    assert.equal(JSON.stringify(requests[0].payload.fields).includes("sk-1234567890123456"), false);
 
     resolveApproval("allow");
     await flush();
@@ -576,6 +584,58 @@ describe("permission telegram remote approval", () => {
     });
   });
 
+  it("keeps the desktop decision and restores the terminal card after a stale Lark click", async () => {
+    const sent = [];
+    const patches = [];
+    let resolveFirstPatch;
+    const feishuClient = new FeishuApprovalClient({
+      appId: "cli_123",
+      appSecret: "secret",
+      approverId: "ou_1",
+      idType: "open_id",
+      terminalCardReplayDelayMs: 0,
+      larkClient: {
+        im: { v1: { message: {
+          create: async (payload) => {
+            sent.push(payload);
+            return { data: { message_id: "om_permission_race" } };
+          },
+          patch: async (payload) => {
+            patches.push(payload);
+            if (patches.length === 1) {
+              return new Promise((resolve) => { resolveFirstPatch = resolve; });
+            }
+            return { data: {} };
+          },
+        } } },
+      },
+    });
+    const perm = initPermission(makeCtx({
+      getRemoteApprovalClients: () => [{ name: "feishu", client: feishuClient }],
+    }));
+    const entry = makePermEntry();
+    perm.pendingPermissions.push(entry);
+
+    assert.equal(perm.maybeStartRemoteApproval(entry), true);
+    await flush();
+    const card = JSON.parse(sent[0].data.content);
+    const requestId = card.elements[1].actions[2].value.requestId;
+
+    perm.resolvePermissionEntry(entry, "allow");
+    assert.equal(JSON.parse(entry.res.captured.body).hookSpecificOutput.decision.behavior, "allow");
+    await flush();
+    assert.equal(patches.length, 1, "the desktop terminal patch starts first");
+    assert.equal(feishuClient.handleCardAction({
+      operator: { open_id: "ou_1" },
+      action: { value: { requestId, decision: "deny" } },
+    }), false, "the late Lark click must not become a second decision");
+
+    resolveFirstPatch({ data: {} });
+    await feishuClient.close();
+    assert.equal(patches.length, 2, "the stale action queues one terminal replay");
+    assert.deepEqual(patches[1], patches[0], "the replay preserves the desktop allow outcome");
+  });
+
   it("sends an approvalSummaryUnavailable card when the tool input lacks a description/summary/reason and no fallback field", () => {
     const requests = [];
     const client = {
@@ -691,6 +751,40 @@ describe("permission telegram remote approval", () => {
     const entry = makePermEntry();
     assert.equal(perm.maybeStartRemoteApproval(entry), false);
     assert.deepEqual(requests, []);
+  });
+
+  it("keeps remote approval actionable for audited interactive Codex Agent threads", () => {
+    const requests = [];
+    const client = {
+      isEnabled: () => true,
+      requestApproval: (payload) => {
+        requests.push(payload);
+        return new Promise(() => {});
+      },
+    };
+    const ctx = makeCtx({
+      getTelegramApprovalClient: () => client,
+      sessions: new Map([["sid", { cwd: "D:\\work\\project-alpha", headless: true }]]),
+    });
+    const perm = initPermission(ctx);
+    const entry = makePermEntry({
+      agentId: "codex",
+      isCodex: true,
+      codexSessionRole: "subagent",
+      codexInteractiveSubagent: true,
+      subagentId: "sid",
+      headless: false,
+    });
+    perm.pendingPermissions.push(entry);
+
+    assert.equal(perm.maybeStartRemoteApproval(entry), true);
+    assert.equal(requests.length, 1);
+
+    entry.headless = true;
+    const explicitHeadless = makePermEntry({ ...entry, _remoteApprovalStarted: false });
+    perm.pendingPermissions.push(explicitHeadless);
+    assert.equal(perm.maybeStartRemoteApproval(explicitHeadless), false);
+    assert.equal(requests.length, 1);
   });
 
   it("aborts the remote request when the user picks deny-and-focus (go to terminal)", () => {

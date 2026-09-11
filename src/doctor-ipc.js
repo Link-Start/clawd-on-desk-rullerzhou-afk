@@ -59,6 +59,10 @@ function registerDoctorIpc({
   shell,
   server,
   getPrefsSnapshot,
+  getPrefsReadFailure,
+  getPrefsRecovered,
+  getPrefsRecoveryBackupFailed,
+  getFeishuApprovalSecrets,
   getDoNotDisturb,
   getLocale,
   resolveAgentDisplayName,
@@ -73,6 +77,7 @@ function registerDoctorIpc({
       durationMs: payload && payload.durationMs,
       homeDir: os.homedir(),
       resolveAgentDisplayName,
+      getCodexHookHealth: () => getCodexHookHealth({ prefs: getPrefsSnapshot() }),
     }),
     {
       onResult: (result) => {
@@ -82,9 +87,20 @@ function registerDoctorIpc({
   );
 
   function buildDoctorResult() {
+    let feishuApprovalSecrets = {};
+    try {
+      feishuApprovalSecrets = typeof getFeishuApprovalSecrets === "function"
+        ? getFeishuApprovalSecrets()
+        : {};
+    } catch {}
     lastDoctorResult = runDoctorChecks({
       server,
       prefs: getPrefsSnapshot(),
+      prefsReadFailure: typeof getPrefsReadFailure === "function" && getPrefsReadFailure() === true,
+      prefsRecovered: typeof getPrefsRecovered === "function" && getPrefsRecovered() === true,
+      prefsRecoveryBackupFailed: typeof getPrefsRecoveryBackupFailed === "function"
+        && getPrefsRecoveryBackupFailed() === true,
+      feishuApprovalSecrets,
       doNotDisturb: getDoNotDisturb(),
       getRemoteSshStatuses,
     });

@@ -389,6 +389,25 @@ describe("session HUD layout", () => {
     assert.strictEqual(evaluateBaseEligible({ snapshot, showQuota: true }), true);
   });
 
+  it("does not make the Orbit eligible for Dashboard-only Spark quota", () => {
+    const snapshot = {
+      sessions: [],
+      accountQuota: [{
+        codexSparkQuota: {
+          group: {
+            codexWeekly: {
+              usedPercent: 7,
+              resetAt: Date.now() + 3600000,
+            },
+          },
+          updatedAt: 1,
+        },
+      }],
+    };
+    assert.strictEqual(countQuotaCoins(snapshot, true), 0);
+    assert.strictEqual(evaluateBaseEligible({ snapshot, showQuota: true }), false);
+  });
+
   it("the quota ring is base-eligible independently of the Session HUD master", () => {
     const quotaOnly = {
       sessions: [],
@@ -620,9 +639,32 @@ describe("session HUD v5 three-state runtime contracts (source-level)", () => {
       "module return must expose revealFromPet/handlePinnedChanged/clearReveal");
   });
 
+  it("exposes a ring-only reposition path for post-bubble avoidance", () => {
+    assert.match(src, /function repositionQuotaRing\(\)/);
+    assert.match(src, /repositionSessionHud,\s*\n\s*repositionQuotaRing,/);
+  });
+
   it("snapshot to renderer no longer includes hudAutoHide", () => {
     assert.ok(!/hudAutoHide:/.test(src),
       "session-hud must not send hudAutoHide in snapshot");
+  });
+
+  it("sends only the supported quota display modes to the ring renderer", () => {
+    assert.match(
+      src,
+      /displayMode:\s*ctx\.quotaRingDisplayMode === "remaining" \? "remaining" : "used"/
+    );
+  });
+
+  it("wires the persisted quota display mode through main's runtime mirror", () => {
+    const mainSrc = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
+    assert.match(mainSrc, /let quotaRingDisplayMode = _settingsController\.get\("quotaRingDisplayMode"\)/);
+    assert.match(mainSrc, /get quotaRingDisplayMode\(\) \{ return quotaRingDisplayMode; \}/);
+    assert.match(mainSrc, /quotaRingDisplayMode: \(v\) => \{ quotaRingDisplayMode = v; \}/);
+  });
+
+  it("does not create or manage a quota hover-card window", () => {
+    assert.doesNotMatch(src, /quotaTooltip|quota-tooltip|preload-quota-tooltip/);
   });
 
   it("feeds visible permission and update bubble bounds into Orbit avoidance", () => {

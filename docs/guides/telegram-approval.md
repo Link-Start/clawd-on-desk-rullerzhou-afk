@@ -7,8 +7,9 @@ permission bubbles. When a supported agent asks for tool permission, Clawd keeps
 the local desktop bubble and also sends an approval card to your Telegram bot.
 The first explicit Allow or Deny decision resolves the same pending permission.
 
-This is approval-only. It does not create a Telegram chat bridge, remote shell,
-or prompt-submission path.
+The approval path does not create a remote shell or silently submit prompts.
+Completion notifications and Direct Send are separate opt-in Telegram features;
+their formatting does not change the approval decision policy described here.
 
 ## Supported Paths
 
@@ -60,6 +61,36 @@ button stay disabled until token and recipient are in place.
    After activation, **Send test** remains available for an ordinary
    connectivity check.
 
+### Verification failures
+
+For a new or currently disabled setup, a failed verification returns the
+Enable switch to off and leaves an actionable red status on the Telegram card.
+Legacy-upgrade users instead remain on the migration-required panel described
+below. Neither path silently enables Telegram or revives the retired transport.
+
+Use the status message to choose the next check:
+
+- `401`: re-check or replace the bot token.
+- `403`: send `/start` to the bot from the configured user, make sure the bot
+  is not blocked, and re-check the recipient.
+- `400` or a missing chat: use the numeric Telegram user id and start a private
+  chat with the bot before retrying.
+- `409`: remove an existing webhook or stop the process on another machine,
+  another Clawd profile, or another bot integration that polls the same token.
+  A dedicated bot avoids both conflicts.
+- `429`: wait before retrying.
+- Network failure: check Telegram reachability, the system proxy, and any
+  `CLAWD_TG_PROXY` override.
+- Timeout: tap the standalone verification card within 60 seconds. If it was
+  already tapped, also check the network or proxy because Clawd may not have
+  received the callback.
+
+`telegram proxy resolved` in `permission-debug.log` only records the selected
+proxy route before the Bot API request. It does not prove that Telegram accepted
+the token or request. Terminal verification failures are logged with allowlisted
+outcome and error-class fields; those terminal lines do not include tokens, chat
+ids, proxy addresses, or Telegram response bodies.
+
 ## Runtime Behavior
 
 - The desktop permission bubble remains the local fallback.
@@ -70,6 +101,26 @@ button stay disabled until token and recipient are in place.
 - Repeated Telegram taps after a request is already handled do not resolve the
   permission twice.
 - Clawd logs redact Telegram tokens, chat ids, and token-like values.
+
+## Message Formatting
+
+- Completion notifications render Assistant output through a conservative
+  Markdown subset using Telegram-safe HTML. Clawd metadata such as the session
+  title, agent, folder, and host is escaped as plain dynamic text rather than
+  interpreted as Markdown.
+- Approval, session-trust, and AskUserQuestion cards use Clawd-owned structure.
+  Agent/tool/question values are redacted and escaped; they cannot add Telegram
+  tags, links, mentions, or status lines.
+- Secret redaction runs before Markdown parsing. Unsupported HTML, unsafe link
+  schemes, credentialed links, and image syntax degrade to visible text; Clawd
+  does not fetch or embed the referenced media.
+- Username-like agent prose outside code uses a full-width `＠` to avoid an
+  unintended Telegram mention. Code keeps ASCII `@` for copy fidelity.
+- If Telegram rejects the generated HTML as an entity-parse error, Clawd retries
+  the already-rendered plain version once without a parse mode. Other Telegram
+  errors keep their existing retry/fallback behavior.
+- Formatting is the default transport correction and has no Settings toggle.
+  It does not split long messages, upload documents, or use Rich Messages.
 
 ## Legacy Upgrade (v0.14.0)
 
@@ -90,9 +141,9 @@ is available when you do not want to migrate yet. Users already on verified
 native transport continue without interruption.
 
 If verification reports a Telegram `409` conflict, another process is polling
-the same bot token. Fully exit the other Clawd instance or bot integration,
-wait a few seconds for Telegram to release `getUpdates`, then retry. One bot
-token can have only one active poller.
+the same bot token. Fully exit the integration on the other machine or in the
+other independent Clawd profile, wait a few seconds for Telegram to release
+`getUpdates`, then retry. One bot token can have only one active poller.
 
 ## Release Verification
 

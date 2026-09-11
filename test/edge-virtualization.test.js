@@ -410,6 +410,7 @@ function createEdgeVirtualizationHarness(overrides = {}) {
     recoverVisiblePetAfterRendererLoad: () => {},
     setDragLocked: (v) => runtime.setDragLocked(v),
     setMouseOverPet: () => {},
+    cancelRoam: () => {},
     beginDragSnapshot: () => runtime.beginDragSnapshot(),
     clearDragSnapshot: () => runtime.clearDragSnapshot(),
     syncHitWin: () => runtime.syncHitWin(),

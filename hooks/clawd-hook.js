@@ -10,6 +10,7 @@ const { fitStateBodyToByteBudget } = require("./state-payload-size");
 const { extractClaudeContextUsageFromEntries } = require("./context-usage");
 const { createPidResolver, readStdinJsonDetailed, getPlatformConfig, applyOrcaPaneKey } = require("./shared-process");
 const { updateRecoveryLeaseFromStateBody } = require("./session-recovery-lease");
+const { normalizeModelId } = require("./claude-rate-limits");
 // #634: the pid cache + lifecycle orchestration is owned by the shared resolver
 // now (hooks/shared-process.js); this adapter no longer touches pid-cache,
 // processAlive, or isWin directly.
@@ -355,15 +356,144 @@ const EVENT_TO_LIFECYCLE = {
   SessionEnd: "end",
 };
 
-function isTaskToolStart(event, payload) {
-  // Claude Code may report subagent launches as PreToolUse(Task) without a
-  // matching SubagentStart. Keep PostToolUse(Task) as a normal working update:
-  // state.js holds juggling through working events and releases it on a later
-  // Stop/UserPromptSubmit, or on a real SubagentStop if Claude emits one.
+function isSubagentToolStart(event, payload) {
+  // Claude Code reports subagent launches as PreToolUse(Task) on older builds
+  // or PreToolUse(Agent) today, sometimes without a native SubagentStart. Keep
+  // PostToolUse as working: state.js holds juggling until Stop/UserPromptSubmit,
+  // or until a real SubagentStop if Claude emits one.
   return event === "PreToolUse"
     && payload
     && typeof payload.tool_name === "string"
-    && payload.tool_name === "Task";
+    && (payload.tool_name === "Task" || payload.tool_name === "Agent");
+}
+
+// Test-result reactions are deliberately conservative: only commands whose
+// shell segment STARTS with a known test runner qualify. This avoids reacting
+// to prose/echoes such as `echo "run npm test"`, while still supporting the
+// common `cd app && npm test` and `FOO=1 pytest` forms.
+const TEST_RUNNER_SEGMENT_RE = /^(?:(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*)?(?:(?:npx|bunx|pnpm\s+(?:exec|dlx)|yarn\s+(?:exec|dlx)|npm\s+exec)\s+)?(?:npm\s+(?:run\s+)?test(?::[\w.-]+)?(?:\s|$)|npm\s+t(?:\s|$)|pnpm\s+(?:run\s+)?test(?::[\w.-]+)?(?:\s|$)|yarn\s+(?:run\s+)?test(?::[\w.-]+)?(?:\s|$)|bun\s+(?:run\s+)?test(?::[\w.-]+)?(?:\s|$)|jest(?:\s|$)|vitest(?:\s|$)|mocha(?:\s|$)|ava(?:\s|$)|tap(?:\s|$)|node\s+--test(?:\s|$)|pytest(?:\s|$)|py\.test(?:\s|$)|python(?:3(?:\.\d+)?)?\s+-m\s+pytest(?:\s|$)|uv\s+run\s+pytest(?:\s|$)|go\s+test(?:\s|$)|cargo\s+test(?:\s|$)|(?:bundle\s+exec\s+)?rspec(?:\s|$)|(?:\.\/vendor\/bin\/)?phpunit(?:\s|$)|(?:\.\/)?gradlew?\s+test(?:\s|$)|\.\/mvnw\s+test(?:\s|$)|mvn(?:\s+[^\s]+)*\s+test(?:\s|$)|dotnet\s+test(?:\s|$)|ctest(?:\s|$)|deno\s+test(?:\s|$)|rake\s+test(?:\s|$)|mix\s+test(?:\s|$)|swift\s+test(?:\s|$)|make\s+test(?:\s|$))/i;
+
+function splitShellSegments(command) {
+  const segments = [];
+  let start = 0;
+  let quote = null;
+  let escaped = false;
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+
+    let operator = null;
+    if (char === "\n" || char === ";") operator = char;
+    else if (char === "&" && command[i + 1] === "&") operator = "&&";
+    else if (char === "|") operator = command[i + 1] === "|" ? "||" : "|";
+    if (!operator) continue;
+
+    segments.push({ text: command.slice(start, i).trim(), operator });
+    if (operator.length === 2) i++;
+    start = i + 1;
+  }
+  segments.push({ text: command.slice(start).trim(), operator: null });
+  return segments.filter((segment) => segment.text);
+}
+
+function isRecognizedTestCommand(command) {
+  if (typeof command !== "string" || !command.trim()) return false;
+  return splitShellSegments(command)
+    .map((segment) => segment.text)
+    .some((segment) => TEST_RUNNER_SEGMENT_RE.test(segment.trim()));
+}
+
+// A failed compound Bash call does not prove the test segment failed: setup
+// may have stopped before it, or a later lint/build step may be the culprit.
+// Only a direct test invocation, optionally preceded by `cd ... &&`, is
+// authoritative without a test summary.
+function isDirectTestCommand(command) {
+  if (typeof command !== "string" || !command.trim()) return false;
+  const segments = splitShellSegments(command);
+  if (!segments.length || !TEST_RUNNER_SEGMENT_RE.test(segments[segments.length - 1].text)) return false;
+  return segments.slice(0, -1).every((segment) => (
+    segment.operator === "&&" && /^cd(?:\s|$)/i.test(segment.text)
+  ));
+}
+
+function collectToolResponseText(response) {
+  if (typeof response === "string") return response;
+  if (!response || typeof response !== "object") return "";
+  const parts = [response.stdout, response.stderr, response.output, response.text]
+    .filter((value) => typeof value === "string");
+  if (typeof response.content === "string") parts.push(response.content);
+  else if (Array.isArray(response.content)) {
+    for (const item of response.content) {
+      if (item && typeof item.text === "string") parts.push(item.text);
+    }
+  }
+  return parts.join("\n");
+}
+
+// Classify a completed Bash test command as "pass" | "fail". A
+// PostToolUseFailure is authoritative only for a direct test invocation; a
+// compound command may have failed before or after its test segment. A
+// successful tool event still needs a recognizable test summary.
+function classifyTestResult(event, payload) {
+  if (!payload || payload.tool_name !== "Bash") return null;
+  const toolInput = payload.tool_input;
+  const command = toolInput && typeof toolInput.command === "string"
+    ? toolInput.command
+    : "";
+  if (!isRecognizedTestCommand(command)) return null;
+  const failedToolEvent = event === "PostToolUseFailure";
+  if (failedToolEvent && isDirectTestCommand(command)) return "fail";
+  if (!failedToolEvent && event !== "PostToolUse") return null;
+
+  const text = collectToolResponseText(payload.tool_response).slice(-8000);
+  if (!text) return null;
+
+  const hasExplicitRunnerFailureSummary =
+    /[1-9]\d*\s+(?:failed|failing)\b/i.test(text)
+    || /(?:^|\n)[#\s]*fail(?:ed|ures)?[:\s]+[1-9]\d*/i.test(text)
+    || /\bfailures?[:=]\s*[1-9]\d*/i.test(text)
+    || /test result:\s*FAILED|\btests? failed\b/.test(text);
+  if (hasExplicitRunnerFailureSummary) {
+    return "fail";
+  }
+  // A compound failed Bash command may have failed in a non-test segment.
+  // Generic build/exit/error summaries are safe only for a successful tool
+  // event whose recognized test runner actually completed.
+  if (failedToolEvent) return null;
+  if (/(?:^|\n)\s*(?:FAIL|FAILED|✗|✖|✘)\b|AssertionError|Traceback \(most recent|panic:/.test(text)
+      || /[1-9]\d*\s+errors?\b/i.test(text)
+      || /\bBUILD FAIL(?:ED|URE)\b/.test(text)
+      || /\bexit (?:code|status) [1-9]/.test(text)) return "fail";
+
+  const hasNonZeroPassCount =
+    /[1-9]\d*\s+pass(?:ed|ing)\b/i.test(text)
+    || /(?:^|\n)[#\s]*pass(?:ed)?[:\s]+[1-9]\d*/i.test(text);
+  if (hasNonZeroPassCount) return "pass";
+  if (/\b(?:all tests passed|test result:\s*ok|tests? passed)\b/i.test(text)
+      || /(?:^|\n)ok\s+\S/i.test(text)
+      || /(?:^|\n)\s*PASS\b/.test(text)
+      || /\bBUILD SUCCESS(?:FUL)?\b/.test(text)
+      || /(?:^|\n)\s*Passed!\s*$/m.test(text)
+      || /✓|✔/.test(text)) {
+    return "pass";
+  }
+  return null;
 }
 
 // Claude headless detection: `claude -p` / `claude --print` is a one-shot,
@@ -433,7 +563,7 @@ function buildStateBody(event, payload, resolve) {
   const sessionId = payload.session_id || "default";
   const cwd = payload.cwd || "";
   const source = payload.source || payload.reason || "";
-  const syntheticSubagentStart = isTaskToolStart(event, payload);
+  const syntheticSubagentStart = isSubagentToolStart(event, payload);
 
   // /clear triggers SessionEnd → SessionStart in quick succession;
   // show sweeping (clearing context) instead of sleeping
@@ -450,6 +580,14 @@ function buildStateBody(event, payload, resolve) {
   const resolvedEvent = syntheticSubagentStart ? "SubagentStart" : event;
 
   const body = { state: resolvedState, session_id: sessionId, event: resolvedEvent };
+  if (syntheticSubagentStart) {
+    body.subagent_lifecycle_source = "synthetic-tool";
+  } else if (event === "SubagentStart" || event === "SubagentStop") {
+    body.subagent_lifecycle_source = "native";
+  }
+  if (event === "SessionStart" && source) {
+    body.session_start_source = source;
+  }
   // Cursor imports Claude user hooks and adds cursor_version to the hook input.
   // Use that explicit caller provenance instead of the process tree: a genuine
   // Claude CLI launched inside Cursor's terminal must remain Claude Code.
@@ -480,6 +618,10 @@ function buildStateBody(event, payload, resolve) {
     }
   }
   if (cwd) body.cwd = cwd;
+  // Only SessionStart carries a model, and even there it is optional (`clear`
+  // omits it). state.js merges it stickily, so one report is enough.
+  const model = normalizeModelId(payload.model);
+  if (model) body.model = model;
   const toolName = typeof payload.tool_name === "string" && payload.tool_name ? payload.tool_name : null;
   const toolUseId = normalizeToolUseId(payload.tool_use_id ?? payload.toolUseId ?? payload.toolUseID);
   const toolInputFingerprint = buildToolInputFingerprint(
@@ -488,6 +630,10 @@ function buildStateBody(event, payload, resolve) {
   if (toolName) body.tool_name = toolName;
   if (toolUseId) body.tool_use_id = toolUseId;
   if (toolInputFingerprint) body.tool_input_fingerprint = toolInputFingerprint;
+  if (event === "PostToolUse" || event === "PostToolUseFailure") {
+    const testResult = classifyTestResult(event, payload);
+    if (testResult) body.test_result = testResult;
+  }
   if (event !== "Stop" && typeof payload.transcript_path === "string" && payload.transcript_path) {
     body.transcript_path = payload.transcript_path;
   }
@@ -539,17 +685,45 @@ function buildStateBody(event, payload, resolve) {
       }
     }
   }
-  // #406 completion-gate inputs. A Stop that still has live background shells or
-  // cron wakeups, or a Stop-hook continuation (stop_hook_active), is not a real
-  // turn completion. Forward only counts + the boolean — never the task
-  // command/description — so state.js can suppress the celebration without
-  // leaking shell contents into Clawd state.
+  // #406/#952 completion-gate inputs. A Stop that still has live background
+  // shells, cron wakeups or an exact typed one-shot subagent is not a real turn
+  // completion. Forward only counts + the boolean — never task ids, status,
+  // command or description text — so state.js can suppress the celebration
+  // without leaking background-task details into Clawd state.
+  //
+  // Presence of background_subagents_count is meaningful: an omitted field
+  // means this Claude payload had no usable background_tasks snapshot, while 0
+  // is an authoritative snapshot that contains no exact `type: "subagent"`
+  // entry. Keep the classifier intentionally narrow: teammate entries have
+  // different lifecycle semantics and must not become a completion gate.
+  if (body.event === "Stop" || body.event === "SubagentStop") {
+    const backgroundTasks = Array.isArray(payload.background_tasks)
+      ? payload.background_tasks
+      : null;
+    if (backgroundTasks) {
+      const subagentCount = backgroundTasks.reduce((count, entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return count;
+        const prototype = Object.getPrototypeOf(entry);
+        if (prototype !== Object.prototype && prototype !== null) return count;
+        const type = typeof entry.type === "string"
+          ? entry.type.trim().replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+          : "";
+        return count + (type === "subagent" ? 1 : 0);
+      }, 0);
+      body.background_subagents_count = subagentCount;
+    }
+  }
   if (body.event === "Stop") {
     const bgCount = Array.isArray(payload.background_tasks) ? payload.background_tasks.length : 0;
     const cronCount = Array.isArray(payload.session_crons) ? payload.session_crons.length : 0;
     if (bgCount > 0) body.background_tasks_count = bgCount;
     if (cronCount > 0) body.session_crons_count = cronCount;
     if (payload.stop_hook_active === true) body.stop_hook_active = true;
+  } else if (body.event === "SubagentStop" && payload.stop_hook_active === true) {
+    // SubagentStop is a termination attempt: another hook may veto it and let
+    // the same child continue. Preserve the upstream marker for diagnostics;
+    // state.js also self-corrects when later activity for the same id arrives.
+    body.stop_hook_active = true;
   }
   const wslDistro = resolveWslDistro();
   if (process.env.CLAWD_REMOTE) {
@@ -674,6 +848,8 @@ if (require.main === module) main();
 
 module.exports = {
   buildStateBody,
+  classifyTestResult,
+  isRecognizedTestCommand,
   isClaudeHeadlessCommandLine,
   attachStdinDiag,
   STDIN_READ_TIMEOUT_MS,

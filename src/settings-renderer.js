@@ -14,6 +14,7 @@ const SIDEBAR_TABS = [
   { id: "telegram-approval", labelKey: "sidebarTelegramApproval", available: true },
   { id: "discord-presence", labelKey: "sidebarDiscordPresence", available: true },
   { id: "remote-ssh", labelKey: "sidebarRemoteSsh", available: true },
+  { id: "recap", labelKey: "sidebarRecap", available: true },
   { id: "about", labelKey: "sidebarAbout", available: true },
 ];
 
@@ -92,9 +93,24 @@ globalThis.ClawdSettingsTabAnimOverrides.init(core);
 globalThis.ClawdSettingsTabShortcuts.init(core);
 if (globalThis.ClawdSettingsTabTelegramApproval) globalThis.ClawdSettingsTabTelegramApproval.init(core);
 if (globalThis.ClawdSettingsTabDiscordPresence) globalThis.ClawdSettingsTabDiscordPresence.init(core);
+if (globalThis.ClawdSettingsTabRecap) globalThis.ClawdSettingsTabRecap.init(core);
 globalThis.ClawdSettingsTabAbout.init(core);
 if (globalThis.ClawdSettingsTabRemoteSsh) globalThis.ClawdSettingsTabRemoteSsh.init(core);
 if (globalThis.ClawdSettingsTabMobile) globalThis.ClawdSettingsTabMobile.init(core);
+
+core.ops.restoreNavigationState();
+function selectRequestedTab(tab) {
+  if (tab === "recap") core.ops.selectTab("recap", { persist: false });
+}
+if (window.settingsAPI && typeof window.settingsAPI.onRequestedTab === "function") {
+  window.settingsAPI.onRequestedTab(selectRequestedTab);
+}
+if (window.settingsAPI && typeof window.settingsAPI.consumeRequestedTab === "function") {
+  selectRequestedTab(window.settingsAPI.consumeRequestedTab());
+}
+if (typeof window.addEventListener === "function") {
+  window.addEventListener("beforeunload", () => core.ops.persistNavigationState());
+}
 
 if (window.settingsAPI && typeof window.settingsAPI.onChanged === "function") {
   window.settingsAPI.onChanged((payload) => core.ops.applyChanges(payload));
@@ -104,6 +120,13 @@ if (window.settingsAPI && typeof window.settingsAPI.onAgentActivity === "functio
   window.settingsAPI.onAgentActivity((payload) => {
     const tab = core.tabs.agents;
     if (tab && typeof tab.applyAgentActivity === "function") tab.applyAgentActivity(payload);
+  });
+}
+
+if (window.settingsAPI && typeof window.settingsAPI.onRecapChanged === "function") {
+  window.settingsAPI.onRecapChanged(() => {
+    const tab = core.tabs.recap;
+    if (tab && typeof tab.applyDataChanged === "function") tab.applyDataChanged();
   });
 }
 
@@ -124,6 +147,16 @@ if (window.settingsAPI && typeof window.settingsAPI.onRemoteApprovalStatusChange
     const tab = core.tabs[core.state.activeTab];
     if (tab && typeof tab.refreshRuntimeStatus === "function") {
       tab.refreshRuntimeStatus(payload);
+    }
+  });
+}
+
+if (window.settingsAPI && typeof window.settingsAPI.onUpdateCheckStatus === "function") {
+  window.settingsAPI.onUpdateCheckStatus((snapshot) => {
+    core.runtime.about.updateCheckSnapshot = snapshot || { state: "idle" };
+    const tab = core.tabs.about;
+    if (tab && typeof tab.applyUpdateCheckStatus === "function") {
+      tab.applyUpdateCheckStatus(core.runtime.about.updateCheckSnapshot);
     }
   });
 }
@@ -151,14 +184,25 @@ if (window.settingsAPI && typeof window.settingsAPI.getSnapshot === "function") 
         return [];
       })
       : Promise.resolve([]);
+  const mouthAccessoryOptionsPromise =
+    typeof window.settingsAPI.getPetMouthAccessoryOptions === "function"
+      ? window.settingsAPI.getPetMouthAccessoryOptions().catch((err) => {
+        console.warn("settings: getPetMouthAccessoryOptions failed", err);
+        return [];
+      })
+      : Promise.resolve([]);
   Promise.all([
     window.settingsAPI.getSnapshot(),
     tintOptionsPromise,
     accessoryOptionsPromise,
-  ]).then(([snapshot, petTintOptions, petAccessoryOptions]) => {
+    mouthAccessoryOptionsPromise,
+  ]).then(([snapshot, petTintOptions, petAccessoryOptions, petMouthAccessoryOptions]) => {
     core.runtime.petTintOptions = Array.isArray(petTintOptions) ? petTintOptions : [];
     core.runtime.petAccessoryOptions = Array.isArray(petAccessoryOptions)
       ? petAccessoryOptions
+      : [];
+    core.runtime.petMouthAccessoryOptions = Array.isArray(petMouthAccessoryOptions)
+      ? petMouthAccessoryOptions
       : [];
     core.ops.applyBootstrap(snapshot);
   });

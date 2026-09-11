@@ -2,6 +2,7 @@
 // Used by main.js for process detection and session tracking
 
 const claudeCode = require("./claude-code");
+const deepseekHarness = require("./deepseek-harness");
 const codex = require("./codex");
 const copilotCli = require("./copilot-cli");
 const geminiCli = require("./gemini-cli");
@@ -11,6 +12,7 @@ const codebuddy = require("./codebuddy");
 const kiroCli = require("./kiro-cli");
 const kimiCli = require("./kimi-cli");
 const qwenCode = require("./qwen-code");
+const zcode = require("./zcode");
 const codewhale = require("./codewhale");
 const opencode = require("./opencode");
 const mimocode = require("./mimocode");
@@ -20,10 +22,13 @@ const hermes = require("./hermes");
 const qoder = require("./qoder");
 const reasonix = require("./reasonix");
 const qoderwork = require("./qoderwork");
+const qwenwork = require("./qwenwork");
 const workbuddy = require("./workbuddy");
+const traecode = require("./traecode");
 
 const AGENTS = [
   claudeCode,
+  deepseekHarness,
   codex,
   copilotCli,
   geminiCli,
@@ -33,6 +38,7 @@ const AGENTS = [
   kiroCli,
   kimiCli,
   qwenCode,
+  zcode,
   codewhale,
   opencode,
   mimocode,
@@ -42,7 +48,9 @@ const AGENTS = [
   qoder,
   reasonix,
   qoderwork,
+  qwenwork,
   workbuddy,
+  traecode,
 ];
 const AGENT_MAP = new Map(AGENTS.map((a) => [a.id, a]));
 

@@ -21,7 +21,7 @@
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   transition: border-color 0.14s ease, box-shadow 0.14s ease, background 0.14s ease;
 }
-.language-picker-trigger:hover,
+.language-picker-trigger:hover:not(:disabled),
 .language-picker.open .language-picker-trigger {
   border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
   background: var(--panel-bg, var(--surface));
@@ -30,6 +30,9 @@
 .language-picker-trigger:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 78%, transparent);
   outline-offset: 2px;
+}
+.language-picker-trigger:disabled {
+  box-shadow: none;
 }
 .language-picker-value {
   min-width: 0;
@@ -52,6 +55,7 @@
 }
 .language-picker-menu {
   box-sizing: border-box;
+  display: none;
   position: absolute;
   z-index: 20;
   top: calc(100% + 6px);
@@ -69,6 +73,9 @@
   overflow-y: hidden;
   overscroll-behavior: contain;
   transition: opacity 0.14s ease, transform 0.14s ease;
+}
+.language-picker.menu-mounted .language-picker-menu {
+  display: block;
 }
 .language-picker.menu-scrollable .language-picker-menu {
   overflow-y: auto;

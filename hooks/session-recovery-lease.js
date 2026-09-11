@@ -410,13 +410,18 @@ function classifyBody(body, options = {}) {
   if (!body || typeof body !== "object") return null;
   if (body.headless === true) return { active: false, state: null, terminal: false };
   if (body.event === "Stop") {
-    const disposition = getClaudeStopDisposition({
+    const stopOptions = {
       backgroundTasksCount: body.background_tasks_count,
       sessionCronsCount: body.session_crons_count,
       stopHookActive: body.stop_hook_active,
       hasFinalAssistantText: typeof body.assistant_last_output === "string" && !!body.assistant_last_output,
       headless: body.headless,
       env: options.env,
+    };
+    const baseDisposition = getClaudeStopDisposition(stopOptions);
+    const disposition = getClaudeStopDisposition({
+      ...stopOptions,
+      backgroundSubagentsCount: body.background_subagents_count,
     });
     if (disposition.kind === "complete") return { active: false, state: null, validForMs: 0, terminal: true };
     return {
@@ -424,6 +429,12 @@ function classifyBody(body, options = {}) {
       state: "working",
       validForMs: disposition.kind === "debounce" ? disposition.debounceMs : 0,
       terminal: false,
+      // A typed background-subagent snapshot is live evidence for this process,
+      // but a Stop hook must not turn that one observation into an unbounded
+      // startup-recovery lease. Preserve a lease written by earlier sustained
+      // lifecycle traffic byte-for-byte; create or refresh nothing when the
+      // typed count is the only reason this Stop became a hard hold.
+      preserveExistingEvidence: disposition.kind === "hold" && baseDisposition.kind !== "hold",
     };
   }
   if (SUSTAINED_STATES.has(body.state)) return { active: true, state: body.state, terminal: false };
@@ -442,6 +453,26 @@ function updateRecoveryLeaseFromStateBody(body, options = {}) {
   const classified = classifyBody(body, options);
   if (!agentId || !SUPPORTED_AGENT_IDS.has(agentId) || !sessionId || !classified) {
     return { written: false, reason: "unsupported" };
+  }
+  if (classified.preserveExistingEvidence === true) {
+    const filePath = getLeaseFilePath(agentId, sessionId, {
+      recoveryDir: getRecoveryDir(options),
+    });
+    if (!filePath) return { written: false, reason: "path" };
+    try {
+      if (!fs.existsSync(filePath)) return { written: false, reason: "no-existing-evidence" };
+      const stat = fs.lstatSync(filePath);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        return { written: false, reason: "unsafe-file" };
+      }
+    } catch {
+      return { written: false, reason: "unsafe-file" };
+    }
+    const existing = readLeaseFile(filePath);
+    if (!existing || !existing.active || !SUSTAINED_STATES.has(existing.state)) {
+      return { written: false, reason: "no-active-evidence" };
+    }
+    return { written: false, reason: "preserved-existing-evidence", filePath, record: existing };
   }
   const dir = ensureRecoveryDir(options);
   const filePath = dir ? getLeaseFilePath(agentId, sessionId, { recoveryDir: dir }) : null;

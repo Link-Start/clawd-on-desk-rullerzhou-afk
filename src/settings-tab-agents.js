@@ -239,8 +239,14 @@
     const dismissed = state.snapshot && state.snapshot.dismissedAgentCleanupHints;
     return entries.filter((entry) => {
       if (!entry || typeof entry.agentId !== "string") return false;
-      if (entry.detectedInstalled) return false;
-      if (!getAgentMetadata(entry.agentId)) return false;
+      // #895: strict false only. A detector entry that never reported on this
+      // agent is unknown, and proposing a deletion on unknown is how a working
+      // integration gets torn out.
+      if (entry.detectedInstalled !== false) return false;
+      const meta = getAgentMetadata(entry.agentId);
+      // Fail closed: metadata that predates cleanupSuggestionExempt, or that
+      // failed to load at all, must not be read as "safe to remove".
+      if (!meta || meta.cleanupSuggestionExempt !== false) return false;
       if (!readers.readAgentIntegrationInstalled(entry.agentId)) return false;
       if (dismissed && dismissed[entry.agentId] === true) return false;
       return true;
@@ -349,14 +355,22 @@
     row.className = "row-sub custom-tool-discovery-row";
     const text = document.createElement("div");
     text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("customToolDiscoveryTitle");
     const desc = document.createElement("span");
     desc.className = "row-desc";
     desc.textContent = t("rowCustomToolsDiscoveryPathsDesc");
+    const scanStatus = document.createElement("span");
+    scanStatus.className = "custom-tool-scan-status";
+    scanStatus.textContent = getCustomToolScanStatusText();
+    text.appendChild(label);
     text.appendChild(desc);
+    text.appendChild(scanStatus);
     row.appendChild(text);
 
     const control = document.createElement("div");
-    control.className = "custom-tool-discovery-control";
+    control.className = "custom-tool-discovery-control custom-tool-discovery-actions";
     const addButton = document.createElement("button");
     addButton.type = "button";
     addButton.className = "soft-btn accent custom-tool-path-picker";
@@ -367,9 +381,6 @@
     scanButton.type = "button";
     scanButton.className = "soft-btn custom-tool-scan";
     scanButton.textContent = t("customToolRescan");
-    const scanStatus = document.createElement("span");
-    scanStatus.className = "custom-tool-scan-status";
-    scanStatus.textContent = getCustomToolScanStatusText();
     scanButton.addEventListener("click", async () => {
       const scanStartedAt = Date.now();
       scanButton.disabled = true;
@@ -394,7 +405,6 @@
       }
     });
     control.appendChild(scanButton);
-    control.appendChild(scanStatus);
     row.appendChild(control);
     const rows = [row, ...buildCustomToolResultRows()];
     // No section title: the subtab pill already names this half of the tab.
@@ -920,9 +930,9 @@
       title: t("claudeHooksDisableConfirmTitle"),
       detail: t("claudeHooksDisableConfirmDetail"),
       actions: [
-        { id: "disconnect", label: t("claudeHooksDisableConfirmDisconnect"), tone: "danger" },
+        { id: "keep", label: t("claudeHooksDisableConfirmKeep"), tone: "neutral", defaultFocus: true },
         { id: "disable", label: t("claudeHooksDisableConfirmDisableOnly"), tone: "neutral" },
-        { id: "keep", label: t("claudeHooksDisableConfirmKeep"), tone: "accent", defaultFocus: true },
+        { id: "disconnect", label: t("claudeHooksDisableConfirmDisconnect"), tone: "danger" },
       ],
     });
   }
@@ -932,8 +942,8 @@
       title: t("claudeHooksDisconnectConfirmTitle"),
       detail: t("claudeHooksDisconnectConfirmDetail"),
       actions: [
+        { id: "keep", label: t("claudeHooksDisconnectConfirmKeep"), tone: "neutral", defaultFocus: true },
         { id: "disconnect", label: t("claudeHooksDisconnectConfirmAction"), tone: "danger" },
-        { id: "keep", label: t("claudeHooksDisconnectConfirmKeep"), tone: "accent", defaultFocus: true },
       ],
     });
   }
@@ -1048,6 +1058,15 @@
         }
         if (!agent.custom) syncAgentIntegrationBadge(integrationBadge, agent.id);
         text.appendChild(badges);
+        // TraeCode requires a manual enable step inside Trae that Clawd cannot
+        // do for the user — surface it right on the card once the integration
+        // is installed so nobody installs it and sees "nothing happens".
+        if (!agent.custom && agent.id === "traecode" && readers.readAgentIntegrationInstalled(agent.id)) {
+          const hint = document.createElement("div");
+          hint.className = "row-desc agent-traecode-hint";
+          hint.textContent = t("traecodeEnableHint");
+          text.appendChild(hint);
+        }
       },
       buildExtraControls: (ctrl) => {
         if (agent.custom) {
@@ -1144,8 +1163,27 @@
     }
     if (agent.id === "claude-code") {
       rows.push(...buildClaudeHookManagementRows());
+      // Quota collection belongs to the provider, not to the ring that draws
+      // it. This switch used to sit in General's quota-ring group while Kimi's
+      // equivalent sat here, so turning collection off meant a different tab
+      // depending on the provider, and no page could answer "who am I reading
+      // from". Every provider's collection opt-in now lives on its own card.
+      const claudeQuotaRow = helpers.buildSwitchRow({
+        key: "claudeQuotaCollectionEnabled",
+        labelKey: "rowClaudeQuotaCollection",
+        descKey: "rowClaudeQuotaCollectionDesc",
+      });
+      claudeQuotaRow.classList.add("row-sub");
+      rows.push(claudeQuotaRow);
     }
     if (agent.id === "codex") {
+      const codexAutoStartRow = helpers.buildSwitchRow({
+        key: "autoStartWithCodex",
+        labelKey: "rowStartWithCodex",
+        descKey: "rowStartWithCodexDesc",
+      });
+      codexAutoStartRow.classList.add("row-sub");
+      rows.push(codexAutoStartRow);
       rows.push(buildCodexPermissionModeRow(agent, computeAgentSubSwitchDisabled(agent.id, "permissionMode")));
       rows.push(buildAgentSwitchRow({
         agent,
@@ -1172,6 +1210,9 @@
       });
       codexHookNotifyRow.classList.add("row-sub");
       rows.push(codexHookNotifyRow);
+    }
+    if (agent.id === "kimi-cli") {
+      rows.push(buildKimiQuotaCard());
     }
     if (caps.permissionApproval || caps.interactiveBubble) {
       rows.push(buildAgentSwitchRow({
@@ -1242,6 +1283,325 @@
     // WSL instances: show detected agent installations across distros
     rows.push(...buildAgentInstanceRows(agent));
     return rows;
+  }
+
+  function kimiQuotaStatusText(status) {
+    const stateName = status && status.state;
+    if (stateName === "unconfigured") return t("kimiQuotaStatusUnconfigured");
+    if (stateName === "configured-disabled") return t("kimiQuotaStatusConfiguredDisabled");
+    if (stateName === "agent-disabled") return t("kimiQuotaStatusAgentDisabled");
+    if (stateName === "secure-storage-unavailable" || stateName === "credential-unreadable") {
+      return t("kimiQuotaStatusSecureStorageUnavailable");
+    }
+    if (stateName === "refreshing") return t("kimiQuotaStatusRefreshing");
+    if (stateName === "fresh" && Number.isFinite(status.lastQuotaCapturedAt)) {
+      return t("kimiQuotaStatusFresh").replace(
+        "{time}",
+        new Date(status.lastQuotaCapturedAt).toLocaleString()
+      );
+    }
+    if (stateName === "ready") return t("kimiQuotaStatusReady");
+    if (status && status.reason) {
+      return t("kimiQuotaStatusError").replace("{reason}", String(status.reason));
+    }
+    return t("kimiQuotaStatusLoading");
+  }
+
+  function buildKimiQuotaCard() {
+    const card = document.createElement("div");
+    card.className = "row row-sub kimi-quota-card";
+
+    const heading = document.createElement("div");
+    heading.className = "kimi-quota-heading";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("kimiQuotaTitle");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("kimiQuotaDesc");
+    heading.appendChild(label);
+    heading.appendChild(desc);
+    card.appendChild(heading);
+
+    const statusLine = document.createElement("span");
+    statusLine.className = "row-desc kimi-quota-status";
+    statusLine.textContent = t("kimiQuotaStatusLoading");
+    card.appendChild(statusLine);
+
+    function makePasswordInput() {
+      const input = document.createElement("input");
+      input.type = "password";
+      input.className = "kimi-quota-key-input";
+      input.placeholder = t("kimiQuotaApiKeyPlaceholder");
+      input.autocomplete = "new-password";
+      input.spellcheck = false;
+      input.setAttribute("aria-label", t("kimiQuotaApiKeyPlaceholder"));
+      input.addEventListener("click", (event) => event.stopPropagation());
+      input.addEventListener("keydown", (event) => event.stopPropagation());
+      return input;
+    }
+
+    function makeConsoleLink() {
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "soft-btn quiet kimi-quota-console-link";
+      link.textContent = t("kimiQuotaOpenConsole");
+      link.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (window.settingsAPI && typeof window.settingsAPI.openExternal === "function") {
+          window.settingsAPI.openExternal("https://www.kimi.com/code/console");
+        }
+      });
+      return link;
+    }
+
+    // ── Unconnected: one input, one primary action, quiet notes. The full
+    // safety disclosure stays, but as a footnote instead of a wall above the
+    // buttons; the Console link is a quiet link, not a competing button. ──
+    const connectSection = document.createElement("div");
+    connectSection.className = "kimi-quota-connect";
+    connectSection.hidden = true;
+    const connectRow = document.createElement("div");
+    connectRow.className = "kimi-quota-connect-row";
+    const connectInput = makePasswordInput();
+    const connectButton = document.createElement("button");
+    connectButton.type = "button";
+    connectButton.className = "soft-btn accent settings-button kimi-quota-primary";
+    connectButton.textContent = t("kimiQuotaConnect");
+    connectRow.appendChild(connectInput);
+    connectRow.appendChild(connectButton);
+    connectSection.appendChild(connectRow);
+    const securityNote = document.createElement("span");
+    securityNote.className = "row-desc kimi-quota-note";
+    securityNote.textContent = t("kimiQuotaSecurityWarning");
+    connectSection.appendChild(securityNote);
+    const connectFoot = document.createElement("div");
+    connectFoot.className = "kimi-quota-foot";
+    const manualNote = document.createElement("span");
+    manualNote.className = "row-desc";
+    manualNote.textContent = t("kimiQuotaManualOnly");
+    connectFoot.appendChild(manualNote);
+    connectFoot.appendChild(makeConsoleLink());
+    connectSection.appendChild(connectFoot);
+    card.appendChild(connectSection);
+
+    // ── Connected: account/status first, one primary action (Refresh, or
+    // Reconnect while disconnected). Replace folds away behind a toggle; the
+    // destructive/low-frequency actions live below a hairline, each with its
+    // consequence spelled out — never beside the primary button. ──
+    const manageSection = document.createElement("div");
+    manageSection.className = "kimi-quota-manage";
+    manageSection.hidden = true;
+
+    const badges = document.createElement("div");
+    badges.className = "kimi-quota-badges";
+    const connBadge = document.createElement("span");
+    connBadge.className = "kimi-quota-badge";
+    connBadge.textContent = t("kimiQuotaConnectedBadge");
+    const modeBadge = document.createElement("span");
+    modeBadge.className = "kimi-quota-badge muted";
+    modeBadge.textContent = t("kimiQuotaManualOnlyBadge");
+    badges.appendChild(connBadge);
+    badges.appendChild(modeBadge);
+    manageSection.appendChild(badges);
+
+    const primaryRow = document.createElement("div");
+    primaryRow.className = "kimi-quota-primary-row";
+    const refreshButton = document.createElement("button");
+    refreshButton.type = "button";
+    refreshButton.className = "soft-btn accent settings-button kimi-quota-primary";
+    const replaceToggle = document.createElement("button");
+    replaceToggle.type = "button";
+    replaceToggle.className = "soft-btn quiet";
+    replaceToggle.textContent = t("kimiQuotaReplace");
+    primaryRow.appendChild(refreshButton);
+    primaryRow.appendChild(replaceToggle);
+    manageSection.appendChild(primaryRow);
+
+    const replacePanel = document.createElement("div");
+    replacePanel.className = "kimi-quota-replace";
+    replacePanel.hidden = true;
+    const replaceInput = makePasswordInput();
+    replacePanel.appendChild(replaceInput);
+    const replaceActions = document.createElement("div");
+    replaceActions.className = "kimi-quota-replace-actions";
+    const replaceConfirm = document.createElement("button");
+    replaceConfirm.type = "button";
+    replaceConfirm.className = "soft-btn accent";
+    replaceConfirm.textContent = t("kimiQuotaReplaceConfirm");
+    const replaceCancel = document.createElement("button");
+    replaceCancel.type = "button";
+    replaceCancel.className = "soft-btn quiet";
+    replaceCancel.textContent = t("kimiQuotaCancel");
+    replaceActions.appendChild(replaceConfirm);
+    replaceActions.appendChild(replaceCancel);
+    replacePanel.appendChild(replaceActions);
+    manageSection.appendChild(replacePanel);
+
+    const dangerZone = document.createElement("div");
+    dangerZone.className = "kimi-quota-danger";
+    const disconnectRow = document.createElement("div");
+    disconnectRow.className = "kimi-quota-danger-row";
+    const disconnectButton = document.createElement("button");
+    disconnectButton.type = "button";
+    disconnectButton.className = "soft-btn";
+    disconnectButton.textContent = t("kimiQuotaDisconnect");
+    const disconnectDesc = document.createElement("span");
+    disconnectDesc.className = "row-desc kimi-quota-danger-desc";
+    disconnectDesc.textContent = t("kimiQuotaDisconnectDesc");
+    disconnectRow.appendChild(disconnectButton);
+    disconnectRow.appendChild(disconnectDesc);
+    dangerZone.appendChild(disconnectRow);
+    const forgetRow = document.createElement("div");
+    forgetRow.className = "kimi-quota-danger-row";
+    const forgetButton = document.createElement("button");
+    forgetButton.type = "button";
+    forgetButton.className = "soft-btn danger";
+    forgetButton.textContent = t("kimiQuotaForgetLocal");
+    const forgetDesc = document.createElement("span");
+    forgetDesc.className = "row-desc kimi-quota-danger-desc";
+    forgetDesc.textContent = t("kimiQuotaForgetDesc");
+    forgetRow.appendChild(forgetButton);
+    forgetRow.appendChild(forgetDesc);
+    dangerZone.appendChild(forgetRow);
+    const revokeLine = document.createElement("div");
+    revokeLine.className = "kimi-quota-foot";
+    const revokeNote = document.createElement("span");
+    revokeNote.className = "row-desc kimi-quota-revoke-note";
+    revokeNote.textContent = t("kimiQuotaRevokeNote");
+    revokeLine.appendChild(revokeNote);
+    revokeLine.appendChild(makeConsoleLink());
+    dangerZone.appendChild(revokeLine);
+    manageSection.appendChild(dangerZone);
+    card.appendChild(manageSection);
+
+    let currentStatus = null;
+    let statusLoaded = false;
+    let busy = false;
+    let replaceOpen = false;
+
+    function setReplaceOpen(open) {
+      replaceOpen = open;
+      replacePanel.hidden = !open;
+      replaceToggle.disabled = busy || open;
+      if (!open) replaceInput.value = "";
+    }
+
+    function syncControls() {
+      const configured = !!(currentStatus && currentStatus.configured);
+      const decryptable = !!(currentStatus && currentStatus.decryptable);
+      const collectionEnabled = !!(currentStatus && currentStatus.collectionEnabled);
+      const agentEnabled = !currentStatus || currentStatus.agentEnabled !== false;
+
+      // No flash of the wrong view: both sections stay hidden until the first
+      // status read, and the connect card never shows a status line.
+      connectSection.hidden = !statusLoaded || configured;
+      manageSection.hidden = !statusLoaded || !configured;
+      statusLine.hidden = statusLoaded && !configured && !busy;
+
+      // The single primary action: Refresh while connected, Reconnect with
+      // the stored key while disconnected. Reconnect/Refresh both stay
+      // manual-only user actions, exactly like Connect.
+      refreshButton.textContent = t(collectionEnabled ? "kimiQuotaRefresh" : "kimiQuotaReconnect");
+      refreshButton.disabled = busy || !decryptable || (collectionEnabled && !agentEnabled);
+      connectButton.disabled = busy;
+      connectInput.disabled = busy;
+      replaceInput.disabled = busy;
+      replaceConfirm.disabled = busy;
+      replaceCancel.disabled = busy;
+      replaceToggle.disabled = busy || replaceOpen;
+      replacePanel.hidden = !replaceOpen;
+      disconnectRow.hidden = !collectionEnabled;
+      disconnectButton.disabled = busy;
+      // Forget is only legal once collection is off (the runtime enforces
+      // "disconnect-required"); the disabled state plus its desc says so.
+      forgetButton.disabled = busy || collectionEnabled;
+      statusLine.textContent = busy
+        ? t("kimiQuotaStatusRefreshing")
+        : kimiQuotaStatusText(currentStatus);
+    }
+
+    async function reloadStatus() {
+      if (!window.settingsAPI || typeof window.settingsAPI.getKimiQuotaStatus !== "function") {
+        currentStatus = { status: "error", reason: "runtime-unavailable" };
+      } else {
+        try { currentStatus = await window.settingsAPI.getKimiQuotaStatus(); }
+        catch { currentStatus = { status: "error", reason: "runtime-unavailable" }; }
+      }
+      statusLoaded = true;
+      if (card.isConnected === false) return;
+      syncControls();
+    }
+
+    async function runAction(invoke) {
+      if (busy) return;
+      busy = true;
+      setReplaceOpen(false);
+      syncControls();
+      let result;
+      try { result = await invoke(); }
+      catch { result = { status: "error", reason: "runtime-unavailable" }; }
+      busy = false;
+      await reloadStatus();
+      if (!result || result.status !== "ok") {
+        const reason = (result && (result.reason || result.message)) || "unknown-error";
+        ops.showToast(t("kimiQuotaStatusError").replace("{reason}", reason), { error: true });
+      }
+      return result;
+    }
+
+    function submitKey(input, invoke) {
+      const apiKey = input.value;
+      input.value = "";
+      if (!apiKey) {
+        ops.showToast(t("kimiQuotaKeyRequired"), { error: true });
+        return;
+      }
+      runAction(() => invoke(apiKey));
+    }
+
+    connectButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      submitKey(connectInput, (apiKey) => window.settingsAPI.connectKimiQuota(apiKey));
+    });
+    refreshButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const collectionEnabled = !!(currentStatus && currentStatus.collectionEnabled);
+      runAction(() => (collectionEnabled
+        ? window.settingsAPI.refreshKimiQuota()
+        : window.settingsAPI.reconnectKimiQuota()));
+    });
+    replaceToggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setReplaceOpen(true);
+    });
+    replaceCancel.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setReplaceOpen(false);
+    });
+    replaceConfirm.addEventListener("click", (event) => {
+      event.stopPropagation();
+      submitKey(replaceInput, (apiKey) => window.settingsAPI.connectKimiQuota(apiKey));
+    });
+    disconnectButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      runAction(() => window.settingsAPI.disconnectKimiQuota());
+    });
+    forgetButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (typeof window.confirm === "function" && !window.confirm(t("kimiQuotaForgetConfirm"))) return;
+      runAction(() => window.settingsAPI.forgetKimiQuotaCredential());
+    });
+    connectInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") submitKey(connectInput, (apiKey) => window.settingsAPI.connectKimiQuota(apiKey));
+    });
+    replaceInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") submitKey(replaceInput, (apiKey) => window.settingsAPI.connectKimiQuota(apiKey));
+    });
+
+    syncControls();
+    void reloadStatus();
+    return card;
   }
 
   function formatCustomAgentActivity(lastStateEvent) {
@@ -1322,12 +1682,26 @@
     label.textContent = `WSL: ${wslEntry.distro}`;
     text.appendChild(label);
 
+    const hasIntegrationEvidence = Object.prototype.hasOwnProperty.call(
+      wslEntry,
+      "integrationFilesPresent"
+    );
+
+    function refreshWslHints() {
+      if (typeof ops.fetchAgentInstallationHints !== "function") return;
+      ops.fetchAgentInstallationHints({ refreshWsl: true }).then(() => {
+        ops.requestRender({ content: true });
+      }).catch(() => {
+        // DOM may be torn down if the user navigated away before refresh.
+      });
+    }
+
     // Distro-level marker: hook files are present AND claude-code's
     // settings.json references them (hooksDeployed = DEPFILE && DEPREG).
     // Not per-agent pairing truth — that would require inspecting each
     // agent's config inside WSL — but enough to show Pair took effect and
     // to go dark after a claude-code Unpair.
-    if (wslEntry.hooksDeployed) {
+    if (!hasIntegrationEvidence && wslEntry.hooksDeployed) {
       const deployed = document.createElement("span");
       deployed.className = "agent-instance-deployed";
       deployed.textContent = t("agentInstanceDeployedBadge");
@@ -1358,20 +1732,17 @@
             distro: wslEntry.distro,
           });
           if (result && result.status === "ok") {
+            const warnings = [];
+            if (typeof result.warning === "string" && result.warning) warnings.push(result.warning);
             if (result.wslConnectivity === false) {
               // Hooks installed, but the distro cannot reach Clawd (NAT
               // networking) — sessions would silently never appear.
-              ops.showToast(t("agentInstancePairedNoConnectivity"), { error: true });
+              warnings.push(t("agentInstancePairedNoConnectivity"));
+            }
+            if (warnings.length) {
+              ops.showToast(warnings.join("\n"), { error: true });
             } else {
               ops.showToast(result.message || t("agentInstancePaired"));
-            }
-            // Refresh hints so the UI updates (and Pair button may disappear)
-            if (typeof ops.fetchAgentInstallationHints === "function") {
-              ops.fetchAgentInstallationHints({ refreshWsl: true }).then(() => {
-                ops.requestRender({ content: true });
-              }).catch(() => {
-                // DOM may be torn down if user navigated away before refresh completes
-              });
             }
           } else {
             const msg = (result && result.message) || "WSL deploy failed";
@@ -1384,19 +1755,23 @@
           { error: true }
         );
       } finally {
+        // Refresh after both success and failure: an installer can leave
+        // managed files that the user must be able to Unpair/repair.
+        refreshWslHints();
         button.disabled = false;
         button.textContent = t("agentInstancePair");
       }
     });
     ctrl.appendChild(button);
 
-    // Unpair — offered whenever hook FILES are present (hooksFilesPresent),
-    // not gated on the registration-based badge (hooksDeployed): a distro
-    // paired with only a non-claude agent registers in that agent's own
-    // config, so the claude-settings badge is off, yet the user still needs
-    // an unpair entry point. Runs the agent's uninstall inside the distro;
-    // hook files stay (shared by other agents).
-    if (wslEntry.hooksFilesPresent) {
+    // Asset-backed integrations provide per-agent cleanup evidence. Only
+    // legacy persistent-hook agents fall back to the distro-level shared
+    // hooksFilesPresent marker; an explicit false/null must never inherit a
+    // Claude pairing and expose a fake Unpair action.
+    const canUnpair = hasIntegrationEvidence
+      ? wslEntry.integrationFilesPresent === true
+      : wslEntry.hooksFilesPresent === true;
+    if (canUnpair) {
       const unpairBtn = document.createElement("button");
       unpairBtn.className = "soft-btn agent-instance-action";
       unpairBtn.textContent = t("agentInstanceUnpair");
@@ -1411,14 +1786,10 @@
               distro: wslEntry.distro,
             });
             if (result && result.status === "ok") {
-              ops.showToast(result.message || t("agentInstanceUnpaired"));
-              if (typeof ops.fetchAgentInstallationHints === "function") {
-                ops.fetchAgentInstallationHints({ refreshWsl: true }).then(() => {
-                  ops.requestRender({ content: true });
-                }).catch(() => {
-                  // DOM may be torn down if user navigated away before refresh completes
-                });
-              }
+              ops.showToast(
+                result.warning || result.message || t("agentInstanceUnpaired"),
+                result.warning ? { error: true } : undefined
+              );
             } else {
               ops.showToast((result && result.message) || "WSL unpair failed", { error: true });
             }
@@ -1426,6 +1797,7 @@
         } catch (err) {
           ops.showToast(String(err && err.message ? err.message : err), { error: true });
         } finally {
+          refreshWslHints();
           unpairBtn.disabled = false;
           unpairBtn.textContent = t("agentInstanceUnpair");
         }

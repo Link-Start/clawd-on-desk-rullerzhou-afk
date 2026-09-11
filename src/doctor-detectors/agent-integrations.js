@@ -25,11 +25,17 @@ const {
 } = require("../../hooks/kimi-install");
 const { parseTomlSections: parseCodewhaleTomlSections } = require("../../hooks/codewhale-install");
 const { getAgentDescriptors } = require("./agent-descriptors");
-const { commandContainsFragment, validateHookCommand } = require("./agent-node-bin-parser");
+const {
+  commandContainsFragment,
+  validateHookCommand,
+  validateHookTarget,
+} = require("./agent-node-bin-parser");
 const { checkCodexHookTrust, checkCodexHooksFeature } = require("./codex-features-check");
+const { inspectStableCodexHookCommand } = require("../../hooks/codex-install-utils");
 const { validateOpencodeEntry } = require("./opencode-entry-validator");
 const { validateOpenClawEntry } = require("./openclaw-entry-validator");
 const { hasIncludeDirective } = require("../../hooks/openclaw-install");
+const { inspectDeepSeekHarnessDiskSync } = require("../../hooks/dsh-install");
 
 const REPAIRABLE_AGENT_STATUSES = new Set(["not-connected", "broken-path"]);
 const GEMINI_HOOKS_DISABLED_DETAIL = "Gemini hooks are disabled in settings.json; Clawd preserves this user setting and will not receive hook events";
@@ -130,14 +136,19 @@ function getClaudeHookHealthStatus(options) {
 // source-script-missing, and manual-fix-required per the #657 plan §6.9.
 function withClaudeHookGuardNotice(detail, descriptor, options) {
   if (descriptor.agentId !== "claude-code" || !detail) return detail;
-  if (!REPAIRABLE_AGENT_STATUSES.has(detail.status)) return detail;
 
   const runtimeHealth = getClaudeHookHealthStatus(options);
+  const repairableDisk = REPAIRABLE_AGENT_STATUSES.has(detail.status);
 
   // Reconcile can never fix a missing source script, so this must never
   // offer a configuration Repair — overriding the status keeps it out of
   // REPAIRABLE_AGENT_STATUSES for the withAgentFixAction() check below.
-  if (runtimeHealth && runtimeHealth.status === "degraded" && runtimeHealth.degradedReason === "source-script-missing") {
+  if (
+    repairableDisk
+    && runtimeHealth
+    && runtimeHealth.status === "degraded"
+    && runtimeHealth.degradedReason === "source-script-missing"
+  ) {
     return {
       ...detail,
       status: "source-script-missing",
@@ -150,6 +161,34 @@ function withClaudeHookGuardNotice(detail, descriptor, options) {
       },
     };
   }
+
+  if (
+    (repairableDisk || detail.status === "ok")
+    &&
+    runtimeHealth
+    && runtimeHealth.status === "degraded"
+    && (
+      runtimeHealth.degradedReason === "env-hook-node-unresolved"
+      || runtimeHealth.degradedReason === "env-indirection-unverified"
+    )
+  ) {
+    const unresolvedNode = runtimeHealth.degradedReason === "env-hook-node-unresolved";
+    return {
+      ...detail,
+      status: detail.status === "ok" ? "needs-review" : detail.status,
+      level: "warning",
+      detail: unresolvedNode
+        ? "Clawd preserved an env-indirected Claude hook because settings.env does not provide a usable absolute Node path. Check CLAWD_NODE_BIN, then use Fix."
+        : "Clawd found an env-indirected Claude hook but settings.env does not prove that it belongs to Clawd. Review CLAWD_HOOK_PATH before changing it.",
+      claudeHookRuntimeStatus: {
+        status: runtimeHealth.status,
+        degradedReason: runtimeHealth.degradedReason,
+        at: runtimeHealth.at || null,
+      },
+    };
+  }
+
+  if (!repairableDisk) return detail;
 
   const guard = getClaudeHookGuardStatus(options);
   if (guard && guard.type === "suspicious-shrink") {
@@ -194,6 +233,22 @@ function withClaudeHookGuardNotice(detail, descriptor, options) {
   return detail;
 }
 
+// TraeCode carries an extra manual step beyond registering hooks.json: the
+// hooks only fire after the user enables them inside Trae (Settings → Hooks)
+// and picks a run mode — the IDE holds that switch in private storage Clawd
+// cannot read. The check cannot detect it, so when the integration looks
+// healthy we surface an informational note instead. Never masks a primary
+// finding — the note only annotates an "ok" status.
+function withTraeCodeEnableNotice(detail, descriptor) {
+  if (descriptor.agentId !== "traecode" || !detail) return detail;
+  if (detail.status !== "ok") return detail;
+  const base = typeof detail.detail === "string" && detail.detail ? detail.detail : "TraeCode hooks registered";
+  return {
+    ...detail,
+    detail: `${base}. Hooks only fire after enabling them in Trae: Settings → Hooks → Enable (run mode: Sandbox).`,
+  };
+}
+
 function withAgentFixAction(detail, descriptor) {
   if (
     descriptor.agentId === "kimi-cli"
@@ -225,11 +280,34 @@ function withAgentFixAction(detail, descriptor) {
     return detail;
   }
   if (
+    descriptor.agentId === "zcode"
+    && detail.supplementary
+    && detail.supplementary.key === "zcode_hooks"
+    && detail.supplementary.value === "permission-conflict"
+  ) {
+    // A Fix would re-register Clawd's blocking hook next to the user's own
+    // PermissionRequest hook — the exact last-wins override the conflict
+    // report exists to prevent. Resolution is manual by design.
+    return detail;
+  }
+  if (
     descriptor.agentId === "qwen-code"
     && detail.supplementary
     && detail.supplementary.key === "qwen_hooks"
     && detail.supplementary.value !== "enabled"
   ) {
+    return detail;
+  }
+  if (
+    descriptor.agentId === "zcode"
+    && detail.supplementary
+    && detail.supplementary.key === "zcode_hooks"
+    && typeof detail.supplementary.value === "string"
+    && detail.supplementary.value.startsWith("disabled")
+  ) {
+    // Both the master runner flag and per-hook enabled:false are explicit
+    // ZCode user choices. Doctor may explain them, but Fix must not reactivate
+    // hooks behind the user's back.
     return detail;
   }
   if (
@@ -317,6 +395,56 @@ function findCodexPlatformHookCommands(settings, marker, platform) {
   return commands;
 }
 
+function validateCodexCommandList(descriptor, commands, options) {
+  if (!commands.length) return validateCommandList(descriptor, commands, options);
+  const results = commands.map((command) => {
+    const stable = inspectStableCodexHookCommand(command, {
+      platform: options.platform,
+      fs: options.fs,
+      codexDir: descriptor.parentDir,
+    });
+    if (!stable.matched) {
+      return options.validateCommand(command, { platform: options.platform, fs: options.fs });
+    }
+    if (!stable.ok) {
+      return {
+        ok: false,
+        issue: stable.issue,
+        scriptPath: stable.launcherPath || null,
+      };
+    }
+    const result = options.validateTarget({
+      nodeBin: stable.nodeBin,
+      scriptPath: stable.scriptPath,
+    }, {
+      platform: options.platform,
+      fs: options.fs,
+      requireNodeExecutable: true,
+    });
+    return { ...result, stableExecution: result.ok === true };
+  });
+  const ok = results.find((result) => result.ok);
+  if (ok) {
+    return makeDetail(descriptor, "ok", {
+      level: null,
+      detail: ok.stableExecution
+        ? `${descriptor.configPath} hook registered, stable execution target verified`
+        : `${descriptor.configPath} hook registered, scriptPath verified`,
+      commandCount: commands.length,
+      scriptPath: ok.scriptPath,
+    });
+  }
+  const first = results[0] || { issue: "parse-failed" };
+  return makeDetail(descriptor, "broken-path", {
+    level: "warning",
+    detail: `hook command failed validation: ${first.issue}`,
+    hookCommandIssue: first.issue || "parse-failed",
+    nodeBin: first.nodeBin || null,
+    scriptPath: first.scriptPath || null,
+    commandFragment: String(commands[0] || "").slice(0, 128),
+  });
+}
+
 function validateCommandList(descriptor, commands, options) {
   if (!commands.length) {
     return makeDetail(descriptor, "not-connected", {
@@ -352,7 +480,19 @@ function validateCommandList(descriptor, commands, options) {
 
 function findHookCommandsForEvent(settings, eventName, marker, options) {
   if (!settings || !settings.hooks || typeof marker !== "string" || !marker) return [];
-  const entries = settings.hooks[eventName];
+  // Most agents keep per-event arrays directly under settings.hooks.<Event>
+  // (the Claude Code / Qwen settings.json schema). ZCode config-file hooks nest
+  // one level deeper under settings.hooks.events.<Event>; descriptor.hookEventsContainer
+  // selects the container path (defaults to ["hooks"]).
+  const containerPath = (options && Array.isArray(options.hookEventsContainer) && options.hookEventsContainer.length)
+    ? options.hookEventsContainer
+    : ["hooks"];
+  let container = settings;
+  for (const key of containerPath) {
+    if (!container || typeof container !== "object") return [];
+    container = container[key];
+  }
+  const entries = container ? container[eventName] : null;
   if (!Array.isArray(entries)) return [];
 
   const nested = options && options.nested;
@@ -373,6 +513,180 @@ function findHookCommandsForEvent(settings, eventName, marker, options) {
   return commands;
 }
 
+function zcodeHookContainsMarker(hook, marker) {
+  if (!hook || typeof hook !== "object") return false;
+  if (
+    typeof hook.command === "string"
+    && commandContainsFragment(hook.command, marker)
+  ) {
+    return true;
+  }
+  return !!(
+    Array.isArray(hook.args)
+    && hook.args.some((arg) => typeof arg === "string" && arg.includes(marker))
+  );
+}
+
+function findZcodeHooksForEvent(settings, eventName, marker, options) {
+  if (!settings || !settings.hooks || typeof marker !== "string" || !marker) return [];
+  const containerPath = (
+    options
+    && Array.isArray(options.hookEventsContainer)
+    && options.hookEventsContainer.length
+  )
+    ? options.hookEventsContainer
+    : ["hooks", "events"];
+  let container = settings;
+  for (const key of containerPath) {
+    if (!container || typeof container !== "object") return [];
+    container = container[key];
+  }
+  const entries = container ? container[eventName] : null;
+  if (!Array.isArray(entries)) return [];
+
+  const hooks = [];
+  const push = (hook) => {
+    if (!zcodeHookContainsMarker(hook, marker)) return;
+    if (
+      hook.type === "process"
+      && typeof hook.command === "string"
+      && Array.isArray(hook.args)
+    ) {
+      const scriptPath = hook.args.find((arg) => typeof arg === "string" && arg.includes(marker));
+      hooks.push({
+        kind: "process",
+        nodeBin: hook.command,
+        scriptPath,
+        args: hook.args,
+        timeoutMs: hook.timeoutMs,
+        fragment: JSON.stringify({
+          type: hook.type,
+          command: hook.command,
+          args: hook.args,
+          timeoutMs: hook.timeoutMs,
+        }).slice(0, 128),
+      });
+      return;
+    }
+    if (typeof hook.command === "string") {
+      hooks.push({
+        kind: "command",
+        command: hook.command,
+        fragment: hook.command.slice(0, 128),
+      });
+    }
+  };
+
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    if (Array.isArray(entry.hooks)) {
+      for (const hook of entry.hooks) push(hook);
+    }
+    push(entry);
+  }
+  return hooks;
+}
+
+function validateZcodeProcessHook(hook, eventName, descriptor, options) {
+  const args = hook.args;
+  // Timeouts are per-event (PermissionRequest blocks on the bubble at 600s,
+  // state events stay at 8s), so the zcode descriptor carries a resolver
+  // (processHookTimeoutMsForEvent) instead of a single value.
+  const expectedTimeoutMs = descriptor.processHookTimeoutMsForEvent(eventName);
+  if (
+    !Array.isArray(args)
+    || args.length !== 2
+    || typeof args[0] !== "string"
+    || !args[0].includes(descriptor.marker)
+    || args[1] !== eventName
+    || hook.timeoutMs !== expectedTimeoutMs
+  ) {
+    return {
+      ok: false,
+      issue: "process-shape-invalid",
+      nodeBin: hook.nodeBin || null,
+      scriptPath: hook.scriptPath || null,
+    };
+  }
+  return options.validateTarget({
+    nodeBin: hook.nodeBin,
+    scriptPath: hook.scriptPath,
+  }, {
+    platform: options.platform,
+    fs: options.fs,
+    requireAbsoluteNode: true,
+    requireNodeExecutable: true,
+  });
+}
+
+function validateZcodeHookEvents(descriptor, settings, options) {
+  const events = descriptor.hookEvents;
+  const agentName = descriptor.agentName || descriptor.agentId;
+  const missingEvents = [];
+  let commandCount = 0;
+  let firstOk = null;
+  let firstFailure = null;
+
+  for (const eventName of events) {
+    const hooks = findZcodeHooksForEvent(settings, eventName, descriptor.marker, {
+      hookEventsContainer: descriptor.hookEventsContainer,
+    });
+    commandCount += hooks.length;
+    if (!hooks.length) {
+      missingEvents.push(eventName);
+      continue;
+    }
+    const results = hooks.map((hook) => (
+      hook.kind === "process"
+        ? validateZcodeProcessHook(hook, eventName, descriptor, options)
+        : options.validateCommand(hook.command, {
+          platform: options.platform,
+          fs: options.fs,
+        })
+    ));
+    const ok = results.find((result) => result.ok);
+    if (ok) {
+      if (!firstOk) firstOk = ok;
+      continue;
+    }
+    if (!firstFailure) {
+      firstFailure = {
+        eventName,
+        result: results[0] || { issue: "parse-failed" },
+        hook: hooks[0],
+      };
+    }
+  }
+
+  if (missingEvents.length) {
+    return makeDetail(descriptor, "not-connected", {
+      level: "warning",
+      detail: `${descriptor.configPath} missing ${agentName} hook event(s): ${missingEvents.join(", ")}`,
+      commandCount,
+      missingHookEvents: missingEvents,
+    });
+  }
+  if (firstFailure) {
+    const first = firstFailure.result;
+    return makeDetail(descriptor, "broken-path", {
+      level: "warning",
+      detail: `${agentName} hook command failed validation for ${firstFailure.eventName}: ${first.issue || "parse-failed"}`,
+      commandCount,
+      hookCommandIssue: first.issue || "parse-failed",
+      nodeBin: first.nodeBin || null,
+      scriptPath: first.scriptPath || null,
+      commandFragment: first.fragment || firstFailure.hook.fragment,
+      brokenHookEvent: firstFailure.eventName,
+    });
+  }
+  return makeDetail(descriptor, "ok", {
+    level: null,
+    detail: `${descriptor.configPath} ${agentName} hooks registered for ${events.length} events, scriptPath verified`,
+    commandCount,
+    scriptPath: firstOk && firstOk.scriptPath ? firstOk.scriptPath : null,
+  });
+}
+
 function validateGeminiHookEvents(descriptor, settings, options) {
   const missingEvents = [];
   let commandCount = 0;
@@ -380,7 +694,10 @@ function validateGeminiHookEvents(descriptor, settings, options) {
   let firstFailure = null;
 
   for (const eventName of GEMINI_HOOK_EVENTS) {
-    const commands = findHookCommandsForEvent(settings, eventName, descriptor.marker, { nested: !!descriptor.nested });
+    const commands = findHookCommandsForEvent(settings, eventName, descriptor.marker, {
+      nested: !!descriptor.nested,
+      hookEventsContainer: descriptor.hookEventsContainer,
+    });
     commandCount += commands.length;
     if (!commands.length) {
       missingEvents.push(eventName);
@@ -447,7 +764,10 @@ function validateFileHookEvents(descriptor, settings, options) {
   let firstFailure = null;
 
   for (const eventName of events) {
-    const commands = findHookCommandsForEvent(settings, eventName, descriptor.marker, { nested: !!descriptor.nested });
+    const commands = findHookCommandsForEvent(settings, eventName, descriptor.marker, {
+      nested: !!descriptor.nested,
+      hookEventsContainer: descriptor.hookEventsContainer,
+    });
     commandCount += commands.length;
     if (!commands.length) {
       missingEvents.push(eventName);
@@ -906,6 +1226,186 @@ function applyQwenSupplementary(detail, descriptor, settings) {
   };
 }
 
+function getZcodeHooksSupplementary(settings, descriptor) {
+  const hooks = settings && typeof settings === "object" ? settings.hooks : null;
+  if (!hooks || typeof hooks !== "object" || hooks.enabled !== true) {
+    if (hooks && hooks.enabled === false) {
+      return {
+        key: "zcode_hooks",
+        value: "disabled-global",
+        detail: "hooks.enabled is false",
+      };
+    }
+    return {
+      key: "zcode_hooks",
+      value: "needs-enable",
+      detail: "hooks.enabled must be true for config-file hooks",
+    };
+  }
+
+  const events = hooks.events && typeof hooks.events === "object" ? hooks.events : {};
+  const disabledEvents = [];
+  const invalidWrapperEvents = [];
+  for (const eventName of descriptor.hookEvents || []) {
+    const entries = Array.isArray(events[eventName]) ? events[eventName] : [];
+    let managedCount = 0;
+    let activeCount = 0;
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      // Flat command entries are legacy/invalid for current ZCode, but the
+      // generic validator still reports their path issue. Do not interpret an
+      // unsupported entry-level enabled flag as a valid user opt-out.
+      if (
+        zcodeHookContainsMarker(entry, descriptor.marker)
+      ) {
+        managedCount++;
+        activeCount++;
+        invalidWrapperEvents.push(eventName);
+      }
+      if (!Array.isArray(entry.hooks)) continue;
+      const managedNestedHooks = entry.hooks.filter((hook) => (
+        zcodeHookContainsMarker(hook, descriptor.marker)
+      ));
+      if (
+        managedNestedHooks.length > 0
+        && Object.keys(entry).some((key) => key !== "matcher" && key !== "hooks")
+      ) {
+        invalidWrapperEvents.push(eventName);
+      }
+      for (const hook of managedNestedHooks) {
+        managedCount++;
+        if (hook.enabled !== false) activeCount++;
+        const allowedFields = hook.type === "process"
+          ? new Set(["type", "command", "args", "enabled", "timeoutMs"])
+          : new Set(["type", "command", "shell", "async", "enabled", "timeout", "timeoutMs"]);
+        if (Object.keys(hook).some((key) => !allowedFields.has(key))) {
+          invalidWrapperEvents.push(eventName);
+        }
+      }
+    }
+    if (managedCount > 0 && activeCount === 0) disabledEvents.push(eventName);
+  }
+
+  if (disabledEvents.length > 0) {
+    // Order is intentional: explicit user opt-outs (enabled=false) are
+    // reported before a foreign PermissionRequest conflict — under a full
+    // opt-out Clawd's own hooks (the would-be conflicting side) are inactive,
+    // so the disabled-events report is the actionable one.
+    return {
+      key: "zcode_hooks",
+      value: "disabled-events",
+      detail: `Clawd hooks have enabled=false for: ${disabledEvents.join(", ")}`,
+      disabledEvents,
+    };
+  }
+  if (invalidWrapperEvents.length > 0) {
+    const uniqueEvents = [...new Set(invalidWrapperEvents)];
+    return {
+      key: "zcode_hooks",
+      value: "invalid-wrapper",
+      detail: `Clawd hook wrapper has unsupported fields for: ${uniqueEvents.join(", ")}`,
+      invalidWrapperEvents: uniqueEvents,
+    };
+  }
+
+  // Foreign PermissionRequest conflict (mirrors the installer gate in
+  // hooks/zcode-install.js): ZCode runs same-event hooks serially with
+  // last-wins decisions, so a non-Clawd hook owning PermissionRequest means
+  // Clawd's blocking hook must stay unregistered — and a Fix that silently
+  // created the overlap would let one hook override the other's deny.
+  const permissionEntries = Array.isArray(events.PermissionRequest) ? events.PermissionRequest : [];
+  let foreignPermissionHook = false;
+  let managedPermissionHook = false;
+  for (const entry of permissionEntries) {
+    if (!entry || typeof entry !== "object") continue;
+    if (zcodeHookContainsMarker(entry, descriptor.marker)) managedPermissionHook = true;
+    else if (typeof entry.command === "string") foreignPermissionHook = true;
+    if (!Array.isArray(entry.hooks)) continue;
+    for (const hook of entry.hooks) {
+      if (!hook || typeof hook !== "object") continue;
+      if (zcodeHookContainsMarker(hook, descriptor.marker)) managedPermissionHook = true;
+      // Mirror hooks/zcode-install.js exactly: any nested non-Clawd object is
+      // a foreign owner. Limiting this to command hooks makes Doctor offer a
+      // Fix that the installer can never complete for imported HTTP entries.
+      else foreignPermissionHook = true;
+    }
+  }
+  if (foreignPermissionHook) {
+    return {
+      key: "zcode_hooks",
+      value: "permission-conflict",
+      detail: managedPermissionHook
+        ? "a foreign PermissionRequest hook coexists with Clawd's; ZCode executes same-event hooks with last-wins decisions — keep exactly one owner for PermissionRequest"
+        : "a foreign PermissionRequest hook owns the event; Clawd's blocking permission hook is intentionally not registered (last-wins would override the existing hook's deny)",
+    };
+  }
+
+  return {
+    key: "zcode_hooks",
+    value: "enabled",
+    detail: "config.json allows Clawd ZCode hooks",
+  };
+}
+
+function applyZcodeSupplementary(detail, descriptor, settings) {
+  if (descriptor.agentId !== "zcode") return detail;
+
+  const supplementary = getZcodeHooksSupplementary(settings, descriptor);
+  if (supplementary.value === "disabled-global") {
+    return {
+      ...detail,
+      status: "not-connected",
+      level: "warning",
+      detail: "ZCode config-file hooks are disabled globally; Clawd preserves hooks.enabled=false and will not receive hook events",
+      supplementary,
+    };
+  }
+  if (supplementary.value === "disabled-events") {
+    return {
+      ...detail,
+      status: "not-connected",
+      level: "warning",
+      detail: `Clawd ZCode hooks are disabled for ${supplementary.disabledEvents.join(", ")}; Clawd preserves each enabled=false setting`,
+      supplementary,
+    };
+  }
+  if (supplementary.value === "needs-enable") {
+    return {
+      ...detail,
+      status: "not-connected",
+      level: "warning",
+      detail: "ZCode config-file hooks require hooks.enabled=true before Clawd can receive events",
+      supplementary,
+    };
+  }
+  if (supplementary.value === "invalid-wrapper") {
+    return {
+      ...detail,
+      status: "not-connected",
+      level: "warning",
+      detail: `ZCode rejected unsupported fields on Clawd hook wrappers for ${supplementary.invalidWrapperEvents.join(", ")}`,
+      supplementary,
+    };
+  }
+  if (supplementary.value === "permission-conflict") {
+    // Deliberately no fixAction: any automated Fix would either create the
+    // last-wins overlap or delete a user's own hook. The generic validator's
+    // missing-event Fix must not leak through here either.
+    return {
+      ...detail,
+      status: "not-connected",
+      level: "warning",
+      detail: supplementary.detail,
+      supplementary,
+      fixAction: undefined,
+    };
+  }
+  return {
+    ...detail,
+    supplementary,
+  };
+}
+
 function getAntigravityHooksSupplementary(settings) {
   const hookGroup = settings && typeof settings === "object" ? settings[ANTIGRAVITY_HOOK_GROUP_ID] : null;
   if (hookGroup && typeof hookGroup === "object" && hookGroup.enabled === false) {
@@ -1022,10 +1522,16 @@ function checkFileMode(descriptor, options) {
   let detail;
   if (descriptor.agentId === "gemini-cli") {
     detail = validateGeminiHookEvents(descriptor, settings, options);
+  } else if (
+    descriptor.hookExecutorShape === "zcode-process"
+    && Array.isArray(descriptor.hookEvents)
+    && descriptor.hookEvents.length
+  ) {
+    detail = validateZcodeHookEvents(descriptor, settings, options);
   } else if (Array.isArray(descriptor.hookEvents) && descriptor.hookEvents.length) {
     detail = validateFileHookEvents(descriptor, settings, options);
   } else if (descriptor.agentId === "codex") {
-    detail = validateCommandList(
+    detail = validateCodexCommandList(
       descriptor,
       findCodexPlatformHookCommands(settings, descriptor.marker, options.platform || process.platform),
       options
@@ -1046,7 +1552,8 @@ function checkFileMode(descriptor, options) {
   detail = applyCodexSupplementary(detail, descriptor, options, settings);
   detail = applyDisabledHookGroup(detail, descriptor, settings);
   detail = applyGeminiSupplementary(detail, descriptor, settings);
-  return applyQwenSupplementary(detail, descriptor, settings);
+  detail = applyQwenSupplementary(detail, descriptor, settings);
+  return applyZcodeSupplementary(detail, descriptor, settings);
 }
 
 function checkCopilotHooksMode(descriptor, options) {
@@ -1906,6 +2413,59 @@ function checkAgent(descriptor, options) {
     });
   }
 
+  if (descriptor.configMode === "dsh-plugin") {
+    const health = inspectDeepSeekHarnessDiskSync({
+      fs: options.fs,
+      dshHome: descriptor.parentDir,
+      dshInstallRoot: options.dshInstallRoot,
+      managedRoot: options.dshManagedRoot,
+      homeDir: options.homeDir,
+      env: options.env,
+      platform: options.platform,
+    });
+    let detail;
+    if (health.status === "healthy") {
+      detail = makeDetail(descriptor, "ok", {
+        level: null,
+        detail: `${health.profileDir} managed bridge verified on disk; restart any running dsh web process to load this plugin generation`,
+        configPath: health.profileDir,
+        pluginPath: health.resolved && health.resolved.packageDir,
+        bridgeHealth: health.status,
+      });
+    } else if (
+      health.status === "profile-entry-foreign-or-conflicting"
+      || health.status === "version-unsupported"
+      || health.status === "host-version-unsupported"
+      || health.status === "generation-integrity-failed"
+      || health.status === "source-unavailable"
+      || health.status === "profile-corrupt"
+    ) {
+      detail = makeDetail(descriptor, "needs-review", {
+        level: "warning",
+        detail: health.status === "version-unsupported" || health.status === "host-version-unsupported"
+          ? `DeepSeek Harness ${health.detectedDshVersion || "or its bridge marker"} is outside ${health.supportedDshRange || "the supported range"}; Clawd will not activate it automatically`
+          : (health.status === "generation-integrity-failed"
+            ? "The managed DeepSeek Harness bridge bytes no longer match their ownership marker; inspect them manually"
+            : (health.status === "source-unavailable"
+              ? "Clawd's packaged DeepSeek Harness bridge source is unavailable; repair the Clawd installation"
+              : (health.status === "profile-corrupt"
+                ? "The DeepSeek Harness web profile manifest is unreadable; Clawd will not rewrite it automatically"
+                : "A foreign or conflicting DeepSeek Harness plugin uses the Clawd bridge package name; Clawd will not replace it"))),
+        configPath: health.profileDir,
+        bridgeHealth: health.status,
+      });
+    } else {
+      const broken = health.status !== "absent" && health.status !== "profile-missing";
+      detail = makeDetail(descriptor, broken ? "broken-path" : "not-connected", {
+        level: "warning",
+        detail: `DeepSeek Harness managed bridge is ${health.status}`,
+        configPath: health.profileDir,
+        bridgeHealth: health.status,
+      });
+    }
+    return withAgentFixAction(withAgentBubbleNote(detail, prefs, descriptor.agentId), descriptor);
+  }
+
   // Multi-home agents declare ordered configTargets. Most use the first
   // existing directory; WorkBuddy's legacy target requires a real config file,
   // while Reasonix mirrors its own compatibility loader by preferring an
@@ -1969,6 +2529,7 @@ function checkAgent(descriptor, options) {
     detail = withKimiLegacyPermissionModeSupplement(detail, descriptor, options);
   }
   detail = withClaudeHookGuardNotice(detail, descriptor, options);
+  detail = withTraeCodeEnableNotice(detail, descriptor);
   return withAgentFixAction(withAgentBubbleNote(detail, prefs, descriptor.agentId), descriptor);
 }
 
@@ -2065,9 +2626,14 @@ function checkAgentIntegrations(options = {}) {
   const detectorOptions = {
     fs: options.fs || fs,
     platform: options.platform || process.platform,
+    env: options.env || process.env,
     prefs: options.prefs || {},
     server: options.server || null,
     validateCommand: options.validateCommand || validateHookCommand,
+    validateTarget: options.validateTarget || validateHookTarget,
+    dshInstallRoot: options.dshInstallRoot,
+    dshManagedRoot: options.dshManagedRoot,
+    homeDir: options.homeDir,
   };
   const descriptors = options.descriptors || getAgentDescriptors();
   const details = descriptors.map((descriptor) => checkAgent(descriptor, detectorOptions));

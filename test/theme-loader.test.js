@@ -892,6 +892,7 @@ describe("theme-loader capability metadata", () => {
       powerProfile: "standard",
       petTint: false,
       accessories: false,
+      mouthAccessories: false,
     });
   });
 
@@ -909,6 +910,7 @@ describe("theme-loader capability metadata", () => {
       powerProfile: "standard",
       petTint: false,
       accessories: false,
+      mouthAccessories: false,
     });
 
     const listed = themeLoader.listThemesWithMetadata().find((theme) => theme.id === "capTheme");

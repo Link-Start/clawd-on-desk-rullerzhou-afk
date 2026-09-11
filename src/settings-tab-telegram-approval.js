@@ -1,6 +1,7 @@
 "use strict";
 
 (function initSettingsTabTelegramApproval(root) {
+  const recipientApi = root.ClawdFeishuApprovalRecipient || {};
   let state = null;
   let coreRef = null;
   let helpers = null;
@@ -32,13 +33,20 @@
     secretInfoSeq: 0,
     secretInfoLoading: false,
     secretInfoForceRenderPending: false,
-    secretPending: false,
     secretEditing: false,
-    configPending: false,
+    configPersistencePending: false,
+    configPersistenceKind: null,
     testPending: false,
     refreshTimer: null,
     formDraft: null,
     formDirty: false,
+    secretDraft: null,
+    networkLookupPending: false,
+    lookupCancelPending: false,
+    lookupErrorCode: "",
+    lookupResultErrorCode: "",
+    lookupEpoch: 0,
+    expandApproverFallbackGuide: false,
   };
 
   // Feishu (China) and Lark (International) are one channel, one component —
@@ -50,12 +58,45 @@
     feishu: "https://open.feishu.cn/app",
     lark: "https://open.larksuite.com/app",
   });
+  const FEISHU_API_EXPLORER_URLS = Object.freeze({
+    feishu: "https://open.feishu.cn/api-explorer?project=contact&resource=user&apiName=batch_get_id&version=v3",
+    lark: "https://open.larksuite.com/api-explorer?project=contact&resource=user&apiName=batch_get_id&version=v3",
+  });
+
+  const TELEGRAM_VERIFICATION_ERROR_KEYS = Object.freeze({
+    "401": "telegramApprovalVerificationInvalidToken",
+    "403": "telegramApprovalVerificationForbidden",
+    "400": "telegramApprovalVerificationInvalidRecipient",
+    no_chat: "telegramApprovalVerificationInvalidRecipient",
+    "409_conflict": "telegramApprovalVerificationPollingConflict",
+    "409_webhook": "telegramApprovalVerificationWebhookConflict",
+    "429": "telegramApprovalVerificationRateLimited",
+    network: "telegramApprovalVerificationNetwork",
+    timeout: "telegramApprovalVerificationTimeout",
+    token_missing: "telegramApprovalVerificationTokenMissing",
+    "native-start-failed": "telegramApprovalVerificationApplyFailed",
+    "apply-failed": "telegramApprovalVerificationApplyFailed",
+  });
 
   // Stable failure codes -> localized, brand-aware copy. The readiness() reasons
   // (disabled / missing-secret / invalid-config / invalid-secret / not-running)
   // used to fall through to main's raw English message, which named Feishu and
   // so read as nonsense to a correctly configured Lark user.
+  const FEISHU_CONFIGURATION_ERROR_KEYS = Object.freeze({
+    "missing-credentials": "feishuApprovalLookupMissingCredentials",
+    "invalid-app-id": "feishuApprovalLookupInvalidAppId",
+    "credential-provenance-unknown": "feishuApprovalLookupCredentialProvenanceUnknown",
+    "credential-platform-mismatch": "feishuApprovalLookupCredentialPlatformMismatch",
+    "missing-approver": "feishuApprovalApproverNotConfigured",
+    "approver-provenance-unknown": "feishuApprovalLookupApproverProvenanceUnknown",
+    "approver-binding-incomplete": "feishuApprovalLookupApproverBindingIncomplete",
+    "approver-platform-mismatch": "feishuApprovalLookupApproverPlatformMismatch",
+    "approver-app-mismatch": "feishuApprovalLookupApproverAppMismatch",
+    "lookup-requires-open-id": "feishuApprovalLookupRequiresOpenId",
+  });
+
   const FEISHU_TEST_ERROR_KEYS = Object.freeze({
+    ...FEISHU_CONFIGURATION_ERROR_KEYS,
     "no-button-response": "feishuApprovalTestNoResponse",
     "not-connected": "feishuApprovalTestNotConnected",
     "card-send-failed": "feishuApprovalTestSendFailed",
@@ -64,6 +105,22 @@
     "invalid-config": "feishuApprovalErrorInvalidConfig",
     "invalid-secret": "feishuApprovalErrorInvalidSecret",
     "not-running": "feishuApprovalErrorNotRunning",
+  });
+
+  const FEISHU_APPROVER_LOOKUP_ERROR_KEYS = Object.freeze({
+    ...FEISHU_CONFIGURATION_ERROR_KEYS,
+    "empty-approver": "feishuApprovalApproverEmpty",
+    "invalid-approver-id": "feishuApprovalApproverInvalidId",
+    "invalid-platform": "feishuApprovalLookupInvalidPlatform",
+    "invalid-email": "feishuApprovalLookupInvalidEmail",
+    "unsaved-credentials": "feishuApprovalLookupUnsavedCredentials",
+    "incomplete-credentials": "feishuApprovalLookupIncompleteCredentials",
+    "missing-contact-scope": "feishuApprovalLookupMissingContactScope",
+    "approver-not-found": "feishuApprovalLookupApproverNotFound",
+    "lookup-cancelled": "feishuApprovalLookupCancelled",
+    "lookup-superseded": "feishuApprovalLookupSuperseded",
+    "lookup-credentials-changed": "feishuApprovalLookupCredentialsChanged",
+    "lookup-failed": "feishuApprovalLookupFailed",
   });
 
   // Connection failures Clawd raises itself. Anything not listed here came from
@@ -78,6 +135,10 @@
     "wrong-platform": "feishuApprovalErrorWrongPlatform",
   });
 
+  const FEISHU_APPROVER_PREFLIGHT_STATUS_ID = "feishu-approval-approver-preflight-status";
+  let mountedFeishuApproverControl = null;
+  let mountedFeishuTimeoutControl = null;
+
   // readiness() rejects a saved-but-unusable config with a stable reason while
   // every field looks filled in. Without this the card cheerfully reports
   // "credentials saved, flip the switch" next to a disabled test button, and the
@@ -89,8 +150,9 @@
   function feishuBlockingReasonMessage() {
     const s = feishuView.status || {};
     if (s.configured === true) return "";
-    if (s.reason !== "invalid-secret" && s.reason !== "invalid-config") return "";
-    return tBrand(FEISHU_TEST_ERROR_KEYS[s.reason]);
+    if (s.reason === "disabled") return "";
+    const key = FEISHU_TEST_ERROR_KEYS[s.reason];
+    return key ? tBrand(key) : "";
   }
 
   function feishuRuntimeErrorMessage() {
@@ -106,6 +168,27 @@
 
   function t(key) {
     return helpers.t(key);
+  }
+
+  function telegramVerificationFailureMessage(source) {
+    const failure = source && typeof source === "object" ? source : {};
+    const outcome = typeof failure.failureOutcome === "string"
+      ? failure.failureOutcome
+      : "";
+    const errorCode = typeof failure.errorCode === "string"
+      ? failure.errorCode
+      : "";
+    if (outcome === "timeout") {
+      return t("telegramApprovalVerificationTimeout");
+    }
+    const key = Object.prototype.hasOwnProperty.call(TELEGRAM_VERIFICATION_ERROR_KEYS, errorCode)
+      ? TELEGRAM_VERIFICATION_ERROR_KEYS[errorCode]
+      : "";
+    if (key) return t(key);
+    if (outcome === "native-start-failed") {
+      return t("telegramApprovalVerificationApplyFailed");
+    }
+    return t("telegramApprovalCardFailed");
   }
 
   function feishuBrand(platform) {
@@ -130,6 +213,12 @@
     const platform = currentFeishuConfig().platform;
     const consoleUrl = FEISHU_CONSOLE_URLS[platform] || FEISHU_CONSOLE_URLS.feishu;
     return tBrand(key, platform).split("{consoleUrl}").join(consoleUrl);
+  }
+
+  function feishuApiExplorerGuideText(key) {
+    const platform = currentFeishuConfig().platform;
+    const apiExplorerUrl = FEISHU_API_EXPLORER_URLS[platform] || FEISHU_API_EXPLORER_URLS.feishu;
+    return tBrand(key, platform).split("{apiExplorerUrl}").join(apiExplorerUrl);
   }
 
   // String.prototype.replace's replacement-string argument treats $$/$&/$`/$'
@@ -163,14 +252,136 @@
     return {
       enabled: !!(cfg && cfg.enabled),
       // Configs written before the platform field existed carry no value here.
-      // They were implicitly Feishu, so that is what they must keep rendering
-      // as — and every saveFeishuConfig() spreads this object, so the field is
-      // carried along instead of being dropped on the next save.
+      // They were implicitly Feishu, so that is what they must keep rendering.
       platform: cfg && cfg.platform === "lark" ? "lark" : "feishu",
       idType: cfg && typeof cfg.idType === "string" ? cfg.idType : "open_id",
       approverId: cfg && typeof cfg.approverId === "string" ? cfg.approverId : "",
+      approverSource: cfg && (cfg.approverSource === "lookup" || cfg.approverSource === "manual")
+        ? cfg.approverSource
+        : cfg && cfg.approverId
+          ? "unknown"
+          : "none",
+      approverBoundPlatform: cfg && typeof cfg.approverBoundPlatform === "string"
+        ? cfg.approverBoundPlatform
+        : "",
+      approverBoundAppId: cfg && typeof cfg.approverBoundAppId === "string"
+        ? cfg.approverBoundAppId
+        : "",
       connectionTimeoutSeconds: [5, 10, 15, 30, 60].includes(timeout) ? timeout : 15,
     };
+  }
+
+  function feishuLookupPending() {
+    return feishuView.networkLookupPending;
+  }
+
+  function allFeishuControlsBlocked() {
+    return feishuLookupPending()
+      || feishuView.configPersistencePending
+      || feishuView.testPending;
+  }
+
+  function allowlistedFeishuLookupErrorCode(code, fallback = "missing-credentials") {
+    return typeof code === "string" && Object.prototype.hasOwnProperty.call(FEISHU_APPROVER_LOOKUP_ERROR_KEYS, code)
+      ? code
+      : fallback;
+  }
+
+  function feishuLookupPreflightErrorCode() {
+    const draft = getFeishuFormDraft();
+    const idType = ["open_id", "user_id", "union_id"].includes(draft.idType) ? draft.idType : "open_id";
+    const value = String(draft.approverId || "").trim();
+    const recipient = recipientApi.classifyFeishuApprovalRecipient(value, idType);
+    if (recipient.kind === "manual") return "";
+    if (recipient.kind === "empty") {
+      return feishuView.lookupErrorCode === "empty-approver" ? "empty-approver" : "";
+    }
+    if (allFeishuControlsBlocked()) return "";
+    if (recipient.kind !== "email") {
+      return recipient.code === "invalid-approver-id" ? "invalid-approver-id" : "invalid-email";
+    }
+    if (hasUnsavedFeishuCredentialDrafts()) return "unsaved-credentials";
+
+    const status = feishuView.status || {};
+    const info = feishuView.secretInfo || {};
+    if (!info.configured) {
+      return allowlistedFeishuLookupErrorCode(status.credentialReason || "missing-credentials");
+    }
+    if (info.credentialPlatform !== "feishu" && info.credentialPlatform !== "lark") {
+      return "credential-provenance-unknown";
+    }
+    if (info.credentialPlatform !== currentFeishuConfig().platform) {
+      return "credential-platform-mismatch";
+    }
+    if (status.credentialReady !== true) {
+      return allowlistedFeishuLookupErrorCode(status.credentialReason || "missing-credentials");
+    }
+    return "";
+  }
+
+  function feishuLookupPreflightMessage(code) {
+    const key = FEISHU_APPROVER_LOOKUP_ERROR_KEYS[code];
+    return key ? tBrand(key) : "";
+  }
+
+  function feishuApproverValueInvalid(code) {
+    return code === "invalid-email" || code === "invalid-approver-id" || code === "empty-approver";
+  }
+
+  function patchMountedFeishuApproverPreflight(code) {
+    const mounted = mountedFeishuApproverControl;
+    if (!mounted || !document.body.contains(mounted.row)) return false;
+    if (mounted.renderedAsLookupCancel && feishuView.networkLookupPending) return false;
+    const statusCode = code || feishuView.lookupResultErrorCode;
+    const message = feishuLookupPreflightMessage(statusCode);
+    mounted.saveButton.disabled = mounted.renderedAsLookupCancel
+      ? true
+      : allFeishuControlsBlocked() || !!code;
+    mounted.status.textContent = message;
+    if (message) {
+      if (!mounted.renderedAsLookupCancel) {
+        mounted.saveButton.setAttribute("aria-describedby", mounted.status.id);
+      }
+      mounted.input.setAttribute("aria-describedby", mounted.status.id);
+      mounted.input.setAttribute("aria-invalid", feishuApproverValueInvalid(statusCode) ? "true" : "false");
+    } else {
+      if (!mounted.renderedAsLookupCancel) {
+        mounted.saveButton.removeAttribute("aria-describedby");
+      }
+      mounted.input.removeAttribute("aria-describedby");
+      mounted.input.setAttribute("aria-invalid", "false");
+    }
+    return true;
+  }
+
+  function requestFeishuLookupResultRender(lookupEpoch) {
+    let finished = false;
+    let fallbackTimer = null;
+    const renderOnce = () => {
+      if (finished) return;
+      finished = true;
+      if (fallbackTimer !== null) clearTimeout(fallbackTimer);
+      if (lookupEpoch !== feishuView.lookupEpoch) return;
+      ops.requestRender({ content: true });
+    };
+    // Let the already-mounted role=status survive one paint with its new text
+    // before the fallback guide and ID-type controls rebuild the row.
+    fallbackTimer = setTimeout(renderOnce, 100);
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => requestAnimationFrame(renderOnce));
+    }
+  }
+
+  function recomputeFeishuLookupPreflight() {
+    const next = allowlistedFeishuLookupErrorCode(feishuLookupPreflightErrorCode(), "");
+    feishuView.lookupErrorCode = next;
+    patchMountedFeishuApproverPreflight(next);
+    return next;
+  }
+
+  function feishuSetupReasonMessage(setupReason) {
+    const key = FEISHU_CONFIGURATION_ERROR_KEYS[setupReason];
+    return key ? tBrand(key) : "";
   }
 
   function getFormDraft() {
@@ -201,14 +412,50 @@
   }
 
   function setFeishuFormDraftValue(key, value) {
+    if (allFeishuControlsBlocked()) return;
     const draft = getFeishuFormDraft();
     draft[key] = value;
     feishuView.formDirty = true;
+    feishuView.lookupResultErrorCode = "";
+    recomputeFeishuLookupPreflight();
   }
 
   function resetFeishuFormDraft() {
+    feishuView.lookupEpoch += 1;
+    feishuView.networkLookupPending = false;
+    feishuView.lookupCancelPending = false;
     feishuView.formDraft = null;
     feishuView.formDirty = false;
+    feishuView.lookupErrorCode = "";
+    feishuView.lookupResultErrorCode = "";
+  }
+
+  function getFeishuSecretDraft() {
+    if (!feishuView.secretDraft) {
+      feishuView.secretDraft = {
+        appId: "",
+        appSecret: "",
+        verificationToken: "",
+        encryptKey: "",
+      };
+    }
+    return feishuView.secretDraft;
+  }
+
+  function resetFeishuSecretDraft() {
+    feishuView.secretDraft = null;
+  }
+
+  function clearFeishuSecretEditingState() {
+    resetFeishuSecretDraft();
+    feishuView.secretEditing = false;
+  }
+
+  function hasUnsavedFeishuCredentialDrafts() {
+    if (!feishuView.secretEditing && feishuView.secretInfo && feishuView.secretInfo.configured) return false;
+    const draft = getFeishuSecretDraft();
+    return [draft.appId, draft.appSecret, draft.verificationToken, draft.encryptKey]
+      .some((value) => !!String(value || "").trim());
   }
 
   function callCommand(action, payload) {
@@ -287,6 +534,7 @@
       feishuView.statusForceRenderPending = false;
       const changed = updated && feishuStatusRenderKey(previousStatus) !== feishuStatusRenderKey(nextStatus);
       if (updated) feishuView.status = result.state || null;
+      recomputeFeishuLookupPreflight();
       scheduleFeishuStatusRefresh(nextStatus);
       const initialVisibleChange = !hadStatus && feishuStatusNeedsRender(nextStatus);
       if ((shouldForceRender || (updated && (initialVisibleChange || (hadStatus && changed)))) && state.activeTab === "telegram-approval") {
@@ -326,6 +574,9 @@
       const updated = result && result.status === "ok";
       const next = updated ? {
         configured: result.configured === true,
+        credentialPlatform: result.credentialPlatform === "feishu" || result.credentialPlatform === "lark"
+          ? result.credentialPlatform
+          : "unknown",
         appId: result.appId || "",
         appSecret: result.appSecret || "",
         verificationToken: result.verificationToken || "",
@@ -335,6 +586,7 @@
       feishuView.secretInfoForceRenderPending = false;
       const changed = updated && feishuSecretInfoRenderKey(previous) !== feishuSecretInfoRenderKey(next);
       if (updated) feishuView.secretInfo = next;
+      recomputeFeishuLookupPreflight();
       const initialVisibleChange = !previous && feishuSecretInfoNeedsRender(next);
       if ((shouldForceRender || (updated && (initialVisibleChange || (previous && changed)))) && state.activeTab === "telegram-approval") {
         ops.requestRender({ content: true });
@@ -352,6 +604,8 @@
       s.reason || "",
       s.message || "",
       s.tokenStored === true ? "1" : "0",
+      s.errorCode || "",
+      s.failureOutcome || "",
     ].join("");
   }
 
@@ -373,6 +627,10 @@
       // Without this, going from "App ID only" to "App ID + App Secret" would
       // not repaint: every other field in the key stays put.
       s.secretsConfigured === true ? "1" : "0",
+      s.credentialReady === true ? "1" : "0",
+      s.credentialReason || "",
+      s.configurationReady === true ? "1" : "0",
+      s.setupReason || "",
     ].join("");
   }
 
@@ -380,6 +638,7 @@
     const i = info && typeof info === "object" ? info : {};
     return [
       i.configured === true ? "1" : "0",
+      i.credentialPlatform || "unknown",
       i.appId || "",
       i.appSecret || "",
       i.verificationToken || "",
@@ -407,6 +666,8 @@
     refreshTokenInfo();
     refreshFeishuStatus();
     refreshFeishuSecretInfo();
+    refreshSlackStatus();
+    refreshSlackSecretInfo();
     // The native-only snapshot controls both the upgrade gate and the Step-3
     // enable switch, so keep it live even while another status request is in
     // flight.
@@ -432,6 +693,7 @@
     // page can stay tidy as external approval channels grow.
     parent.appendChild(buildTelegramChannelCard());
     parent.appendChild(buildFeishuChannelCard());
+    parent.appendChild(buildSlackChannelCard());
   }
 
   function buildSubtabSwitcher() {
@@ -452,6 +714,7 @@
       if (entry.key === current) btn.classList.add("active");
       btn.addEventListener("click", () => {
         if (coreRef.runtime.remoteApprovalSubtab === entry.key) return;
+        if (entry.key === "lan") leaveFeishuLookupUi();
         coreRef.runtime.remoteApprovalSubtab = entry.key;
         coreRef.ops.requestRender({ content: true });
       });
@@ -465,6 +728,11 @@
     if (!payload) return false;
     if (payload.channel === "feishu") {
       refreshFeishuStatus({ forceRender: true });
+      return true;
+    }
+    if (payload.channel === "slack") {
+      refreshSlackStatus({ forceRender: true });
+      refreshSlackSecretInfo({ forceRender: true });
       return true;
     }
     if (payload.channel === "telegram") {
@@ -682,7 +950,10 @@
         // mode while a long connection is live, so the enable switch (step 3)
         // must come before the callback-subscription guide (step 4).
         helpers.buildSection(t("feishuApprovalStep1Title"), [buildFeishuPlatformRow(), buildFeishuSecretsRow()]),
-        helpers.buildSection(t("feishuApprovalStep2Title"), [buildFeishuApproverRow()]),
+        helpers.buildSection(t("feishuApprovalStep2Title"), [
+          buildFeishuApproverRow(),
+          buildFeishuApproverFallbackGuide(),
+        ]),
         buildFeishuStep3Section(),
         buildFeishuStep4Section(),
       ],
@@ -780,22 +1051,31 @@
     return "incomplete";
   }
 
+  function telegramMissingSetupMessage() {
+    const s = view.status || {};
+    const tokenOk = !!(view.tokenInfo && view.tokenInfo.configured) || s.tokenStored === true;
+    const cfg = currentConfig();
+    const recipientOk = !!(cfg.allowedTgUserId && cfg.targetSessionKey);
+    if (!tokenOk && !recipientOk) return t("telegramApprovalCardMissingBoth");
+    if (!tokenOk) return t("telegramApprovalCardMissingToken");
+    if (!recipientOk) return t("telegramApprovalCardMissingRecipient");
+    return "";
+  }
+
   function deriveCardMessage(kind) {
     const s = view.status || {};
     if (kind === "failed") {
-      return s.message || t("telegramApprovalCardFailed");
+      if (s.configured !== true) {
+        const missingSetup = telegramMissingSetupMessage();
+        if (missingSetup) return missingSetup;
+      }
+      return telegramVerificationFailureMessage(s);
     }
     if (kind === "running") return t("telegramApprovalCardRunning");
     if (kind === "starting") return t("telegramApprovalCardStarting");
     if (kind === "ready") return t("telegramApprovalCardReadyToEnable");
     // incomplete — pick the most actionable missing piece
-    const tokenOk = !!(view.tokenInfo && view.tokenInfo.configured) || s.tokenStored === true;
-    const cfg = currentConfig();
-    const recipientOk = !!cfg.allowedTgUserId;
-    if (!tokenOk && !recipientOk) return t("telegramApprovalCardMissingBoth");
-    if (!tokenOk) return t("telegramApprovalCardMissingToken");
-    if (!recipientOk) return t("telegramApprovalCardMissingRecipient");
-    return t("telegramApprovalCardReadyToEnable");
+    return telegramMissingSetupMessage() || t("telegramApprovalCardReadyToEnable");
   }
 
   function deriveFeishuCardKind() {
@@ -1196,29 +1476,48 @@
 
     const ctrl = document.createElement("div");
     ctrl.className = "row-control";
-    const select = document.createElement("select");
-    select.className = "tg-approval-input tg-approval-output-select";
-    select.disabled = view.configPending;
-    for (const value of ["off", "full"]) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = t("telegramApprovalCompletionOutput_" + value);
-      select.appendChild(option);
-    }
-    select.value = mode;
-    select.addEventListener("change", () => {
-      const nextMode = ["off", "full"].includes(select.value) ? select.value : "off";
-      if (nextMode === mode) return;
-      if (nextMode === "full") {
-        const ok = window.confirm(t("telegramApprovalCompletionOutputFullConfirm"));
-        if (!ok) {
-          select.value = mode;
-          return;
+    const picker = helpers.buildSegmentedRadio({
+      value: mode,
+      options: ["off", "full"].map((value) => ({
+        value,
+        label: t("telegramApprovalCompletionOutput_" + value),
+        description: t("telegramApprovalCompletionOutput_" + value + "Desc"),
+      })),
+      ariaLabel: t("telegramApprovalCompletionOutput"),
+      className: "tg-approval-output-choice",
+      disabled: view.configPending,
+      onChange(value) {
+        const nextMode = ["off", "full"].includes(value) ? value : "off";
+        if (nextMode === mode) return true;
+        if (nextMode === "full") {
+          return helpers.showSettingsConfirmModal({
+            title: t("telegramApprovalCompletionOutputFullConfirmTitle"),
+            detail: t("telegramApprovalCompletionOutputFullConfirm"),
+            actions: [
+              {
+                id: "cancel",
+                label: t("telegramApprovalCancel"),
+                tone: "neutral",
+                defaultFocus: true,
+              },
+              {
+                id: "confirm",
+                label: t("telegramApprovalCompletionOutputFullConfirmAction"),
+                tone: "danger",
+              },
+            ],
+          }).then((actionId) => {
+            if (actionId !== "confirm") return false;
+            return saveConfig(
+              { ...cfg, completionOutputMode: nextMode },
+              { resetDraft: false }
+            );
+          });
         }
-      }
-      saveConfig({ ...cfg, completionOutputMode: nextMode }, { resetDraft: false });
+        return saveConfig({ ...cfg, completionOutputMode: nextMode }, { resetDraft: false });
+      },
     });
-    ctrl.appendChild(select);
+    ctrl.appendChild(picker.element);
     row.appendChild(ctrl);
     return row;
   }
@@ -1314,10 +1613,11 @@
       // it controls can never drift apart.
       btn.textContent = feishuBrand(platform);
       btn.classList.toggle("active", cfg.platform === platform);
-      btn.disabled = feishuView.configPending;
+      btn.disabled = allFeishuControlsBlocked();
       btn.addEventListener("click", () => {
-        if (feishuView.configPending || cfg.platform === platform) return;
-        saveFeishuConfig({ ...cfg, platform }, { resetDraft: false });
+        if (allFeishuControlsBlocked() || cfg.platform === platform) return;
+        clearFeishuSecretEditingState();
+        saveFeishuConfig({ platform }, { resetDraft: false });
       });
       segmented.appendChild(btn);
     }
@@ -1363,7 +1663,10 @@
     btn.type = "button";
     btn.className = "soft-btn";
     btn.textContent = t("feishuApprovalReplaceSecrets");
+    btn.disabled = allFeishuControlsBlocked();
     btn.addEventListener("click", () => {
+      if (allFeishuControlsBlocked()) return;
+      resetFeishuSecretDraft();
       feishuView.secretEditing = true;
       ops.requestRender({ content: true });
     });
@@ -1399,17 +1702,24 @@
 
     const ctrl = document.createElement("div");
     ctrl.className = "row-control tg-approval-input-row feishu-approval-secrets-grid";
-    const appIdInput = buildFeishuSecretInput("feishuApprovalAppIdPlaceholder", false);
-    const appSecretInput = buildFeishuSecretInput("feishuApprovalAppSecretPlaceholder", true);
-    const verificationInput = buildFeishuSecretInput("feishuApprovalVerificationTokenPlaceholder", true);
-    const encryptInput = buildFeishuSecretInput("feishuApprovalEncryptKeyPlaceholder", true);
+    const appIdInput = buildFeishuSecretInput("feishuApprovalAppIdPlaceholder", false, "appId");
+    const appSecretInput = buildFeishuSecretInput("feishuApprovalAppSecretPlaceholder", true, "appSecret");
+    const verificationInput = buildFeishuSecretInput(
+      "feishuApprovalVerificationTokenPlaceholder",
+      true,
+      "verificationToken",
+    );
+    const encryptInput = buildFeishuSecretInput("feishuApprovalEncryptKeyPlaceholder", true, "encryptKey");
 
     const saveBtn = document.createElement("button");
     saveBtn.type = "button";
     saveBtn.className = "soft-btn accent";
-    saveBtn.textContent = feishuView.secretPending ? t("feishuApprovalSaving") : t("feishuApprovalSaveSecrets");
-    saveBtn.disabled = feishuView.secretPending;
+    const credentialPersistencePending = feishuView.configPersistencePending
+      && feishuView.configPersistenceKind === "credentials";
+    saveBtn.textContent = credentialPersistencePending ? t("feishuApprovalSaving") : t("feishuApprovalSaveSecrets");
+    saveBtn.disabled = allFeishuControlsBlocked();
     saveBtn.addEventListener("click", () => {
+      if (allFeishuControlsBlocked()) return;
       const payload = {
         appId: appIdInput.value.trim(),
         appSecret: appSecretInput.value.trim(),
@@ -1424,27 +1734,20 @@
         ops.showToast(tBrand("feishuApprovalSecretsEmpty"), { error: true });
         return;
       }
-      feishuView.secretPending = true;
-      ops.requestRender({ content: true });
-      callCommand("feishuApproval.setSecrets", payload).then((result) => {
-        feishuView.secretPending = false;
-        if (!result || result.status !== "ok") {
-          // Localized copy first, with the writer's English diagnostic appended
-          // as detail — it names the actual cause (EACCES, ENOSPC…), which the
-          // translated sentence deliberately does not try to guess.
-          let text = tBrand("feishuApprovalSecretsSaveFailed");
-          const detail = result && result.message ? String(result.message) : "";
-          if (detail) text += ` (${detail})`;
-          ops.showToast(text, { error: true });
-          ops.requestRender({ content: true });
-          return;
-        }
-        ops.showToast(tBrand("feishuApprovalSecretsSaved"));
-        feishuView.secretEditing = false;
-        feishuView.secretInfo = null;
-        feishuView.status = null;
-        refreshFeishuSecretInfo({ forceRender: true });
-        refreshFeishuStatus({ forceRender: true });
+      for (const input of [appIdInput, appSecretInput, verificationInput, encryptInput]) {
+        input.disabled = true;
+      }
+      saveBtn.disabled = true;
+      saveFeishuCommand("feishuApproval.setSecrets", payload, {
+        kind: "credentials",
+        credentialPayload: payload,
+        failureKey: "feishuApprovalSecretsSaveFailed",
+        successKey: "feishuApprovalSecretsSaved",
+        onSuccess() {
+          clearFeishuSecretEditingState();
+          feishuView.secretInfo = null;
+          refreshFeishuSecretInfo({ forceRender: true });
+        },
       });
     });
 
@@ -1458,24 +1761,45 @@
       cancelBtn.type = "button";
       cancelBtn.className = "soft-btn";
       cancelBtn.textContent = t("telegramApprovalCancel");
-      cancelBtn.disabled = feishuView.secretPending;
+      cancelBtn.disabled = allFeishuControlsBlocked();
       cancelBtn.addEventListener("click", () => {
-        feishuView.secretEditing = false;
+        if (allFeishuControlsBlocked()) return;
+        clearFeishuSecretEditingState();
         ops.requestRender({ content: true });
       });
       ctrl.appendChild(cancelBtn);
+    } else {
+      const clearBtn = document.createElement("button");
+      clearBtn.type = "button";
+      clearBtn.className = "soft-btn";
+      clearBtn.textContent = t("feishuApprovalClearSecretsDraft");
+      clearBtn.disabled = allFeishuControlsBlocked();
+      clearBtn.addEventListener("click", () => {
+        if (allFeishuControlsBlocked()) return;
+        clearFeishuSecretEditingState();
+        ops.requestRender({ content: true });
+      });
+      ctrl.appendChild(clearBtn);
     }
     row.appendChild(ctrl);
     return row;
   }
 
-  function buildFeishuSecretInput(placeholderKey, secret) {
+  function buildFeishuSecretInput(placeholderKey, secret, draftKey) {
     const input = document.createElement("input");
     input.type = secret ? "password" : "text";
     input.autocomplete = "off";
     input.spellcheck = false;
     input.placeholder = t(placeholderKey);
     input.className = "tg-approval-input";
+    input.disabled = allFeishuControlsBlocked();
+    const draft = getFeishuSecretDraft();
+    input.value = draft[draftKey] || "";
+    input.addEventListener("input", () => {
+      if (allFeishuControlsBlocked()) return;
+      getFeishuSecretDraft()[draftKey] = input.value;
+      recomputeFeishuLookupPreflight();
+    });
     return input;
   }
 
@@ -1514,7 +1838,11 @@
   }
 
   function buildFeishuApproverRow() {
+    const cfg = currentFeishuConfig();
     const draft = getFeishuFormDraft();
+    const lookupPreflightErrorCode = feishuLookupPreflightErrorCode();
+    const lookupStatusCode = lookupPreflightErrorCode || feishuView.lookupResultErrorCode;
+    feishuView.lookupErrorCode = lookupPreflightErrorCode;
     const row = document.createElement("div");
     row.className = "row tg-approval-recipient-row feishu-approval-approver-row";
 
@@ -1538,6 +1866,23 @@
       note.textContent = t("feishuApprovalIdTypeUserIdNote");
       text.appendChild(note);
     }
+    if (cfg.approverId && cfg.approverSource === "unknown") {
+      const warning = document.createElement("span");
+      warning.className = "row-desc feishu-approval-reconfirmation-warning";
+      warning.textContent = tBrand("feishuApprovalApproverReconfirmationWarning");
+      text.appendChild(warning);
+    }
+    const preflightStatus = document.createElement("span");
+    preflightStatus.id = FEISHU_APPROVER_PREFLIGHT_STATUS_ID;
+    preflightStatus.className = "row-desc feishu-approval-lookup-preflight-status";
+    preflightStatus.setAttribute("role", "status");
+    preflightStatus.setAttribute("aria-live", "polite");
+    preflightStatus.setAttribute("aria-atomic", "true");
+    // Keep the live region mounted even while empty. display:none/hidden live
+    // regions do not reliably announce text inserted at the same time they are
+    // revealed; an empty mounted region stays inert until its text changes.
+    preflightStatus.textContent = feishuLookupPreflightMessage(lookupStatusCode);
+    text.appendChild(preflightStatus);
     row.appendChild(text);
 
     const ctrl = document.createElement("div");
@@ -1556,7 +1901,9 @@
       btn.dataset.idType = item.id;
       btn.textContent = item.label;
       btn.classList.toggle("active", draft.idType === item.id);
+      btn.disabled = allFeishuControlsBlocked();
       btn.addEventListener("click", () => {
+        if (allFeishuControlsBlocked()) return;
         setFeishuFormDraftValue("idType", item.id);
         ops.requestRender({ content: true });
       });
@@ -1570,25 +1917,128 @@
     input.placeholder = t("feishuApprovalApproverPlaceholder");
     input.className = "tg-approval-input";
     input.value = draft.approverId || "";
+    input.disabled = allFeishuControlsBlocked();
+    input.setAttribute("aria-invalid", feishuApproverValueInvalid(lookupStatusCode) ? "true" : "false");
+    if (lookupStatusCode) {
+      input.setAttribute("aria-describedby", preflightStatus.id);
+    }
     input.addEventListener("input", () => setFeishuFormDraftValue("approverId", input.value));
 
     const saveBtn = document.createElement("button");
+    const renderedAsLookupCancel = feishuView.networkLookupPending;
     saveBtn.type = "button";
     saveBtn.className = "soft-btn accent";
-    saveBtn.textContent = feishuView.configPending ? t("feishuApprovalSaving") : t("feishuApprovalSaveApprover");
-    saveBtn.disabled = feishuView.configPending;
+    saveBtn.textContent = renderedAsLookupCancel
+      ? feishuView.lookupCancelPending
+        ? t("feishuApprovalLookupCancelling")
+        : t("feishuApprovalLookupCancel")
+      : t("feishuApprovalSaveApprover");
+    saveBtn.disabled = renderedAsLookupCancel
+      ? feishuView.lookupCancelPending
+      : allFeishuControlsBlocked() || !!lookupPreflightErrorCode;
+    if (preflightStatus.textContent && !renderedAsLookupCancel) {
+      saveBtn.setAttribute("aria-describedby", preflightStatus.id);
+    }
     saveBtn.addEventListener("click", () => {
+      if (renderedAsLookupCancel) {
+        if (!feishuView.lookupCancelPending) cancelFeishuApproverLookup();
+        return;
+      }
+      if (allFeishuControlsBlocked()) return;
       const nextDraft = getFeishuFormDraft();
       const approverId = String(nextDraft.approverId || "").trim();
       const idType = ["open_id", "user_id", "union_id"].includes(nextDraft.idType) ? nextDraft.idType : "open_id";
+      const recipient = recipientApi.classifyFeishuApprovalRecipient(approverId, idType);
       if (!approverId) {
+        feishuView.lookupErrorCode = "empty-approver";
+        patchMountedFeishuApproverPreflight("empty-approver");
+        input.focus();
         ops.showToast(tBrand("feishuApprovalApproverEmpty"), { error: true });
         return;
       }
-      saveFeishuConfig({
-        ...currentFeishuConfig(),
-        idType,
-        approverId,
+      const preflightErrorCode = feishuLookupPreflightErrorCode();
+      if (preflightErrorCode) {
+        feishuView.lookupErrorCode = preflightErrorCode;
+        const key = FEISHU_APPROVER_LOOKUP_ERROR_KEYS[preflightErrorCode]
+          || "feishuApprovalLookupFailed";
+        ops.showToast(tBrand(key), { error: true });
+        patchMountedFeishuApproverPreflight(preflightErrorCode);
+        return;
+      }
+      if (recipient.kind === "email") {
+        const lookupEpoch = ++feishuView.lookupEpoch;
+        feishuView.lookupResultErrorCode = "";
+        feishuView.networkLookupPending = true;
+        feishuView.lookupCancelPending = false;
+        ops.requestRender({ content: true });
+        callCommand("feishuApproval.saveApproverByEmail", {
+          email: recipient.email,
+        }).then((result) => {
+          if (lookupEpoch !== feishuView.lookupEpoch) return;
+          const cancellationRequested = feishuView.lookupCancelPending;
+          feishuView.networkLookupPending = false;
+          feishuView.lookupCancelPending = false;
+          if (result && result.status === "ok") {
+            feishuView.lookupErrorCode = "";
+            feishuView.lookupResultErrorCode = "";
+            refreshAuthoritativeFeishuSnapshot().then((refreshed) => {
+              if (lookupEpoch !== feishuView.lookupEpoch) return;
+              if (!refreshed) {
+                ops.showToast(tBrand("feishuApprovalPersistenceFailed"), { error: true });
+                ops.requestRender({ content: true });
+                return;
+              }
+              resetFeishuFormDraft();
+              ops.showToast(tBrand("feishuApprovalConfigSaved"));
+              feishuView.status = null;
+              refreshFeishuStatus({ forceRender: true });
+            });
+            return;
+          }
+          const code = allowlistedFeishuLookupErrorCode(
+            result && result.code,
+            "lookup-failed",
+          );
+          feishuView.lookupResultErrorCode = code;
+          if (["missing-contact-scope", "approver-not-found", "lookup-failed"].includes(code)) {
+            // The API Explorer fallback always returns an app-scoped open_id.
+            // Keep this draft-only: choosing the guide must not persist a
+            // config change before the user pastes and explicitly saves it.
+            const fallbackDraft = getFeishuFormDraft();
+            fallbackDraft.idType = "open_id";
+            feishuView.formDirty = true;
+            feishuView.expandApproverFallbackGuide = true;
+          }
+          if (code !== "lookup-cancelled" || !cancellationRequested) {
+            ops.showToast(tBrand(FEISHU_APPROVER_LOOKUP_ERROR_KEYS[code]), { error: true });
+          }
+          patchMountedFeishuApproverPreflight("");
+          requestFeishuLookupResultRender(lookupEpoch);
+        }).catch(() => {
+          if (lookupEpoch !== feishuView.lookupEpoch) return;
+          feishuView.networkLookupPending = false;
+          feishuView.lookupCancelPending = false;
+          feishuView.lookupResultErrorCode = "lookup-failed";
+          const fallbackDraft = getFeishuFormDraft();
+          fallbackDraft.idType = "open_id";
+          feishuView.formDirty = true;
+          feishuView.expandApproverFallbackGuide = true;
+          ops.showToast(tBrand("feishuApprovalLookupFailed"), { error: true });
+          patchMountedFeishuApproverPreflight("");
+          requestFeishuLookupResultRender(lookupEpoch);
+        });
+        return;
+      }
+      if (recipient.kind !== "manual") {
+        ops.showToast(tBrand("feishuApprovalLookupInvalidEmail"), { error: true });
+        return;
+      }
+      saveFeishuCommand("feishuApproval.saveManualApprover", {
+        idType: recipient.idType,
+        approverId: recipient.approverId,
+      }, {
+        kind: "manual-approver",
+        resetDraft: true,
       });
     });
 
@@ -1596,7 +2046,50 @@
     ctrl.appendChild(input);
     ctrl.appendChild(saveBtn);
     row.appendChild(ctrl);
+    mountedFeishuApproverControl = {
+      row,
+      input,
+      saveButton: saveBtn,
+      status: preflightStatus,
+      renderedAsLookupCancel,
+    };
     return row;
+  }
+
+  function buildFeishuApproverFallbackGuide() {
+    const rows = [
+      ["feishuApprovalApiExplorerGuideDesc", false],
+      ["feishuApprovalApiExplorerGuideLinkHtml", true],
+      ["feishuApprovalApiExplorerGuideManual", false],
+    ].map(([key, hasLink]) => {
+      const row = document.createElement("div");
+      row.className = "row feishu-approval-api-explorer-step";
+      const text = document.createElement("div");
+      text.className = "row-text";
+      const desc = document.createElement("span");
+      desc.className = "row-desc";
+      if (hasLink) {
+        desc.innerHTML = escapeWithLink(feishuApiExplorerGuideText(key));
+        bindExternalLinks(desc);
+      } else {
+        desc.textContent = tBrand(key);
+      }
+      text.appendChild(desc);
+      row.appendChild(text);
+      return row;
+    });
+    const group = helpers.buildCollapsibleGroup({
+      id: "remote-approval.feishu.api-explorer",
+      title: t("feishuApprovalApiExplorerGuideTitle"),
+      defaultCollapsed: true,
+      className: "feishu-approval-api-explorer-guide",
+      children: rows,
+    });
+    if (feishuView.expandApproverFallbackGuide) {
+      feishuView.expandApproverFallbackGuide = false;
+      group.expand({ persist: false, animate: false });
+    }
+    return group;
   }
 
   // ── Feishu: Enable + Test ──
@@ -1614,14 +2107,21 @@
     const secretsConfigured = feishuSecretsConfigured();
     const cfg = currentFeishuConfig();
     const approverConfigured = !!cfg.approverId;
-    return { secretsConfigured, approverConfigured, ready: secretsConfigured && approverConfigured };
+    const status = feishuView.status || {};
+    return {
+      secretsConfigured,
+      approverConfigured,
+      ready: status.configurationReady === true,
+      configurationReady: status.configurationReady === true,
+      setupReason: typeof status.setupReason === "string" ? status.setupReason : "",
+    };
   }
 
   function buildFeishuStep3Section() {
-    const { secretsConfigured, approverConfigured, ready } = feishuSetupProgress();
+    const { secretsConfigured, approverConfigured, ready, setupReason } = feishuSetupProgress();
     const rows = [];
     if (!ready) {
-      rows.push(buildFeishuPrerequisitesRow({ secretsConfigured, approverConfigured }));
+      rows.push(buildFeishuPrerequisitesRow({ secretsConfigured, approverConfigured, setupReason }));
     }
     rows.push(buildFeishuEnabledRow({ ready }));
     rows.push(buildFeishuTimeoutRow());
@@ -1636,7 +2136,7 @@
     ]);
   }
 
-  function buildFeishuPrerequisitesRow({ secretsConfigured, approverConfigured }) {
+  function buildFeishuPrerequisitesRow({ secretsConfigured, approverConfigured, setupReason }) {
     const row = document.createElement("div");
     row.className = "row tg-approval-prereq-row";
     const text = document.createElement("div");
@@ -1646,6 +2146,14 @@
     label.textContent = t("feishuApprovalPrereqLabel");
     const desc = document.createElement("span");
     desc.className = "row-desc";
+    const setupMessage = feishuSetupReasonMessage(setupReason);
+    if (setupMessage) {
+      desc.textContent = setupMessage;
+      text.appendChild(label);
+      text.appendChild(desc);
+      row.appendChild(text);
+      return row;
+    }
     const missing = [];
     if (!secretsConfigured) missing.push(t("feishuApprovalPrereqMissingSecrets"));
     if (!approverConfigured) missing.push(t("feishuApprovalPrereqMissingApprover"));
@@ -1658,9 +2166,10 @@
 
   function buildFeishuEnabledRow({ ready }) {
     const cfg = currentFeishuConfig();
+    const blocked = allFeishuControlsBlocked() || (!cfg.enabled && !ready);
     const row = document.createElement("div");
     row.className = "row";
-    if (!ready) row.classList.add("tg-approval-row-disabled");
+    if (!ready && !cfg.enabled) row.classList.add("tg-approval-row-disabled");
 
     const text = document.createElement("div");
     text.className = "row-text";
@@ -1680,13 +2189,19 @@
     sw.className = "switch";
     sw.setAttribute("role", "switch");
     sw.setAttribute("tabindex", "0");
-    helpers.setSwitchVisual(sw, cfg.enabled, { pending: feishuView.configPending });
-    if (!ready) {
+    helpers.setSwitchVisual(sw, cfg.enabled, { pending: feishuView.configPersistencePending });
+    if (blocked) {
       sw.classList.add("disabled");
       sw.setAttribute("aria-disabled", "true");
       sw.removeAttribute("tabindex");
+      if (!cfg.enabled && !ready) {
+        sw.title = feishuSetupReasonMessage(feishuSetupProgress().setupReason);
+      }
     } else {
-      const toggle = () => saveFeishuConfig({ ...cfg, enabled: !cfg.enabled }, { resetDraft: false });
+      const toggle = () => {
+        if (allFeishuControlsBlocked()) return;
+        saveFeishuConfig({ enabled: !cfg.enabled }, { resetDraft: false });
+      };
       sw.addEventListener("click", toggle);
       sw.addEventListener("keydown", (ev) => {
         if (ev.key === " " || ev.key === "Enter") {
@@ -1719,22 +2234,29 @@
 
     const ctrl = document.createElement("div");
     ctrl.className = "row-control";
-    const select = document.createElement("select");
-    select.className = "tg-approval-input tg-approval-output-select feishu-approval-timeout-select";
-    select.disabled = feishuView.configPending;
-    for (const value of [5, 10, 15, 30, 60]) {
-      const option = document.createElement("option");
-      option.value = String(value);
-      option.textContent = t("feishuApprovalConnectionTimeoutOption").replace("{seconds}", String(value));
-      select.appendChild(option);
-    }
-    select.value = String(cfg.connectionTimeoutSeconds);
-    select.addEventListener("change", () => {
-      const nextTimeout = Number(select.value);
-      if (![5, 10, 15, 30, 60].includes(nextTimeout) || nextTimeout === cfg.connectionTimeoutSeconds) return;
-      saveFeishuConfig({ ...cfg, connectionTimeoutSeconds: nextTimeout }, { resetDraft: false });
+    const picker = helpers.buildSettingsSelect({
+      value: String(cfg.connectionTimeoutSeconds),
+      options: [5, 10, 15, 30, 60].map((value) => ({
+        value: String(value),
+        label: t("feishuApprovalConnectionTimeoutOption").replace("{seconds}", String(value)),
+      })),
+      ariaLabel: t("feishuApprovalConnectionTimeout"),
+      className: "feishu-approval-timeout-select",
+      focusKey: "feishu-approval-connection-timeout",
+      disabled: allFeishuControlsBlocked(),
+      onChange(value) {
+        if (allFeishuControlsBlocked()) return false;
+        const nextTimeout = Number(value);
+        if (![5, 10, 15, 30, 60].includes(nextTimeout)) return false;
+        if (nextTimeout === cfg.connectionTimeoutSeconds) return true;
+        return saveFeishuConfig(
+          { connectionTimeoutSeconds: nextTimeout },
+          { resetDraft: false, preserveMountedControl: true }
+        );
+      },
     });
-    ctrl.appendChild(select);
+    mountedFeishuTimeoutControl = { row, picker };
+    ctrl.appendChild(picker.element);
     row.appendChild(ctrl);
     return row;
   }
@@ -1742,7 +2264,11 @@
   function buildFeishuTestRow({ ready }) {
     const s = feishuView.status || {};
     const runtimeReady = s.configured === true;
-    const testDisabled = feishuView.testPending || !ready || !runtimeReady;
+    const testDisabled = feishuView.testPending
+      || feishuLookupPending()
+      || feishuView.configPersistencePending
+      || !ready
+      || !runtimeReady;
     const row = document.createElement("div");
     row.className = "row";
     if (!ready) row.classList.add("tg-approval-row-disabled");
@@ -1775,7 +2301,7 @@
         || t("feishuApprovalCardMissingBoth");
     }
     btn.addEventListener("click", () => {
-      if (testDisabled) return;
+      if (testDisabled || feishuView.testPending) return;
       feishuView.testPending = true;
       ops.requestRender({ content: true });
       callCommand("feishuApproval.test").then((result) => {
@@ -1802,53 +2328,884 @@
 
   // ── Save / shared ──
 
+  function cancelFeishuApproverLookup({ bestEffort = false } = {}) {
+    if (!feishuView.networkLookupPending) return Promise.resolve(false);
+    if (bestEffort) {
+      feishuView.lookupCancelPending = true;
+      callCommand("feishuApproval.cancelApproverLookup");
+      return Promise.resolve(true);
+    }
+    const lookupEpoch = feishuView.lookupEpoch;
+    feishuView.lookupCancelPending = true;
+    ops.requestRender({ content: true });
+    return callCommand("feishuApproval.cancelApproverLookup").then((result) => {
+      const ok = !!(result && result.status === "ok");
+      if (lookupEpoch !== feishuView.lookupEpoch) return ok;
+      if (!ok) {
+        feishuView.lookupCancelPending = false;
+        ops.showToast(t("feishuApprovalLookupCancelFailed"), { error: true });
+        ops.requestRender({ content: true });
+      }
+      return ok;
+    }).catch(() => {
+      if (lookupEpoch !== feishuView.lookupEpoch) return false;
+      feishuView.lookupCancelPending = false;
+      ops.showToast(t("feishuApprovalLookupCancelFailed"), { error: true });
+      ops.requestRender({ content: true });
+      return false;
+    });
+  }
+
+  function leaveFeishuLookupUi() {
+    if (feishuView.networkLookupPending) {
+      cancelFeishuApproverLookup({ bestEffort: true });
+    }
+    resetFeishuFormDraft();
+    clearFeishuSecretEditingState();
+  }
+
+  function refreshAuthoritativeFeishuSnapshot() {
+    if (!window.settingsAPI || typeof window.settingsAPI.getSnapshot !== "function") {
+      return Promise.resolve(false);
+    }
+    let pending;
+    try {
+      pending = window.settingsAPI.getSnapshot();
+    } catch {
+      return Promise.resolve(false);
+    }
+    return Promise.resolve(pending).then((snapshot) => {
+      if (
+        !snapshot
+        || typeof snapshot !== "object"
+        || !snapshot.feishuApproval
+        || typeof snapshot.feishuApproval !== "object"
+      ) return false;
+      state.snapshot = snapshot;
+      return true;
+    }).catch(() => false);
+  }
+
   function saveConfig(next, options = {}) {
     if (!window.settingsAPI || typeof window.settingsAPI.update !== "function") {
       ops.showToast(t("toastSaveFailed") + "settings API unavailable", { error: true });
-      return;
+      return Promise.resolve(false);
     }
     view.configPending = true;
     ops.requestRender({ content: true });
-    window.settingsAPI.update("tgApproval", next).then((result) => {
+    return window.settingsAPI.update("tgApproval", next).then((result) => {
       view.configPending = false;
       if (!result || result.status !== "ok") {
         ops.showToast((result && result.message) || t("toastSaveFailed"), { error: true });
         ops.requestRender({ content: true });
-        return;
+        return false;
       }
       ops.showToast(t("telegramApprovalConfigSaved"));
       if (options.resetDraft !== false) resetFormDraft();
       view.status = null;
       refreshStatus({ forceRender: true });
+      return true;
     }).catch((err) => {
       view.configPending = false;
       ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
       ops.requestRender({ content: true });
+      return false;
+    });
+  }
+
+  function confirmFeishuCredentialReplacement(payload, options) {
+    return helpers.showSettingsConfirmModal({
+      title: t("feishuApprovalCredentialsReplaceConfirmTitle"),
+      detail: t("feishuApprovalCredentialsReplaceConfirmDetail"),
+      actions: [
+        {
+          id: "cancel",
+          label: t("telegramApprovalCancel"),
+          tone: "neutral",
+          defaultFocus: true,
+        },
+        {
+          id: "confirm",
+          label: t("feishuApprovalCredentialsReplaceConfirmAction"),
+          tone: "danger",
+        },
+      ],
+    }).then((actionId) => {
+      if (actionId !== "confirm") {
+        feishuView.configPersistencePending = false;
+        feishuView.configPersistenceKind = null;
+        ops.requestRender({ content: true });
+        return false;
+      }
+      feishuView.configPersistencePending = false;
+      feishuView.configPersistenceKind = null;
+      const confirmedPayload = { ...payload, confirmReplace: true };
+      return saveFeishuCommand(
+        "feishuApproval.setSecrets",
+        confirmedPayload,
+        { ...options, credentialPayload: confirmedPayload },
+      );
+    }).catch(() => {
+      feishuView.configPersistencePending = false;
+      feishuView.configPersistenceKind = null;
+      ops.requestRender({ content: true });
+      return false;
+    });
+  }
+
+  function persistFeishuChange(request, options = {}) {
+    if (feishuView.configPersistencePending || feishuView.testPending) {
+      return Promise.resolve(false);
+    }
+    const preserveMountedControl = options.preserveMountedControl === true;
+    feishuView.configPersistencePending = true;
+    feishuView.configPersistenceKind = options.kind || "ordinary";
+    if (!preserveMountedControl) ops.requestRender({ content: true });
+    let pending;
+    try {
+      pending = request();
+    } catch {
+      pending = Promise.resolve({ status: "error" });
+    }
+    return Promise.resolve(pending).then((result) => {
+      if (!result || result.status !== "ok") {
+        if (
+          options.kind === "credentials"
+          && options.credentialPayload
+          && options.credentialPayload.confirmReplace !== true
+          && result
+          && result.code === "credentials-replace-confirmation-required"
+        ) {
+          return confirmFeishuCredentialReplacement(options.credentialPayload, options);
+        }
+        feishuView.configPersistencePending = false;
+        feishuView.configPersistenceKind = null;
+        ops.showToast(tBrand(options.failureKey || "feishuApprovalPersistenceFailed"), { error: true });
+        if (!preserveMountedControl) ops.requestRender({ content: true });
+        return false;
+      }
+      return refreshAuthoritativeFeishuSnapshot().then((refreshed) => {
+        feishuView.configPersistencePending = false;
+        feishuView.configPersistenceKind = null;
+        if (!refreshed) {
+          ops.showToast(tBrand(options.failureKey || "feishuApprovalPersistenceFailed"), { error: true });
+          if (!preserveMountedControl) ops.requestRender({ content: true });
+          return false;
+        }
+        if (options.successKey !== false) {
+          ops.showToast(tBrand(options.successKey || "feishuApprovalConfigSaved"));
+        }
+        if (options.resetDraft === true || (options.resetDraft !== false && options.kind === "ordinary")) {
+          resetFeishuFormDraft();
+        }
+        if (typeof options.onSuccess === "function") options.onSuccess(result);
+        if (!preserveMountedControl) feishuView.status = null;
+        refreshFeishuStatus({ forceRender: !preserveMountedControl });
+        return true;
+      });
+    }).catch(() => {
+      feishuView.configPersistencePending = false;
+      feishuView.configPersistenceKind = null;
+      ops.showToast(tBrand(options.failureKey || "feishuApprovalPersistenceFailed"), { error: true });
+      if (!preserveMountedControl) ops.requestRender({ content: true });
+      return false;
     });
   }
 
   function saveFeishuConfig(next, options = {}) {
-    if (!window.settingsAPI || typeof window.settingsAPI.update !== "function") {
-      ops.showToast(t("toastSaveFailed") + "settings API unavailable", { error: true });
+    if (!window.settingsAPI || typeof window.settingsAPI.command !== "function") {
+      ops.showToast(t("feishuApprovalPersistenceFailed"), { error: true });
+      return Promise.resolve(false);
+    }
+    return persistFeishuChange(
+      () => callCommand("feishuApproval.updateConfig", next),
+      { ...options, kind: options.kind || "ordinary" },
+    );
+  }
+
+  function saveFeishuCommand(name, payload, options = {}) {
+    if (!window.settingsAPI || typeof window.settingsAPI.command !== "function") {
+      ops.showToast(t("feishuApprovalPersistenceFailed"), { error: true });
+      return Promise.resolve(false);
+    }
+    return persistFeishuChange(
+      () => callCommand(name, payload),
+      options,
+    );
+  }
+
+  function configsMatchExceptTimeout(previous, next) {
+    const left = previous && typeof previous === "object" ? previous : {};
+    const right = next && typeof next === "object" ? next : {};
+    const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+    keys.delete("connectionTimeoutSeconds");
+    for (const key of keys) {
+      if (JSON.stringify(left[key]) !== JSON.stringify(right[key])) return false;
+    }
+    return true;
+  }
+
+  function patchInPlace(changes, context = {}) {
+    if (!changes || Object.keys(changes).length !== 1
+      || !Object.prototype.hasOwnProperty.call(changes, "feishuApproval")) return false;
+    const previous = context.previousSnapshot && context.previousSnapshot.feishuApproval;
+    const next = context.snapshot && context.snapshot.feishuApproval;
+    if (!configsMatchExceptTimeout(previous, next)) return false;
+    if (!mountedFeishuTimeoutControl
+      || !document.body.contains(mountedFeishuTimeoutControl.row)) return false;
+    mountedFeishuTimeoutControl.picker.setValue(
+      String(currentFeishuConfig().connectionTimeoutSeconds)
+    );
+    return true;
+  }
+
+  // ── Slack (one-way notifications) ──────────────────────────────────────────
+  // Webhook / chat.postMessage are stateless, so this card is simpler than the
+  // Feishu one: no platform switch, no connection timeout, and no "starting"
+  // poll — a config is either usable ("configured") or not. Slack cannot resolve
+  // approvals here (webhook is one-way); it only sends done/error/permission
+  // pings.
+  const slackView = {
+    status: null,
+    statusSeq: 0,
+    statusLoading: false,
+    statusForceRenderPending: false,
+    secretInfo: null,
+    secretInfoSeq: 0,
+    secretInfoLoading: false,
+    secretInfoForceRenderPending: false,
+    secretPending: false,
+    secretEditing: false,
+    configPending: false,
+    testPending: false,
+    formDraft: null,
+    formDirty: { webhookUrl: false, botToken: false, channelId: false },
+  };
+
+  function currentSlackConfig() {
+    const cfg = state.snapshot && state.snapshot.slackNotify;
+    return {
+      enabled: !!(cfg && cfg.enabled),
+      channelId: cfg && typeof cfg.channelId === "string" ? cfg.channelId : "",
+      notifyOnDone: !cfg || cfg.notifyOnDone !== false,
+      notifyOnError: !cfg || cfg.notifyOnError !== false,
+      notifyOnPermission: !cfg || cfg.notifyOnPermission !== false,
+      outputMode: cfg && cfg.outputMode === "full" ? "full" : "off",
+    };
+  }
+
+  function getSlackFormDraft() {
+    if (!slackView.formDraft) {
+      slackView.formDraft = {
+        webhookUrl: "",
+        botToken: "",
+        channelId: currentSlackConfig().channelId,
+      };
+    }
+    const savedChannelId = currentSlackConfig().channelId;
+    if (slackView.formDirty.channelId && slackView.formDraft.channelId.trim() === savedChannelId) {
+      // The settings broadcast has caught up with a successful write (or the
+      // user typed the already-saved value). The draft is pristine again.
+      slackView.formDraft.channelId = savedChannelId;
+      slackView.formDirty.channelId = false;
+    } else if (!slackView.formDirty.channelId) {
+      // Keep an untouched field in sync with store updates. Secret inputs are
+      // replacement-only and intentionally stay blank until the user types.
+      slackView.formDraft.channelId = savedChannelId;
+    }
+    return slackView.formDraft;
+  }
+
+  function setSlackFormDraftValue(field, value) {
+    getSlackFormDraft()[field] = String(value == null ? "" : value);
+    slackView.formDirty[field] = true;
+  }
+
+  function clearSubmittedSlackSecretDraft(payload) {
+    const draft = getSlackFormDraft();
+    for (const field of ["webhookUrl", "botToken"]) {
+      if (!Object.prototype.hasOwnProperty.call(payload, field)) continue;
+      if (draft[field].trim() === payload[field]) {
+        draft[field] = "";
+        slackView.formDirty[field] = false;
+      }
+    }
+  }
+
+  function slackStatusRenderKey(status) {
+    const s = status && typeof status === "object" ? status : {};
+    return [
+      s.enabled === true ? "1" : "0",
+      s.ready === true ? "1" : "0",
+      s.transportConfigured === true ? "1" : "0",
+      s.configured === true ? "1" : "0",
+      s.credentialsPresent === true ? "1" : "0",
+      s.reason || "",
+      s.transport || "",
+      s.secretsStored === true ? "1" : "0",
+      s.webhookConfigured === true ? "1" : "0",
+      s.botTokenConfigured === true ? "1" : "0",
+    ].join("");
+  }
+
+  function slackSecretInfoRenderKey(info) {
+    const i = info && typeof info === "object" ? info : {};
+    return [i.configured === true ? "1" : "0", i.webhookUrl || "", i.botToken || ""].join("");
+  }
+
+  // Gate the first paint on a meaningful status, exactly like Feishu: an empty
+  // {status:"ok"} with no state must NOT trigger a repaint, or every render
+  // churns one extra frame before anything is configured.
+  function slackStatusNeedsRender(status) {
+    const s = status && typeof status === "object" ? status : {};
+    return !!(
+      s.ready === true
+      || s.transportConfigured === true
+      || s.configured === true
+      || s.credentialsPresent === true
+      || s.secretsStored === true
+      || s.enabled === true
+    );
+  }
+
+  function slackSecretInfoNeedsRender(info) {
+    return !!(info && info.configured);
+  }
+
+  function refreshSlackStatus({ forceRender = false } = {}) {
+    if (slackView.statusLoading) {
+      if (forceRender) slackView.statusForceRenderPending = true;
       return;
     }
-    feishuView.configPending = true;
+    slackView.statusLoading = true;
+    const seq = ++slackView.statusSeq;
+    callCommand("slackNotify.status").then((result) => {
+      if (seq !== slackView.statusSeq) return;
+      slackView.statusLoading = false;
+      const previousStatus = slackView.status;
+      const hadStatus = !!previousStatus;
+      const updated = result && result.status === "ok";
+      const nextStatus = updated ? result.state || null : previousStatus;
+      const shouldForceRender = forceRender || slackView.statusForceRenderPending;
+      slackView.statusForceRenderPending = false;
+      const changed = updated && slackStatusRenderKey(previousStatus) !== slackStatusRenderKey(nextStatus);
+      if (updated) slackView.status = result.state || null;
+      const initialVisibleChange = !hadStatus && slackStatusNeedsRender(nextStatus);
+      if ((shouldForceRender || (updated && (initialVisibleChange || (hadStatus && changed)))) && state.activeTab === "telegram-approval") {
+        ops.requestRender({ content: true });
+      }
+    });
+  }
+
+  function refreshSlackSecretInfo({ forceRender = false } = {}) {
+    if (slackView.secretInfoLoading) {
+      if (forceRender) slackView.secretInfoForceRenderPending = true;
+      return;
+    }
+    slackView.secretInfoLoading = true;
+    const seq = ++slackView.secretInfoSeq;
+    callCommand("slackNotify.secretInfo").then((result) => {
+      if (seq !== slackView.secretInfoSeq) return;
+      slackView.secretInfoLoading = false;
+      const previous = slackView.secretInfo;
+      const updated = result && result.status === "ok";
+      const next = updated ? {
+        configured: result.configured === true,
+        webhookUrl: result.webhookUrl || "",
+        botToken: result.botToken || "",
+      } : previous;
+      const shouldForceRender = forceRender || slackView.secretInfoForceRenderPending;
+      slackView.secretInfoForceRenderPending = false;
+      const changed = updated && slackSecretInfoRenderKey(previous) !== slackSecretInfoRenderKey(next);
+      if (updated) slackView.secretInfo = next;
+      const initialVisibleChange = !previous && slackSecretInfoNeedsRender(next);
+      if ((shouldForceRender || (updated && (initialVisibleChange || (previous && changed)))) && state.activeTab === "telegram-approval") {
+        ops.requestRender({ content: true });
+      }
+    });
+  }
+
+  // A configured transport and an active notifier are different states. Keep
+  // the transport/configured fallbacks for older main-process payloads while
+  // preferring the explicit transportConfigured + ready axes.
+  function slackTransportConfigured() {
+    const s = slackView.status || {};
+    if (typeof s.transportConfigured === "boolean") return s.transportConfigured;
+    if (s.transport === "webhook" || s.transport === "bot") return true;
+    return s.configured === true;
+  }
+
+  function slackReady() {
+    const s = slackView.status || {};
+    if (typeof s.ready === "boolean") return s.ready;
+    return slackTransportConfigured() && s.enabled === true;
+  }
+
+  function deriveSlackCardKind() {
+    if (slackReady()) return "running";
+    if (slackTransportConfigured()) return "ready";
+    return "incomplete";
+  }
+
+  function deriveSlackCardMessage(kind) {
+    if (kind === "running") return t("slackNotifyCardRunning");
+    if (kind === "ready") return t("slackNotifyCardReadyToEnable");
+    return t("slackNotifyCardMissingSecret");
+  }
+
+  function slackSecretsConfigured() {
+    const s = slackView.status || {};
+    return !!(slackView.secretInfo && slackView.secretInfo.configured)
+      || s.secretsStored === true || s.credentialsPresent === true;
+  }
+
+  // Which credential is actually carrying messages right now — a saved webhook
+  // silently outranks a saved bot token, which is confusing without a label.
+  function slackTransportLine() {
+    const s = slackView.status || {};
+    if (s.transport === "webhook") return t("slackNotifyTransportWebhook");
+    if (s.transport === "bot") return t("slackNotifyTransportBot");
+    return t("slackNotifyTransportNone");
+  }
+
+  function buildSlackChannelCard() {
+    const kind = deriveSlackCardKind();
+    const defaultCollapsed = kind === "running";
+    return helpers.buildCollapsibleGroup({
+      id: "remote-approval.slack",
+      headerContent: buildChannelHeader(t("slackNotifyChannelName"), kind),
+      defaultCollapsed,
+      className: "remote-approval-channel-card slack-notify-channel-card",
+      children: [
+        buildChannelStatusRow(kind, deriveSlackCardMessage(kind)),
+        buildSlackOneWayNoticeRow(),
+        helpers.buildSection(t("slackNotifyStep1Title"), [buildSlackSecretsRow()]),
+        helpers.buildSection(t("slackNotifyStep2Title"), [buildSlackChannelIdRow()]),
+        buildSlackStep3Section(),
+        helpers.buildSection(t("slackNotifyStep4Title"), [buildSlackTestRow()]),
+      ],
+    });
+  }
+
+  // The Slack card sits next to Telegram/Feishu, which DO resolve approvals
+  // remotely — so the one difference that matters has to be stated up front,
+  // above the setup steps, not buried in a per-toggle description. The second
+  // line is the privacy warning: a channel post is readable by everyone in the
+  // channel and can carry the session title, folder, and host.
+  function buildSlackOneWayNoticeRow() {
+    const row = document.createElement("div");
+    // Not tg-approval-prereq-row: that one paints its text in the error color,
+    // and "Slack is notification-only" is a permanent property of the channel,
+    // not a misconfiguration the user can fix.
+    row.className = "row slack-notify-oneway-row";
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("slackNotifyOneWayLabel");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("slackNotifyOneWayDesc");
+    const privacy = document.createElement("span");
+    privacy.className = "row-desc";
+    privacy.textContent = t("slackNotifyPrivacyDesc");
+    text.appendChild(label);
+    text.appendChild(desc);
+    text.appendChild(privacy);
+    row.appendChild(text);
+    return row;
+  }
+
+  function buildSlackSecretInput(placeholderKey, secret) {
+    const input = document.createElement("input");
+    input.type = secret ? "password" : "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.placeholder = t(placeholderKey);
+    input.className = "tg-approval-input";
+    return input;
+  }
+
+  function buildSlackSecretsRow() {
+    const configured = slackSecretsConfigured();
+    const info = slackView.secretInfo;
+    const row = document.createElement("div");
+    row.className = "row tg-approval-token-edit-row slack-notify-secrets-row";
+
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("slackNotifySecretsLabel");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = configured ? t("slackNotifySecretsReplaceHint") : t("slackNotifySecretsHint");
+    text.appendChild(label);
+    // One line per stored credential. Previously only the webhook mask showed,
+    // so a bot-token-only setup looked unconfigured, and there was no way to
+    // tell which of two saved credentials was actually in use.
+    for (const [field, mask, clearedKey] of [
+      ["webhookUrl", info && info.webhookUrl, "slackNotifyClearedWebhook"],
+      ["botToken", info && info.botToken, "slackNotifyClearedToken"],
+    ]) {
+      if (!mask) continue;
+      const line = document.createElement("span");
+      line.className = "tg-approval-token-current";
+      line.textContent = t("slackNotifySecretsCurrent").replace("{masked}", mask);
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "soft-btn";
+      clear.textContent = t("slackNotifyClear");
+      clear.disabled = slackView.secretPending;
+      clear.addEventListener("click", () => clearSlackSecret(field, clearedKey));
+      line.appendChild(document.createTextNode(" "));
+      line.appendChild(clear);
+      text.appendChild(line);
+    }
+    // Local removal is not revocation — say so where the button is.
+    if (info && (info.webhookUrl || info.botToken)) {
+      const note = document.createElement("span");
+      note.className = "row-desc";
+      note.textContent = t("slackNotifyRevokeNote");
+      text.appendChild(note);
+    }
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const ctrl = document.createElement("div");
+    ctrl.className = "row-control tg-approval-input-row slack-notify-secrets-grid";
+    const webhookInput = buildSlackSecretInput("slackNotifyWebhookPlaceholder", true);
+    const botTokenInput = buildSlackSecretInput("slackNotifyBotTokenPlaceholder", true);
+    const draft = getSlackFormDraft();
+    webhookInput.value = draft.webhookUrl;
+    botTokenInput.value = draft.botToken;
+    webhookInput.addEventListener("input", () => setSlackFormDraftValue("webhookUrl", webhookInput.value));
+    botTokenInput.addEventListener("input", () => setSlackFormDraftValue("botToken", botTokenInput.value));
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "soft-btn accent";
+    saveBtn.textContent = slackView.secretPending ? t("slackNotifySaving") : t("slackNotifySaveSecrets");
+    saveBtn.disabled = slackView.secretPending;
+    saveBtn.addEventListener("click", () => {
+      // Only send fields the user typed; blank means "keep the stored value"
+      // (the writer preserves untouched keys), so saving a new webhook does not
+      // wipe a stored bot token. The per-credential Remove buttons clear the
+      // local copy; only deleting/revoking it in Slack makes it unusable to
+      // anyone else — see docs/guides/slack-notifications.md.
+      const payload = {};
+      const webhook = webhookInput.value.trim();
+      const botToken = botTokenInput.value.trim();
+      if (webhook) payload.webhookUrl = webhook;
+      if (botToken) payload.botToken = botToken;
+      if (!configured && !webhook && !botToken) {
+        ops.showToast(t("slackNotifySecretsRequired"), { error: true });
+        return;
+      }
+      if (!webhook && !botToken) {
+        ops.showToast(t("slackNotifySecretsEmpty"), { error: true });
+        return;
+      }
+      slackView.secretPending = true;
+      ops.requestRender({ content: true });
+      callCommand("slackNotify.setSecrets", payload).then((result) => {
+        slackView.secretPending = false;
+        if (!result || result.status !== "ok") {
+          ops.showToast(localizeSlackError(result), { error: true });
+          ops.requestRender({ content: true });
+          return;
+        }
+        ops.showToast(t("slackNotifySecretsSaved"));
+        clearSubmittedSlackSecretDraft(payload);
+        slackView.secretInfo = null;
+        slackView.status = null;
+        refreshSlackSecretInfo({ forceRender: true });
+        refreshSlackStatus({ forceRender: true });
+      });
+    });
+
+    ctrl.appendChild(webhookInput);
+    ctrl.appendChild(botTokenInput);
+    ctrl.appendChild(saveBtn);
+    row.appendChild(ctrl);
+    return row;
+  }
+
+  // An explicit empty string is the backend's "clear this field" signal. The
+  // save path only sends fields you typed into, which is why a stored webhook
+  // could not be removed — or switched away from — without editing the file.
+  function clearSlackSecret(field, toastKey) {
+    slackView.secretPending = true;
     ops.requestRender({ content: true });
-    window.settingsAPI.update("feishuApproval", next).then((result) => {
-      feishuView.configPending = false;
+    callCommand("slackNotify.setSecrets", { [field]: "" }).then((result) => {
+      slackView.secretPending = false;
       if (!result || result.status !== "ok") {
-        ops.showToast((result && result.message) || t("toastSaveFailed"), { error: true });
+        ops.showToast(localizeSlackError(result), { error: true });
         ops.requestRender({ content: true });
         return;
       }
-      ops.showToast(tBrand("feishuApprovalConfigSaved"));
-      if (options.resetDraft !== false) resetFeishuFormDraft();
-      feishuView.status = null;
-      refreshFeishuStatus({ forceRender: true });
+      ops.showToast(t(toastKey));
+      // This removes the stored credential shown by the masked status line; it
+      // does not submit the replacement input beside it. Keep that unsaved
+      // draft intact across the status refresh.
+      slackView.secretInfo = null;
+      slackView.status = null;
+      refreshSlackSecretInfo({ forceRender: true });
+      refreshSlackStatus({ forceRender: true });
+    });
+  }
+
+  // Stable codes from the main process become sentences here. Reporting every
+  // failure as "Slack rejected the message" told the user nothing actionable.
+  function localizeSlackError(result) {
+    const code = result && (result.code || result.errorClass);
+    const byCode = {
+      "not-found": "slackNotifyErrNotFound",
+      unauthorized: "slackNotifyErrUnauthorized",
+      "rate-limited": "slackNotifyErrRateLimited",
+      network: "slackNotifyErrNetwork",
+      timeout: "slackNotifyErrNetwork",
+      "invalid-webhook": "slackNotifyErrInvalidWebhook",
+      "invalid-bot-token": "slackNotifyErrInvalidToken",
+      "slack-missing_scope": "slackNotifyErrMissingScope",
+      "slack-channel_not_found": "slackNotifyErrChannelNotFound",
+      "slack-not_in_channel": "slackNotifyErrNotInChannel",
+      "write-failed": "slackNotifySecretsSaveFailed",
+    };
+    if (byCode[code]) return t(byCode[code]);
+    const detail = result && result.message ? ` (${result.message})` : "";
+    return t("slackNotifyTestFailed") + detail;
+  }
+
+  function buildSlackChannelIdRow() {
+    const cfg = currentSlackConfig();
+    const row = document.createElement("div");
+    row.className = "row tg-approval-recipient-row slack-notify-channel-row";
+
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("slackNotifyChannelIdLabel");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("slackNotifyChannelIdHint");
+    text.appendChild(label);
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const ctrl = document.createElement("div");
+    ctrl.className = "row-control tg-approval-input-row";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.placeholder = t("slackNotifyChannelIdPlaceholder");
+    input.className = "tg-approval-input";
+    input.value = getSlackFormDraft().channelId;
+    input.addEventListener("input", () => setSlackFormDraftValue("channelId", input.value));
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "soft-btn accent";
+    saveBtn.textContent = slackView.configPending ? t("slackNotifySaving") : t("slackNotifySaveChannel");
+    saveBtn.disabled = slackView.configPending;
+    saveBtn.addEventListener("click", () => {
+      const channelId = input.value.trim();
+      saveSlackConfig({ ...currentSlackConfig(), channelId }).then((saved) => {
+        // The field remains editable while the async write is pending. Do not
+        // replace a newer draft when the earlier request eventually succeeds.
+        if (saved && getSlackFormDraft().channelId.trim() === channelId) {
+          slackView.formDraft.channelId = channelId;
+          slackView.formDirty.channelId = currentSlackConfig().channelId !== channelId;
+        }
+      });
+    });
+
+    ctrl.appendChild(input);
+    ctrl.appendChild(saveBtn);
+    row.appendChild(ctrl);
+    return row;
+  }
+
+  function buildSlackStep3Section() {
+    const ready = slackTransportConfigured();
+    const rows = [];
+    if (!ready) rows.push(buildSlackPrerequisitesRow());
+    rows.push(buildSlackEnabledRow({ ready }));
+    rows.push(buildSlackSwitchRow("slackNotifyEventDone", "slackNotifyEventDoneDesc", currentSlackConfig().notifyOnDone, (value) =>
+      saveSlackConfig({ ...currentSlackConfig(), notifyOnDone: value })));
+    rows.push(buildSlackSwitchRow("slackNotifyEventError", "slackNotifyEventErrorDesc", currentSlackConfig().notifyOnError, (value) =>
+      saveSlackConfig({ ...currentSlackConfig(), notifyOnError: value })));
+    rows.push(buildSlackSwitchRow("slackNotifyEventPermission", "slackNotifyEventPermissionDesc", currentSlackConfig().notifyOnPermission, (value) =>
+      saveSlackConfig({ ...currentSlackConfig(), notifyOnPermission: value })));
+    rows.push(buildSlackSwitchRow("slackNotifyOutputMode", "slackNotifyOutputModeDesc", currentSlackConfig().outputMode === "full", (value) =>
+      saveSlackConfig({ ...currentSlackConfig(), outputMode: value ? "full" : "off" })));
+    return helpers.buildSection(t("slackNotifyStep3Title"), rows);
+  }
+
+  function buildSlackPrerequisitesRow() {
+    const row = document.createElement("div");
+    row.className = "row tg-approval-prereq-row";
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("slackNotifyPrereqLabel");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("slackNotifyPrereqDesc");
+    text.appendChild(label);
+    text.appendChild(desc);
+    row.appendChild(text);
+    return row;
+  }
+
+  function buildSlackEnabledRow({ ready }) {
+    const cfg = currentSlackConfig();
+    const row = document.createElement("div");
+    row.className = "row";
+    const canToggle = ready || cfg.enabled;
+    if (!canToggle) row.classList.add("tg-approval-row-disabled");
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("slackNotifyToggle");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("slackNotifyToggleDesc");
+    text.appendChild(label);
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const ctrl = document.createElement("div");
+    ctrl.className = "row-control";
+    const sw = document.createElement("div");
+    sw.className = "switch";
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("tabindex", "0");
+    helpers.setSwitchVisual(sw, cfg.enabled, { pending: slackView.configPending });
+    if (!canToggle) {
+      sw.classList.add("disabled");
+      sw.setAttribute("aria-disabled", "true");
+      sw.removeAttribute("tabindex");
+    } else {
+      const toggle = () => saveSlackConfig({ ...cfg, enabled: !cfg.enabled });
+      sw.addEventListener("click", toggle);
+      sw.addEventListener("keydown", (ev) => {
+        if (ev.key === " " || ev.key === "Enter") { ev.preventDefault(); toggle(); }
+      });
+    }
+    ctrl.appendChild(sw);
+    row.appendChild(ctrl);
+    return row;
+  }
+
+  function buildSlackSwitchRow(labelKey, descKey, value, onToggle) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t(labelKey);
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t(descKey);
+    text.appendChild(label);
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const ctrl = document.createElement("div");
+    ctrl.className = "row-control";
+    const sw = document.createElement("div");
+    sw.className = "switch";
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("tabindex", "0");
+    helpers.setSwitchVisual(sw, value, { pending: slackView.configPending });
+    const toggle = () => onToggle(!value);
+    sw.addEventListener("click", toggle);
+    sw.addEventListener("keydown", (ev) => {
+      if (ev.key === " " || ev.key === "Enter") { ev.preventDefault(); toggle(); }
+    });
+    ctrl.appendChild(sw);
+    row.appendChild(ctrl);
+    return row;
+  }
+
+  function buildSlackTestRow() {
+    // A usable transport is enough to test — not the enable switch, and not
+    // merely "some credential is stored". Testing the connection is the step
+    // that comes before switching sending on.
+    const ready = slackTransportConfigured();
+    const testDisabled = slackView.testPending || !ready;
+    const row = document.createElement("div");
+    row.className = "row";
+    if (!ready) row.classList.add("tg-approval-row-disabled");
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("slackNotifyTest");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = `${t("slackNotifyTestDesc")} ${slackTransportLine()}`;
+    text.appendChild(label);
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const ctrl = document.createElement("div");
+    ctrl.className = "row-control";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "soft-btn accent";
+    btn.textContent = slackView.testPending ? t("slackNotifyTesting") : t("slackNotifySendTest");
+    btn.disabled = testDisabled;
+    if (testDisabled && !slackView.testPending) btn.title = t("slackNotifyCardMissingSecret");
+    btn.addEventListener("click", () => {
+      if (testDisabled) return;
+      slackView.testPending = true;
+      ops.requestRender({ content: true });
+      callCommand("slackNotify.test").then((result) => {
+        slackView.testPending = false;
+        if (result && result.status === "ok") {
+          ops.showToast(t("slackNotifyTestSent"));
+        } else {
+          ops.showToast(localizeSlackError(result), { error: true });
+        }
+        slackView.status = null;
+        refreshSlackStatus({ forceRender: true });
+      });
+    });
+    ctrl.appendChild(btn);
+    row.appendChild(ctrl);
+    return row;
+  }
+
+  function saveSlackConfig(next, options = {}) {
+    if (!window.settingsAPI || typeof window.settingsAPI.update !== "function") {
+      ops.showToast(t("toastSaveFailed") + "settings API unavailable", { error: true });
+      return Promise.resolve(false);
+    }
+    slackView.configPending = true;
+    ops.requestRender({ content: true });
+    return window.settingsAPI.update("slackNotify", next).then((result) => {
+      slackView.configPending = false;
+      if (!result || result.status !== "ok") {
+        ops.showToast((result && result.message) || t("toastSaveFailed"), { error: true });
+        ops.requestRender({ content: true });
+        return false;
+      }
+      ops.showToast(t("slackNotifyConfigSaved"));
+      slackView.status = null;
+      refreshSlackStatus({ forceRender: true });
+      return true;
     }).catch((err) => {
-      feishuView.configPending = false;
+      slackView.configPending = false;
       ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
       ops.requestRender({ content: true });
+      return false;
     });
   }
 
@@ -1907,7 +3264,12 @@
     state = core.state;
     helpers = core.helpers;
     ops = core.ops;
-    core.tabs["telegram-approval"] = { render, refreshRuntimeStatus };
+    core.tabs["telegram-approval"] = {
+      render,
+      refreshRuntimeStatus,
+      patchInPlace,
+      onExit: leaveFeishuLookupUi,
+    };
   }
 
   root.ClawdSettingsTabTelegramApproval = { init };

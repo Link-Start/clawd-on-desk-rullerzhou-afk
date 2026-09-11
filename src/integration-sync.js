@@ -216,6 +216,21 @@ function createIntegrationSyncRuntime(options = {}) {
     }
   }
 
+  function syncTraeCodeHooks() {
+    try {
+      if (typeof ctx.syncTraeCodeHooksImpl === "function") return ctx.syncTraeCodeHooksImpl();
+      const { registerTraeCodeHooks } = require("../hooks/traecode-install.js");
+      const result = registerTraeCodeHooks({ silent: true });
+      if (hasPositiveCount(result.added) || hasPositiveCount(result.updated)) {
+        console.log(`Clawd: synced TraeCode hooks (added ${result.added}, updated ${result.updated})`);
+      }
+      return normalizeCountSyncResult(result, "TraeCode", "traecode-not-installed");
+    } catch (err) {
+      console.warn("Clawd: failed to sync TraeCode hooks:", err.message);
+      return { status: "error", message: err && err.message ? err.message : "Failed to sync TraeCode hooks" };
+    }
+  }
+
   function syncKiroHooks() {
     try {
       if (typeof ctx.syncKiroHooksImpl === "function") return ctx.syncKiroHooksImpl();
@@ -258,6 +273,21 @@ function createIntegrationSyncRuntime(options = {}) {
     } catch (err) {
       console.warn("Clawd: failed to sync Qwen hooks:", err.message);
       return { status: "error", message: err && err.message ? err.message : "Failed to sync Qwen hooks" };
+    }
+  }
+
+  function syncZcodeHooks() {
+    try {
+      if (typeof ctx.syncZcodeHooksImpl === "function") return ctx.syncZcodeHooksImpl();
+      const { registerZcodeHooks } = require("../hooks/zcode-install.js");
+      const result = registerZcodeHooks({ silent: true });
+      if (hasPositiveCount(result.added) || hasPositiveCount(result.updated)) {
+        console.log(`Clawd: synced ZCode hooks (added ${result.added}, updated ${result.updated})`);
+      }
+      return normalizeCountSyncResult(result, "ZCode", "zcode-not-installed");
+    } catch (err) {
+      console.warn("Clawd: failed to sync ZCode hooks:", err.message);
+      return { status: "error", message: err && err.message ? err.message : "Failed to sync ZCode hooks" };
     }
   }
 
@@ -342,6 +372,28 @@ function createIntegrationSyncRuntime(options = {}) {
       console.warn("Clawd: failed to sync Copilot hooks:", err.message);
       return { status: "error", message: err && err.message ? err.message : "Failed to sync Copilot hooks" };
     }
+  }
+
+  async function syncDeepSeekHarnessPlugin(options = {}) {
+    try {
+      const operation = options.operation
+        || (options.source === "settings-agent-install"
+          ? "install"
+          : (options.automatic === false ? "explicit-repair" : "startup-sync"));
+      const normalizedOptions = { ...options, silent: true, operation };
+      if (typeof ctx.syncDeepSeekHarnessPluginImpl === "function") {
+        return await ctx.syncDeepSeekHarnessPluginImpl(normalizedOptions);
+      }
+      const { syncDeepSeekHarnessIntegration } = require("../hooks/dsh-install.js");
+      return await syncDeepSeekHarnessIntegration(normalizedOptions);
+    } catch (err) {
+      console.warn("Clawd: failed to sync DeepSeek Harness plugin:", err.message);
+      return { status: "error", message: err && err.message ? err.message : "Failed to sync DeepSeek Harness plugin" };
+    }
+  }
+
+  function repairDeepSeekHarnessPlugin(options = {}) {
+    return syncDeepSeekHarnessPlugin({ ...options, operation: "explicit-repair", automatic: false });
   }
 
   function syncOpencodePlugin() {
@@ -517,6 +569,21 @@ function createIntegrationSyncRuntime(options = {}) {
     }
   }
 
+  function syncQwenWorkHooks() {
+    try {
+      if (typeof ctx.syncQwenWorkHooksImpl === "function") return ctx.syncQwenWorkHooksImpl();
+      const { registerQwenWorkHooks } = require("../hooks/qwenwork-install.js");
+      const result = registerQwenWorkHooks({ silent: true });
+      if (hasPositiveCount(result.added) || hasPositiveCount(result.updated)) {
+        console.log(`Clawd: synced QwenWork hooks (added ${result.added}, updated ${result.updated})`);
+      }
+      return normalizeCountSyncResult(result, "QwenWork", "qwenwork-not-installed");
+    } catch (err) {
+      console.warn("Clawd: failed to sync QwenWork hooks:", err.message);
+      return { status: "error", message: err && err.message ? err.message : "Failed to sync QwenWork hooks" };
+    }
+  }
+
   const AGENT_INTEGRATION_SYNCERS = Object.freeze({
     "gemini-cli": syncGeminiHooks,
     "antigravity-cli": syncAntigravityHooks,
@@ -527,8 +594,10 @@ function createIntegrationSyncRuntime(options = {}) {
     "kiro-cli": syncKiroHooks,
     "kimi-cli": syncKimiHooks,
     "qwen-code": syncQwenHooks,
+    zcode: syncZcodeHooks,
     codewhale: syncCodewhaleHooks,
     codex: syncCodexHooks,
+    "deepseek-harness": syncDeepSeekHarnessPlugin,
     opencode: syncOpencodePlugin,
     mimocode: syncMimocodePlugin,
     pi: syncPiExtension,
@@ -537,11 +606,14 @@ function createIntegrationSyncRuntime(options = {}) {
     qoder: syncQoderHooks,
     reasonix: syncReasonixHooks,
     qoderwork: syncQoderWorkHooks,
+    traecode: syncTraeCodeHooks,
+    qwenwork: syncQwenWorkHooks,
   });
 
   const AGENT_INTEGRATION_REPAIRERS = Object.freeze({
     ...AGENT_INTEGRATION_SYNCERS,
     codex: repairCodexHooks,
+    "deepseek-harness": repairDeepSeekHarnessPlugin,
     openclaw: repairOpenClawPlugin,
   });
 
@@ -601,8 +673,10 @@ function createIntegrationSyncRuntime(options = {}) {
     const repair = AGENT_INTEGRATION_REPAIRERS[agentId];
     if (typeof repair !== "function") return false;
     const result = repair(options);
-    if (result && typeof result === "object" && typeof result.status === "string") return result;
-    return true;
+    // Async installers are themselves structured results in flight. Returning
+    // true here used to let Settings/Doctor commit success before DSH's
+    // plugin mutation and post-verification had even settled.
+    return result && typeof result === "object" ? result : true;
   }
 
   function stopIntegrationForAgent(agentId) {
@@ -671,8 +745,10 @@ function createIntegrationSyncRuntime(options = {}) {
     syncKiroHooks,
     syncKimiHooks,
     syncQwenHooks,
+    syncZcodeHooks,
     syncCodewhaleHooks,
     syncCodexHooks,
+    syncDeepSeekHarnessPlugin,
     syncOpencodePlugin,
     syncMimocodePlugin,
     syncPiExtension,
@@ -681,6 +757,7 @@ function createIntegrationSyncRuntime(options = {}) {
     syncQoderHooks,
     syncReasonixHooks,
     syncQoderWorkHooks,
+    syncTraeCodeHooks,
     repairCodexHooks,
     repairOpenClawPlugin,
     syncIntegrationForAgent,

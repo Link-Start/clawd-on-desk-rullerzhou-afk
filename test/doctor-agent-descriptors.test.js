@@ -24,6 +24,7 @@ describe("doctor agent descriptors", () => {
         "kiro-cli",
         "kimi-cli",
         "qwen-code",
+        "zcode",
         "codewhale",
         "opencode",
         "mimocode",
@@ -33,6 +34,9 @@ describe("doctor agent descriptors", () => {
         "qoder",
         "reasonix",
         "qoderwork",
+        "traecode",
+        "qwenwork",
+        "deepseek-harness",
       ]
     );
   });
@@ -97,6 +101,12 @@ describe("doctor agent descriptors", () => {
     assert.strictEqual(getAgentDescriptor("qwen-code").marker, qwen.MARKER);
     assert.deepStrictEqual(getAgentDescriptor("qwen-code").hookEvents, qwen.QWEN_CODE_HOOK_EVENTS);
 
+    const zcode = require("../hooks/zcode-install");
+    assert.strictEqual(getAgentDescriptor("zcode").parentDir, zcode.DEFAULT_PARENT_DIR);
+    assert.strictEqual(getAgentDescriptor("zcode").configPath, zcode.DEFAULT_CONFIG_PATH);
+    assert.strictEqual(getAgentDescriptor("zcode").hookExecutorShape, "zcode-process");
+    assert.deepStrictEqual(getAgentDescriptor("zcode").hookEvents, zcode.ZCODE_HOOK_EVENTS);
+
     assert.strictEqual(getAgentDescriptor("codewhale").parentDir, path.dirname(codewhale.resolveCodewhaleConfigPath()));
     assert.strictEqual(getAgentDescriptor("codewhale").configPath, codewhale.resolveCodewhaleConfigPath());
     assert.strictEqual(getAgentDescriptor("codewhale").marker, "managed by clawd-on-desk");
@@ -139,6 +149,26 @@ describe("doctor agent descriptors", () => {
     assert.strictEqual(getAgentDescriptor("qoderwork").configPath, qoderwork.DEFAULT_CONFIG_PATH);
     assert.strictEqual(getAgentDescriptor("qoderwork").marker, qoderwork.MARKER);
     assert.deepStrictEqual(getAgentDescriptor("qoderwork").hookEvents, qoderwork.QODERWORK_HOOK_EVENTS);
+
+    const traecode = require("../hooks/traecode-install");
+    assert.strictEqual(getAgentDescriptor("traecode").parentDir, traecode.DEFAULT_PARENT_DIR);
+    assert.strictEqual(getAgentDescriptor("traecode").configPath, traecode.DEFAULT_CONFIG_PATH);
+    assert.strictEqual(getAgentDescriptor("traecode").marker, traecode.MARKER);
+    assert.deepStrictEqual(getAgentDescriptor("traecode").hookEvents, traecode.TRAECODE_HOOK_EVENTS);
+
+    const qwenwork = require("../hooks/qwenwork-install");
+    assert.strictEqual(getAgentDescriptor("qwenwork").parentDir, qwenwork.DEFAULT_PARENT_DIR);
+    assert.strictEqual(getAgentDescriptor("qwenwork").configPath, qwenwork.DEFAULT_CONFIG_PATH);
+    assert.strictEqual(getAgentDescriptor("qwenwork").marker, qwenwork.MARKER);
+    assert.deepStrictEqual(getAgentDescriptor("qwenwork").hookEvents, qwenwork.QWENWORK_HOOK_EVENTS);
+
+    const dsh = require("../hooks/dsh-install");
+    assert.strictEqual(getAgentDescriptor("deepseek-harness").parentDir, dsh.resolveDshHome());
+    assert.strictEqual(
+      getAgentDescriptor("deepseek-harness").configPath,
+      dsh.resolveDshProfileDir(dsh.resolveDshHome())
+    );
+    assert.strictEqual(getAgentDescriptor("deepseek-harness").configMode, "dsh-plugin");
   });
 
   it("returns copies from public accessors", () => {
@@ -289,6 +319,18 @@ describe("doctor agent descriptors", () => {
     assert.strictEqual(descriptor.autoInstall, true);
     assert.strictEqual(descriptor.marker, qoderwork.MARKER);
     assert.deepStrictEqual(descriptor.hookEvents, qoderwork.QODERWORK_HOOK_EVENTS);
+  });
+
+  it("checks QwenWork hooks as a state-only nested settings file", () => {
+    const qwenwork = require("../hooks/qwenwork-install");
+    const descriptor = getAgentDescriptor("qwenwork");
+
+    assert.strictEqual(descriptor.eventSource, "hook");
+    assert.strictEqual(descriptor.configMode, "file");
+    assert.strictEqual(descriptor.nested, true);
+    assert.strictEqual(descriptor.autoInstall, true);
+    assert.strictEqual(descriptor.marker, qwenwork.MARKER);
+    assert.deepStrictEqual(descriptor.hookEvents, qwenwork.QWENWORK_HOOK_EVENTS);
   });
 
   it("checks WorkBuddy hooks as a state-only nested settings file", () => {

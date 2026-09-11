@@ -161,6 +161,45 @@ function resolveCwd(payload) {
   return "";
 }
 
+// #634: cross-process pid cache context for the shared resolver. Antigravity
+// has no session-start hook (earliest event is PreInvocation), so every event
+// uses the "event" lifecycle — first resolve populates the cache, later ones
+// hit it (zero snapshot spawns). Only an explicit conversationId may key the
+// cache. normalizeSessionId still keeps the historic transcript-dirname
+// fallback for the state body, but that dirname is not proven session-unique
+// (for example, multiple transcript files may share a `jetski` directory), so
+// using it on disk could pin one conversation to another's live terminal PID.
+//
+// The cache key deliberately does NOT use resolveCwd(): that helper prefers
+// toolCall.args.Cwd, which varies per tool call (subdirs, slash spelling) and
+// would fragment one conversation across many v2 cache files — each a miss
+// that can spawn another snapshot. The key needs a per-SESSION constant, so it
+// uses workspacePaths[0] only; the event/body cwd keeps resolveCwd() behavior.
+function stableWorkspaceCwd(payload) {
+  if (payload && Array.isArray(payload.workspacePaths)) {
+    const first = payload.workspacePaths.find((entry) => typeof entry === "string" && entry);
+    if (first) return first;
+  }
+  return "";
+}
+
+function pidCacheContext(payload) {
+  const conversationId = payload && payload.conversationId;
+  const rawConversationId = conversationId != null ? String(conversationId).trim() : "";
+  const sessionId = normalizeSessionId(conversationId, payload);
+  const cacheCwd = stableWorkspaceCwd(payload);
+  return {
+    namespace: "antigravity-cli",
+    sessionId,
+    cacheCwd,
+    lifecycle: "event",
+    cacheable: !!rawConversationId
+      && rawConversationId !== "default"
+      && rawConversationId !== "antigravity:default"
+      && !!cacheCwd,
+  };
+}
+
 function normalizeToolInputValue(value, depth = 0) {
   if (depth > TOOL_INPUT_DEPTH_MAX) return null;
   if (Array.isArray(value)) {
@@ -413,7 +452,7 @@ async function sendHookEvent(payload, argvEvent, deps = {}) {
   const outLine = stdoutForEvent(hookName);
   const remote = !!env.CLAWD_REMOTE;
   const pidMeta = shouldResolvePid(hookName, env)
-    ? (deps.resolvePid ? deps.resolvePid() : undefined)
+    ? (deps.resolvePid ? deps.resolvePid(pidCacheContext(payload)) : undefined)
     : undefined;
   const body = buildStateBody(hookName, payload || {}, {
     remote,

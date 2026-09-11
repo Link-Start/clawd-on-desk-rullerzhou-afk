@@ -3,7 +3,10 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { registerPetInteractionIpc } = require("../src/pet-interaction-ipc");
+const {
+  isTrustedMainFrameEvent,
+  registerPetInteractionIpc,
+} = require("../src/pet-interaction-ipc");
 
 class FakeIpcMain {
   constructor() {
@@ -55,12 +58,19 @@ function createHarness(overrides = {}) {
     getCurrentState: () => state.currentState,
     getCurrentSvg: () => state.currentSvg,
     sendToRenderer: (...args) => calls.push(["sendToRenderer", ...args]),
+    settleVisual: (event, payload) => calls.push(["settleVisual", event.sender, payload]),
     recoverVisiblePetAfterRendererLoad: (event) => calls.push(["recoverVisiblePetAfterRendererLoad", event.sender]),
     setDragLocked: (value) => calls.push(["setDragLocked", value]),
     setMouseOverPet: (value) => calls.push(["setMouseOverPet", value]),
+    cancelRoam: Object.prototype.hasOwnProperty.call(overrides, "cancelRoam")
+      ? overrides.cancelRoam
+      : (() => calls.push(["cancelRoam"])),
     beginDragSnapshot: () => calls.push(["beginDragSnapshot"]),
     clearDragSnapshot: () => calls.push(["clearDragSnapshot"]),
     syncHitWin: () => calls.push(["syncHitWin"]),
+    syncDisplayedVisualGeometry: () => calls.push(["syncDisplayedVisualGeometry"]),
+    setAccessoryMirror: overrides.setAccessoryMirror
+      || ((value) => calls.push(["setAccessoryMirror", value])),
     syncImeEditingPetDodge: () => calls.push(["syncImeEditingPetDodge"]),
     isMiniMode: () => state.miniMode,
     checkMiniModeSnap: overrides.checkMiniModeSnap
@@ -117,10 +127,24 @@ function sendDrop(ipcMain, paths, sender) {
   return listener({ sender }, paths);
 }
 
+test("accessory-mirror hands main the facing the renderer reported", () => {
+  const seen = [];
+  const { ipcMain } = createHarness({ setAccessoryMirror: (value) => seen.push(value) });
+  const listener = ipcMain.listeners.get("accessory-mirror");
+  assert.strictEqual(typeof listener, "function", "missing IPC listener accessory-mirror");
+
+  // Registering the channel is not the contract — forwarding the payload is.
+  listener({}, true);
+  listener({}, false);
+  listener({}, 1);
+  assert.deepStrictEqual(seen, [true, false, true]);
+});
+
 test("pet interaction IPC registers owned channels and disposes them", () => {
   const { ipcMain, runtime } = createHarness();
 
   assert.deepStrictEqual([...ipcMain.listeners.keys()].sort(), [
+    "accessory-mirror",
     "drag-end",
     "drag-lock",
     "drag-move",
@@ -132,6 +156,7 @@ test("pet interaction IPC registers owned channels and disposes them", () => {
     "pet-drop-paths",
     "pet-interaction:reveal-session-hud",
     "pet-visual-ready",
+    "pet-visual-settled",
     "play-click-reaction",
     "resume-from-reaction",
     "show-context-menu",
@@ -151,6 +176,40 @@ test("pet interaction IPC delegates the first rendered visual recovery signal", 
   assert.deepStrictEqual(calls.filter((c) => c[0] === "recoverVisiblePetAfterRendererLoad"), [
     ["recoverVisiblePetAfterRendererLoad", "sender-web-contents"],
   ]);
+});
+
+test("pet interaction IPC delegates renderer settlement with the sender intact", () => {
+  const { ipcMain, calls } = createHarness();
+  const payload = { visualGeneration: 7, outcome: "swapped" };
+
+  ipcMain.send("pet-visual-settled", payload);
+
+  assert.deepStrictEqual(calls.filter((c) => c[0] === "settleVisual"), [
+    ["settleVisual", "sender-web-contents", payload],
+  ]);
+});
+
+test("visual settlements trust only the render webContents main frame", () => {
+  const mainFrame = { url: "file:///index.html" };
+  const webContents = { mainFrame };
+  assert.strictEqual(
+    isTrustedMainFrameEvent({ sender: webContents, senderFrame: mainFrame }, webContents),
+    true
+  );
+  assert.strictEqual(
+    isTrustedMainFrameEvent({ sender: webContents, senderFrame: { ...mainFrame } }, webContents),
+    false
+  );
+  assert.strictEqual(
+    isTrustedMainFrameEvent({ sender: {}, senderFrame: mainFrame }, webContents),
+    false
+  );
+  assert.strictEqual(isTrustedMainFrameEvent({ sender: webContents }, webContents), false);
+  const destroyedFrameEvent = { sender: webContents };
+  Object.defineProperty(destroyedFrameEvent, "senderFrame", {
+    get() { throw new Error("frame destroyed"); },
+  });
+  assert.strictEqual(isTrustedMainFrameEvent(destroyedFrameEvent, webContents), false);
 });
 
 test("pet interaction IPC delegates pet-interaction:reveal-session-hud to revealSessionHud", () => {
@@ -214,14 +273,23 @@ test("pet interaction IPC preserves drag lock lifecycle", () => {
   assert.deepStrictEqual(calls, [
     ["setDragLocked", true],
     ["setMouseOverPet", true],
+    ["cancelRoam"],
     ["beginDragSnapshot"],
     ["setDragLocked", false],
     ["clearDragSnapshot"],
     ["syncHitWin"],
+    ["syncDisplayedVisualGeometry"],
     // #640: the dodge defers its hit-window click-through write while a drag
     // is in flight — releasing the lock must re-run the sync.
     ["syncImeEditingPetDodge"],
   ]);
+});
+
+test("pet interaction IPC requires the roam cancel dependency", () => {
+  assert.throws(
+    () => createHarness({ cancelRoam: null }),
+    /registerPetInteractionIpc requires cancelRoam/,
+  );
 });
 
 test("pet interaction IPC finalizes drag end and always clears drag state", () => {
@@ -239,6 +307,7 @@ test("pet interaction IPC finalizes drag end and always clears drag state", () =
     ["reassertWinTopmost"],
     ["scheduleHwndRecovery"],
     ["syncHitWin"],
+    ["syncDisplayedVisualGeometry"],
     ["repositionFloatingBubbles"],
     ["setDragLocked", false],
     ["clearDragSnapshot"],
@@ -250,6 +319,7 @@ test("pet interaction IPC finalizes drag end and always clears drag state", () =
     ["reassertWinTopmost"],
     ["scheduleHwndRecovery"],
     ["syncHitWin"],
+    ["syncDisplayedVisualGeometry"],
     ["repositionFloatingBubbles"],
     ["setDragLocked", false],
     ["clearDragSnapshot"],
@@ -288,6 +358,7 @@ test("pet interaction IPC does not persist when drag-end has no clamped bounds",
     ["reassertWinTopmost"],
     ["scheduleHwndRecovery"],
     ["syncHitWin"],
+    ["syncDisplayedVisualGeometry"],
     ["repositionFloatingBubbles"],
     ["setDragLocked", false],
     ["clearDragSnapshot"],
@@ -309,6 +380,7 @@ test("pet interaction IPC disables mini snap without skipping drag-end cleanup",
     ["reassertWinTopmost"],
     ["scheduleHwndRecovery"],
     ["syncHitWin"],
+    ["syncDisplayedVisualGeometry"],
     ["repositionFloatingBubbles"],
     ["setDragLocked", false],
     ["clearDragSnapshot"],

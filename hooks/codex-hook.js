@@ -5,15 +5,28 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+const { spawn } = require("child_process");
 const { StringDecoder } = require("string_decoder");
 const {
   postPermissionToRunningServer,
   postStateToRunningServer,
+  readCodexAutoStartGate,
   readHostPrefix,
   readRuntimeIdentity,
+  readWindowsProcessChainHookContext,
+  CODEX_WINDOWS_STABLE_ARG,
+  CODEX_WSL_INTEROP_ARG,
+  resolveWslDistro,
   applyWslSourceFields,
 } = require("./server-config");
-const { createPidResolver, readStdinJson, getPlatformConfig, applyOrcaPaneKey } = require("./shared-process");
+const {
+  createPidResolver,
+  readStdinJson,
+  getPlatformConfig,
+  applyOrcaPaneKey,
+  processAlive,
+} = require("./shared-process");
 const {
   ROLE_UNKNOWN,
   classifyHookPayload,
@@ -23,14 +36,96 @@ const {
   extractLastAssistantTextFromTranscript,
 } = require("./codex-assistant-output");
 const { readCodexThreadName } = require("./codex-session-index");
-const { isCodexDesktopOriginator } = require("./codex-originator");
+const {
+  isCodexCliOriginator,
+  isCodexDesktopOriginator,
+} = require("./codex-originator");
 const { fitStateBodyToByteBudget } = require("./state-payload-size");
+
+const WINDOWS_STABLE_RUN_SIGNATURE = "clawd-codex-stable-windows-run-v1";
+
+function decodeStableSidecarValue(value) {
+  if (typeof value !== "string") throw new Error("invalid-sidecar-value");
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) throw new Error("invalid-sidecar-base64");
+  const decoded = bytes.toString("utf8");
+  if (!Buffer.from(decoded, "utf8").equals(bytes)) throw new Error("invalid-sidecar-utf8");
+  return decoded;
+}
+
+function normalizeWindowsStablePath(value) {
+  return String(value || "").replace(/\\/g, "/").toLowerCase();
+}
+
+// Windows local stable entries used to run through an inline PowerShell
+// dispatcher that decoded this sidecar and injected env vars before invoking
+// Node. Defender flags that command-line shape, so the reviewed command now
+// calls Node directly and the hook imports only the data portion here.
+//
+// Keep this main-process-only and native-Windows-only: requiring codex-hook.js
+// from tests must not mutate their env, while remote and WSL-interop commands
+// have separate environment contracts. Parse and validate the complete file
+// before applying any key so a damaged tail cannot leave a partially-mutated
+// process environment. The target binding prevents an unrelated/stale sidecar
+// from supplying env to a different copy of codex-hook.js.
+function applyWindowsStableSidecarEnv(options = {}) {
+  const platform = options.platform || process.platform;
+  const argv = Array.isArray(options.argv) ? options.argv : process.argv;
+  const env = options.env || process.env;
+  if (platform !== "win32") return { applied: false, reason: "not-windows" };
+  if (!argv.includes(CODEX_WINDOWS_STABLE_ARG)) return { applied: false, reason: "not-stable" };
+  if (argv.includes(CODEX_WSL_INTEROP_ARG)) return { applied: false, reason: "wsl-interop" };
+  if (env.CLAWD_REMOTE) return { applied: false, reason: "remote" };
+
+  const fsApi = options.fs || fs;
+  const codexHome = options.codexHome || env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const sidecarPath = path.join(codexHome, "clawd-hooks", "codex-hook.js.windows.run");
+  let lines;
+  try {
+    lines = fsApi.readFileSync(sidecarPath, "utf8").replace(/\r\n/g, "\n").split("\n");
+  } catch {
+    return { applied: false, reason: "missing" };
+  }
+
+  try {
+    if (lines[0] !== WINDOWS_STABLE_RUN_SIGNATURE || !lines[1] || !lines[2]) {
+      return { applied: false, reason: "invalid" };
+    }
+    decodeStableSidecarValue(lines[1]); // Node path is validated by installer + Doctor.
+    const target = decodeStableSidecarValue(lines[2]);
+    const expectedTarget = options.hookPath || __filename;
+    if (normalizeWindowsStablePath(target) !== normalizeWindowsStablePath(expectedTarget)) {
+      return { applied: false, reason: "target-mismatch" };
+    }
+
+    const entries = [];
+    for (const line of lines.slice(3).filter(Boolean)) {
+      const separator = line.indexOf(".");
+      if (!line.startsWith("E") || separator < 2) {
+        return { applied: false, reason: "invalid" };
+      }
+      const key = decodeStableSidecarValue(line.slice(1, separator));
+      const value = decodeStableSidecarValue(line.slice(separator + 1));
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+        return { applied: false, reason: "invalid" };
+      }
+      entries.push([key, value]);
+    }
+    for (const [key, value] of entries) env[key] = value;
+    return { applied: true, reason: null, count: entries.length };
+  } catch {
+    return { applied: false, reason: "invalid" };
+  }
+}
+
+if (require.main === module) applyWindowsStableSidecarEnv();
 
 const TOOL_MATCH_STRING_MAX = 240;
 const TOOL_MATCH_ARRAY_MAX = 16;
 const TOOL_MATCH_OBJECT_KEYS_MAX = 32;
 const TOOL_MATCH_DEPTH_MAX = 6;
 const CODEX_PERMISSION_TIMEOUT_MS = 590000;
+const CODEX_AUTO_START_TIMEOUT_MS = 10000;
 const SESSION_META_READ_CHUNK_BYTES = 8192;
 const SESSION_META_READ_MAX_BYTES = 256 * 1024;
 
@@ -184,9 +279,46 @@ function applyCodexSessionMetaFields(body, payload, sessionMeta) {
   const source = payload && typeof payload === "object" ? payload : {};
   const meta = sessionMeta && typeof sessionMeta === "object" ? sessionMeta : {};
   const originator = firstString(meta.originator, source.originator);
-  const codexSource = firstString(meta.source, source.source);
+  let codexSource = firstString(meta.source, source.source);
+  const metaSubagent = meta.source && typeof meta.source === "object"
+    ? meta.source.subagent
+    : null;
+  const hookSubagent = source.source && typeof source.source === "object"
+    ? source.source.subagent
+    : null;
+  const subagent = metaSubagent && typeof metaSubagent === "object"
+    ? metaSubagent
+    : (hookSubagent && typeof hookSubagent === "object" ? hookSubagent : null);
+  const spawn = subagent && subagent.thread_spawn && typeof subagent.thread_spawn === "object"
+    ? subagent.thread_spawn
+    : {};
+
+  // A subagent session_meta replaces the root's string source ("cli") with
+  // a structured `source.subagent` object. `originator:"codex-tui"` is the
+  // audited local-CLI provenance for that shape, so preserve the inherited
+  // source instead of making every interactive child fail automation identity.
+  if (!codexSource && subagent && isCodexCliOriginator(originator)) codexSource = "cli";
   if (originator) body.codex_originator = originator;
   if (codexSource) body.codex_source = codexSource;
+
+  const agentNickname = firstString(
+    meta.agent_nickname,
+    source.agent_nickname,
+    spawn.agent_nickname,
+  );
+  const agentRole = firstString(
+    meta.agent_role,
+    source.agent_role,
+    spawn.agent_role,
+  );
+  const parentThreadId = firstString(
+    meta.parent_thread_id,
+    source.parent_thread_id,
+    spawn.parent_thread_id,
+  );
+  if (agentNickname) body.codex_agent_nickname = agentNickname.slice(0, 100);
+  if (agentRole) body.codex_agent_role = agentRole.slice(0, 100);
+  if (parentThreadId) body.codex_parent_thread_id = parentThreadId.slice(0, 200);
 }
 
 function isCodexDesktopSession(payload, sessionMeta) {
@@ -200,18 +332,36 @@ function shouldReportForegroundWtHwnd(event) {
 }
 
 function applyLocalProcessFields(body, resolve, options = {}) {
-  const { stablePid, agentPid, detectedEditor, pidChain, foregroundWtHwnd, tmuxSocket, tmuxClient } = resolve();
+  // #634: cross-process pid cache via the shared resolver. Lifecycle keys off
+  // the state event (permission bodies carry no event → "event"); codex has no
+  // SessionEnd hook and Stop is deliberately NOT "end" (turn completion). The
+  // cacheable guard compares against the exact normalizeCodexSessionId
+  // fallback, so an id-less payload (raw "default", cf. #583) never keys a
+  // shared cache entry.
+  const lifecycle = options.event === "SessionStart" ? "start"
+    : options.event === "UserPromptSubmit" ? "prompt"
+    : "event";
+  const metadata = resolve({
+    namespace: "codex",
+    sessionId: body.session_id,
+    cacheCwd: body.cwd || "",
+    lifecycle,
+    cacheable: body.session_id !== "codex:default" && !!body.cwd,
+  });
+  const { stablePid, agentPid, detectedEditor, pidChain, foregroundWtHwnd, tmuxSocket, tmuxClient, headless } = metadata;
   const sourcePid = options.preferAgentPid && agentPid ? agentPid : stablePid;
   body.source_pid = sourcePid;
   if (detectedEditor) body.editor = detectedEditor;
   if (agentPid) body.agent_pid = agentPid;
-  if (pidChain.length) body.pid_chain = pidChain;
+  if (agentPid && headless === true) body.headless = true;
+  if (Array.isArray(pidChain) && pidChain.length) body.pid_chain = pidChain;
   if (tmuxSocket) body.tmux_socket = tmuxSocket;
   if (tmuxClient) body.tmux_client = tmuxClient;
   applyOrcaPaneKey(body);
   if (shouldReportForegroundWtHwnd(options.event, foregroundWtHwnd) && foregroundWtHwnd) {
     body.wt_hwnd = String(foregroundWtHwnd);
   }
+  return metadata;
 }
 
 function resolveCodexSessionRole(payload, sessionMeta) {
@@ -264,7 +414,7 @@ function sanitizeCodexPermissionOutput(rawBody) {
   return buildCodexPermissionOutput(decision);
 }
 
-function buildPermissionBody(payload, resolve) {
+function buildPermissionBody(payload, resolve, options = {}) {
   const event = payload && typeof payload.hook_event_name === "string"
     ? payload.hook_event_name
     : "";
@@ -298,10 +448,11 @@ function buildPermissionBody(payload, resolve) {
     body.transcript_path = payload.transcript_path;
   }
   if (typeof payload.model === "string" && payload.model) body.model = payload.model;
-  // Carry the session role so the /permission route's headless gate
-  // (isHeadlessPermissionRequest) can identify subagent requests even when
-  // no state event has populated the sessions map yet. Before PR #448
-  // subagent permissions deliberately bubbled, so the role was state-only.
+  if (payload.headless === true) body.headless = true;
+  // Permission routing must distinguish a visible Agent thread from a truly
+  // non-interactive process. Carry the role for provenance/UI. An explicit or
+  // resolver-derived `headless` bit remains a hard bypass; the server also
+  // fail-closes subagents whose originator is not an audited interactive client.
   const codexRole = resolveCodexSessionRole(payload, sessionMeta);
   if (codexRole !== ROLE_UNKNOWN) body.codex_session_role = codexRole;
   applyCodexSessionMetaFields(body, payload, sessionMeta);
@@ -317,16 +468,21 @@ function buildPermissionBody(payload, resolve) {
     applyOrcaPaneKey(body);
   } else {
     applyWslSourceFields(body);
-    applyLocalProcessFields(body, resolve, {
-      preferAgentPid: isCodexDesktopSession(payload, sessionMeta),
-      event,
-    });
+    if (options.authoritativeProcessChain === true) {
+      applyOrcaPaneKey(body);
+    } else {
+      const metadata = applyLocalProcessFields(body, resolve, {
+        preferAgentPid: isCodexDesktopSession(payload, sessionMeta),
+        event,
+      });
+      if (typeof options.onProcessMetadata === "function") options.onProcessMetadata(metadata);
+    }
   }
 
   return body;
 }
 
-function buildStateBody(payload, resolve) {
+function buildStateBody(payload, resolve, options = {}) {
   const event = payload && typeof payload.hook_event_name === "string"
     ? payload.hook_event_name
     : "";
@@ -386,10 +542,15 @@ function buildStateBody(payload, resolve) {
     applyOrcaPaneKey(body);
   } else {
     applyWslSourceFields(body);
-    applyLocalProcessFields(body, resolve, {
-      preferAgentPid: isCodexDesktopSession(payload, sessionMeta),
-      event,
-    });
+    if (options.authoritativeProcessChain === true) {
+      applyOrcaPaneKey(body);
+    } else {
+      const metadata = applyLocalProcessFields(body, resolve, {
+        preferAgentPid: isCodexDesktopSession(payload, sessionMeta),
+        event,
+      });
+      if (typeof options.onProcessMetadata === "function") options.onProcessMetadata(metadata);
+    }
   }
 
   return body;
@@ -405,6 +566,7 @@ function requestCodexPermission(body, callback, options = {}) {
     requestOptions.preferredPort = options.preferredPort;
     requestOptions.runtimePort = options.preferredPort;
   }
+  if (options.windowsProcessChain) requestOptions.windowsProcessChain = options.windowsProcessChain;
   postPermission(
     JSON.stringify(body),
     requestOptions,
@@ -414,51 +576,225 @@ function requestCodexPermission(body, callback, options = {}) {
   );
 }
 
+function startClawdAndWait(options = {}) {
+  const spawnProcess = options.spawn || spawn;
+  const setTimeoutFn = options.setTimeout || setTimeout;
+  const clearTimeoutFn = options.clearTimeout || clearTimeout;
+  const timeoutMs = Number.isFinite(options.timeoutMs)
+    ? Math.max(0, options.timeoutMs)
+    : CODEX_AUTO_START_TIMEOUT_MS;
+  return new Promise((resolveStart) => {
+    let settled = false;
+    let child = null;
+    let timer = null;
+    const cleanup = () => {
+      if (timer !== null) {
+        clearTimeoutFn(timer);
+        timer = null;
+      }
+      if (child && typeof child.removeListener === "function") {
+        child.removeListener("error", done);
+        child.removeListener("exit", done);
+      }
+    };
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolveStart();
+    };
+    const onTimeout = () => {
+      if (child && typeof child.kill === "function") {
+        try { child.kill(); } catch {}
+      }
+      done();
+    };
+    try {
+      child = spawnProcess(
+        process.execPath,
+        [path.join(__dirname, "auto-start.js")],
+        { stdio: "ignore", windowsHide: true }
+      );
+      if (!child || typeof child.once !== "function") {
+        done();
+        return;
+      }
+      child.once("error", done);
+      child.once("exit", done);
+      timer = setTimeoutFn(onTimeout, timeoutMs);
+      if (timer && typeof timer.unref === "function") timer.unref();
+    } catch {
+      done();
+    }
+  });
+}
+
 async function runCodexHook(payload, options = {}) {
   const config = getPlatformConfig();
-  let preferredPort = options.preferredPort || null;
   const readIdentity = options.readRuntimeIdentity || readRuntimeIdentity;
-  const resolverOptions = {
-    agentNames: { win: new Set(["codex.exe"]), mac: new Set(["codex"]), linux: new Set(["codex"]) },
-    platformConfig: config,
-    readRuntimeIdentity() {
-      const identity = readIdentity();
-      if (!preferredPort && identity && identity.port) preferredPort = identity.port;
-      return identity;
-    },
+  const env = options.env || process.env;
+  const argv = Array.isArray(options.argv) ? options.argv : process.argv;
+  const platform = options.platform || process.platform;
+  const wslInterop = argv.includes(CODEX_WSL_INTEROP_ARG);
+  let wslDistro = null;
+  try {
+    const resolveHookWslDistro = options.resolveWslDistro || resolveWslDistro;
+    wslDistro = resolveHookWslDistro();
+  } catch {}
+  const mayUseWindowsProcessChain = platform === "win32"
+    && !env.CLAWD_REMOTE
+    && !env.CLAWD_WSL_DISTRO
+    && !wslInterop
+    && !wslDistro;
+  const readHookContext = options.readWindowsProcessChainHookContext
+    || readWindowsProcessChainHookContext;
+  const isAlive = options.processAlive || processAlive;
+  const observeAttempt = () => {
+    if (!mayUseWindowsProcessChain) {
+      return { context: null, observation: null, enabled: false, authoritative: false };
+    }
+    let context;
+    try {
+      context = readHookContext("codex", { readRuntimeIdentity: readIdentity });
+    } catch {
+      context = { identity: { ok: false, reason: "runtime-read-failed", port: null, ownerPid: null }, observation: null };
+    }
+    const observation = context && context.observation || null;
+    let ownerAlive = false;
+    if (observation) {
+      try { ownerAlive = isAlive(observation.ownerPid) === true; } catch { ownerAlive = false; }
+    }
+    const enabled = !!(observation && observation.agentMode !== "legacy" && ownerAlive);
+    return {
+      context,
+      observation,
+      enabled,
+      authoritative: enabled && observation.agentMode === "b1a-authoritative",
+    };
   };
-  const resolve = options.resolvePid || (options.createPidResolver
-    ? options.createPidResolver(resolverOptions)
-    : createPidResolver(resolverOptions));
+  const createAttemptResolver = (initialPreferredPort = null, processChainAttempt = null) => {
+    let preferredPort = initialPreferredPort
+      || (processChainAttempt && processChainAttempt.observation && processChainAttempt.observation.port)
+      || (processChainAttempt && processChainAttempt.context
+        && processChainAttempt.context.identity && processChainAttempt.context.identity.port)
+      || null;
+    const resolverOptions = {
+      agentNames: { win: new Set(["codex.exe"]), mac: new Set(["codex"]), linux: new Set(["codex"]) },
+      platformConfig: config,
+      readRuntimeIdentity() {
+        if (processChainAttempt && processChainAttempt.context) {
+          return processChainAttempt.context.identity;
+        }
+        const identity = readIdentity();
+        if (!preferredPort && identity && identity.port) preferredPort = identity.port;
+        return identity;
+      },
+    };
+    const resolve = options.resolvePid || (options.createPidResolver
+      ? options.createPidResolver(resolverOptions)
+      : createPidResolver(resolverOptions));
+    return {
+      resolve,
+      getPreferredPort: () => preferredPort,
+    };
+  };
 
-  const permissionBody = buildPermissionBody(payload || {}, resolve);
-  if (permissionBody) {
+  if (payload && payload.hook_event_name === "PermissionRequest") {
+    const processChainAttempt = observeAttempt();
+    const permissionAttempt = createAttemptResolver(options.preferredPort || null, processChainAttempt);
+    let legacyCacheSource = "none";
+    const permissionBody = buildPermissionBody(payload, permissionAttempt.resolve, {
+      authoritativeProcessChain: processChainAttempt.authoritative,
+      onProcessMetadata: (metadata) => { legacyCacheSource = metadata && metadata.cacheSource || "none"; },
+    });
+    if (!permissionBody) return { body: null, posted: false, stdout: "" };
+    const windowsProcessChain = processChainAttempt.enabled ? {
+      agentId: "codex",
+      hookPid: options.hookPid || process.pid,
+      runtimeObservation: processChainAttempt.observation,
+      legacyCacheSource,
+    } : null;
     return new Promise((resolveRun) => {
       requestCodexPermission(permissionBody, (stdout, posted, port) => {
         resolveRun({ body: permissionBody, posted: !!posted, port: port || null, stdout });
-      }, { ...options, preferredPort });
+      }, {
+        ...options,
+        preferredPort: permissionAttempt.getPreferredPort(),
+        windowsProcessChain,
+      });
     });
   }
 
-  const body = buildStateBody(payload || {}, resolve);
-  if (!body) return { body: null, posted: false, stdout: "" };
-  // Byte-fit before POST so a long CJK assistant_last_output can't trip the
-  // server's headerless 413 (read back as posted=false). See
-  // hooks/state-payload-size.js.
-  const fitted = fitStateBodyToByteBudget(body);
   const postState = options.postState || postStateToRunningServer;
-  const postOptions = { timeoutMs: 100 };
-  if (preferredPort) {
-    postOptions.preferredPort = preferredPort;
-    postOptions.runtimePort = preferredPort;
-  }
-  return new Promise((resolveRun) => {
+  const buildStateAttempt = (preferredPort = null, processChainAttempt = observeAttempt()) => {
+    const attempt = createAttemptResolver(preferredPort, processChainAttempt);
+    let legacyCacheSource = "none";
+    const body = buildStateBody(payload || {}, attempt.resolve, {
+      authoritativeProcessChain: processChainAttempt.authoritative,
+      onProcessMetadata: (metadata) => { legacyCacheSource = metadata && metadata.cacheSource || "none"; },
+    });
+    if (!body) return null;
+    // Byte-fit before POST so a long CJK assistant_last_output can't trip the
+    // server's headerless 413 (read back as posted=false). See
+    // hooks/state-payload-size.js.
+    const fitted = fitStateBodyToByteBudget(body);
+    return {
+      body: fitted.body,
+      preferredPort: attempt.getPreferredPort(),
+      windowsProcessChain: processChainAttempt.enabled ? {
+        agentId: "codex",
+        hookPid: options.hookPid || process.pid,
+        runtimeObservation: processChainAttempt.observation,
+        legacyCacheSource,
+      } : null,
+    };
+  };
+  const postAttempt = (attempt) => new Promise((resolveRun) => {
+    const requestOptions = { timeoutMs: 100 };
+    if (attempt.preferredPort) {
+      requestOptions.preferredPort = attempt.preferredPort;
+      requestOptions.runtimePort = attempt.preferredPort;
+    }
+    if (attempt.windowsProcessChain) requestOptions.windowsProcessChain = attempt.windowsProcessChain;
     postState(
-      JSON.stringify(fitted.body),
-      postOptions,
-      (posted, port) => resolveRun({ body: fitted.body, posted: !!posted, port: port || null, stdout: "" })
+      JSON.stringify(attempt.body),
+      requestOptions,
+      (posted, port) => resolveRun({
+        body: attempt.body,
+        posted: !!posted,
+        port: port || null,
+        stdout: "",
+      })
     );
   });
+
+  const firstAttempt = buildStateAttempt(options.preferredPort || null);
+  if (!firstAttempt) return { body: null, posted: false, stdout: "" };
+  const result = await postAttempt(firstAttempt);
+  if (
+    result.posted
+    || payload.hook_event_name !== "SessionStart"
+    || env.CLAWD_REMOTE
+    || env.CLAWD_WSL_DISTRO
+    || wslInterop
+    || wslDistro
+  ) return result;
+
+  const readAutoStartGate = options.readCodexAutoStartGate || readCodexAutoStartGate;
+  let autoStartEnabled = false;
+  try {
+    autoStartEnabled = readAutoStartGate(options.codexAutoStartGateOptions || {}) === true;
+  } catch {}
+  if (!autoStartEnabled) return result;
+
+  // Codex launches matching hooks concurrently, so a separate SessionStart
+  // auto-start hook would race this state delivery. Wait for the existing
+  // launcher helper to finish its readiness probe, then rebuild this event
+  // with fresh runtime and process identity before retrying it.
+  const runAutoStart = options.runAutoStart || startClawdAndWait;
+  await runAutoStart();
+  const retryAttempt = buildStateAttempt();
+  return postAttempt(retryAttempt);
 }
 
 async function main() {
@@ -472,8 +808,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  CODEX_AUTO_START_TIMEOUT_MS,
   EVENT_TO_STATE,
   applyCodexSessionMetaFields,
+  applyWindowsStableSidecarEnv,
   applyLocalProcessFields,
   buildCodexNoDecisionOutput,
   buildCodexPermissionOutput,
@@ -488,4 +826,5 @@ module.exports = {
   runCodexHook,
   sanitizeCodexPermissionDecision,
   sanitizeCodexPermissionOutput,
+  startClawdAndWait,
 };

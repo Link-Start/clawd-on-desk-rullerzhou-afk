@@ -287,6 +287,7 @@ describe("Orca pane key validator copies", () => {
     "src/server-route-state.js",
     "src/server-route-permission.js",
     "src/focus.js",
+    "src/session-focus.js",
   ];
 
   it("shares one pattern across every copy", () => {
@@ -296,7 +297,11 @@ describe("Orca pane key validator copies", () => {
       assert.ok(at > 0, `${rel} must use the canonical pane-key pattern`);
       // Scoped to the validator: these files carry unrelated .trim() calls, so a
       // whole-file match would pass no matter what the validator itself did.
-      assert.ok(src.slice(Math.max(0, at - 400), at).includes(".trim()"),
+      const validatorPrefix = src.slice(Math.max(0, at - 500), at);
+      const trimsDirectly = validatorPrefix.includes(".trim()");
+      const trimsViaNormalizer = /normalizeString\([^)]*\)/.test(validatorPrefix)
+        && /function normalizeString\([^)]*\)\s*\{[\s\S]{0,120}\.trim\(\)/.test(src);
+      assert.ok(trimsDirectly || trimsViaNormalizer,
         `${rel} must trim before matching`);
     }
     const py = fs.readFileSync(path.join(repo, "hooks/hermes-plugin/__init__.py"), "utf8");
@@ -384,7 +389,7 @@ describe("Orca window raise", () => {
 
   it("falls through to the per-user Applications folder", async () => {
     const home = require("os").homedir();
-    const userBundle = path.join(home, "Applications", "Orca.app");
+    const userBundle = path.posix.join(home.replace(/\\/g, "/"), "Applications", "Orca.app");
     await withFocus({ platform: "darwin", macBundles: [userBundle] }, async (t, cli, logs) => {
       t.orcaHandleCache.clear();
       await t.scheduleOrcaPaneFocus(PANE_KEY, CWD);
@@ -493,10 +498,12 @@ describe("Orca CLI discovery", () => {
       assert.ok(candidates.includes("/opt/homebrew/bin/orca"));
       assert.ok(candidates.includes("/usr/local/bin/orca"));
       assert.ok(candidates.includes("/Applications/Orca.app/Contents/Resources/bin/orca"));
-      assert.ok(candidates.includes(path.join(
-        os.homedir(), "Applications", "Orca.app", "Contents", "Resources", "bin", "orca"
+      assert.ok(candidates.includes(path.posix.join(
+        os.homedir().replace(/\\/g, "/"), "Applications", "Orca.app", "Contents", "Resources", "bin", "orca"
       )));
-      assert.ok(candidates.includes(path.join(os.homedir(), ".local", "bin", "orca")));
+      assert.ok(candidates.includes(path.posix.join(
+        os.homedir().replace(/\\/g, "/"), ".local", "bin", "orca"
+      )));
     });
   });
 
@@ -673,8 +680,10 @@ describe("scheduleOrcaPaneFocus", () => {
         "/opt/homebrew/bin/orca",
         "/usr/local/bin/orca",
         "/Applications/Orca.app/Contents/Resources/bin/orca",
-        path.join(os.homedir(), "Applications", "Orca.app", "Contents", "Resources", "bin", "orca"),
-        path.join(os.homedir(), ".local", "bin", "orca"),
+        path.posix.join(
+          os.homedir().replace(/\\/g, "/"), "Applications", "Orca.app", "Contents", "Resources", "bin", "orca"
+        ),
+        path.posix.join(os.homedir().replace(/\\/g, "/"), ".local", "bin", "orca"),
       ];
       await withFocus({ platform: "darwin", missingBinaries: noOrcaAnywhere }, async (t, cli, logs) => {
         t.orcaHandleCache.clear();

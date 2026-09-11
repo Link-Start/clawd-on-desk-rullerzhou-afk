@@ -8,6 +8,7 @@ const path = require("path");
 
 const {
   REMOTE_IDENTITY_STEP_NAMES,
+  sanitizeIdentityTxn,
 } = require("../src/remote-ssh-profile");
 const {
   deriveInstallId,
@@ -24,6 +25,7 @@ const {
   cloneRecoverRemoteSsh,
   buildRemoteIdentityDocument,
 } = require("../src/remote-ssh-identity");
+const { checkSecureConnectReadiness } = require("../src/remote-ssh-runtime");
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-remote-identity-"));
@@ -48,6 +50,27 @@ function profile(over = {}) {
     ...over,
   };
 }
+
+test("main startup defers Remote SSH installation identity until IPC use", () => {
+  const mainSource = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
+  const readyStart = mainSource.indexOf("app.whenReady().then(async () => {");
+  const beforeQuit = mainSource.indexOf('app.on("before-quit"', readyStart);
+  assert.notEqual(readyStart, -1);
+  assert.notEqual(beforeQuit, -1);
+  assert.doesNotMatch(
+    mainSource.slice(readyStart, beforeQuit),
+    /(?:initialize|ensure)RemoteSshInstallationIdentity\s*\(/,
+  );
+  assert.equal(
+    (mainSource.match(/ensureRemoteSshInstallationIdentity\s*\(/g) || []).length,
+    1,
+    "the function declaration must be the only direct call-shaped occurrence; runtime access stays lazy"
+  );
+  assert.match(
+    mainSource,
+    /getInstallationIdentity:\s*ensureRemoteSshInstallationIdentity/,
+  );
+});
 
 test("installation binding is separate from prefs and derives a stable public install id", () => {
   withTempDir((userDataDir) => {
@@ -123,25 +146,14 @@ test("missing binding with copied remote authority triggers recovery even after 
   });
 });
 
-test("corrupt records, public-id mismatch, and unreadable records rotate atomically into clone recovery", () => {
-  for (const [label, mutate, fsFactory] of [
+test("corrupt records and public-id mismatch rotate atomically into clone recovery", () => {
+  for (const [label, mutate] of [
     ["malformed json", (recordPath) => fs.writeFileSync(recordPath, "{broken", { mode: 0o600 })],
     ["public id mismatch", (recordPath) => {
       const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
       record.installId = "f".repeat(64);
       fs.writeFileSync(recordPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
     }],
-    ["unreadable", () => {}, (recordPath) => ({
-      ...fs,
-      readFileSync(target, ...args) {
-        if (target === recordPath) {
-          const err = new Error("permission denied");
-          err.code = "EACCES";
-          throw err;
-        }
-        return fs.readFileSync(target, ...args);
-      },
-    })],
   ]) {
     withTempDir((userDataDir) => {
       const original = loadOrCreateInstallationIdentity({
@@ -150,11 +162,9 @@ test("corrupt records, public-id mismatch, and unreadable records rotate atomica
         now: () => 100,
       });
       mutate(original.recordPath);
-      const fsImpl = fsFactory ? fsFactory(original.recordPath) : fs;
       const recovered = loadOrCreateInstallationIdentity({
         userDataDir,
         expectedInstallId: original.installId,
-        fsImpl,
         randomBytes: deterministicRandom(0x72),
         now: () => 200,
       });
@@ -169,9 +179,83 @@ test("corrupt records, public-id mismatch, and unreadable records rotate atomica
       );
       const residue = fs.readdirSync(userDataDir).filter((name) => name.includes(".tmp-"));
       assert.deepEqual(residue, [], label);
-      assert.equal(fs.statSync(original.recordPath).mode & 0o777, 0o600, label);
+      if (process.platform !== "win32") {
+        assert.equal(fs.statSync(original.recordPath).mode & 0o777, 0o600, label);
+      }
     });
   }
+});
+
+test("unreadable binding fails closed without replacing the installation identity", () => {
+  withTempDir((userDataDir) => {
+    const original = loadOrCreateInstallationIdentity({
+      userDataDir,
+      randomBytes: deterministicRandom(0x73),
+      now: () => 100,
+    });
+    const before = fs.readFileSync(original.recordPath, "utf8");
+    const unreadableFs = {
+      ...fs,
+      readFileSync(target, ...args) {
+        if (target === original.recordPath) {
+          const err = new Error("permission denied");
+          err.code = "EACCES";
+          throw err;
+        }
+        return fs.readFileSync(target, ...args);
+      },
+    };
+
+    assert.throws(() => loadOrCreateInstallationIdentity({
+      userDataDir,
+      expectedInstallId: original.installId,
+      fsImpl: unreadableFs,
+      randomBytes: deterministicRandom(0x74),
+      now: () => 200,
+    }), (err) => err && err.code === "EACCES");
+    assert.equal(fs.readFileSync(original.recordPath, "utf8"), before);
+  });
+});
+
+test("transient safeStorage decryption failure preserves ciphertext for a later retry", () => {
+  withTempDir((userDataDir) => {
+    let decryptAvailable = true;
+    const safeStorage = {
+      isEncryptionAvailable: () => true,
+      getSelectedStorageBackend: () => "keychain",
+      encryptString: (value) => Buffer.from(`wrapped:${value}`, "utf8"),
+      decryptString: (value) => {
+        if (!decryptAvailable) throw new Error("keyring is locked");
+        return value.toString("utf8").replace(/^wrapped:/, "");
+      },
+    };
+    const original = loadOrCreateInstallationIdentity({
+      userDataDir,
+      safeStorage,
+      randomBytes: deterministicRandom(0x75),
+      now: () => 100,
+    });
+    const before = fs.readFileSync(original.recordPath, "utf8");
+    decryptAvailable = false;
+
+    assert.throws(() => loadOrCreateInstallationIdentity({
+      userDataDir,
+      expectedInstallId: original.installId,
+      safeStorage,
+      randomBytes: deterministicRandom(0x76),
+      now: () => 200,
+    }), (err) => err && err.code === "CLAWD_IDENTITY_STORAGE_UNAVAILABLE");
+    assert.equal(fs.readFileSync(original.recordPath, "utf8"), before);
+
+    decryptAvailable = true;
+    const retried = loadOrCreateInstallationIdentity({
+      userDataDir,
+      expectedInstallId: original.installId,
+      safeStorage,
+    });
+    assert.equal(retried.created, false);
+    assert.equal(retried.installId, original.installId);
+  });
 });
 
 test("A to B transaction resumes one nonce and commits only after every component verifies", () => {
@@ -265,6 +349,8 @@ test("force-revoke A and emergency A/B to C both fail closed for revoked generat
   assert.equal(emergency.routingNonce, undefined);
   assert.equal(emergency.previousNonce, undefined);
   assert.equal(emergency.isolatedActive, false);
+  assert.equal(emergency.identityTxn.previousExpiresAt, 3_001);
+  assert.ok(sanitizeIdentityTxn(emergency.identityTxn, emergency));
   assert.deepEqual(acceptedRoutingNonces(emergency, 3_000), ["cc".repeat(16)]);
   assert.equal(acceptedRoutingNonces(emergency, 3_000).includes("a".repeat(32)), false);
   assert.equal(acceptedRoutingNonces(emergency, 3_000).includes("b".repeat(32)), false);
@@ -293,6 +379,9 @@ test("clone recovery clears all copied routing authority before activation", () 
   assert.equal(next.isolatedRuntime, undefined);
   assert.equal(next.managedDeployTargets, undefined);
   assert.equal(next.lastDeployedAt, undefined);
+  const readiness = checkSecureConnectReadiness(next);
+  assert.equal(readiness.reason, "deployment_required");
+  assert.equal(readiness.detail, "deployment_stamp_missing");
 });
 
 test("remote identity document binds nonce to installation, profile, and layout", () => {

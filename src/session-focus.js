@@ -16,7 +16,9 @@ function normalizeOsPlatform(options) {
 function getCodexThreadId(entry) {
   if (!entry || entry.agentId !== "codex") return null;
   if (!isCodexDesktopOriginator(entry.codexOriginator || entry.originator)) return null;
-  const match = normalizeString(entry.id).match(CODEX_THREAD_SESSION_ID_RE);
+  const sessionId =
+    normalizeString(entry.rawSessionId) || normalizeString(entry.id);
+  const match = sessionId.match(CODEX_THREAD_SESSION_ID_RE);
   return match ? match[1] : null;
 }
 
@@ -47,11 +49,6 @@ function getSessionFocusTarget(entry, options = {}) {
 
   const codexThreadUrl = getCodexThreadUrl(entry);
   if (codexThreadUrl) {
-    if (normalizeOsPlatform(options) === "win32") {
-      return entry.sourcePid
-        ? { canFocus: true, type: "terminal", url: null }
-        : { canFocus: false, type: null, url: null };
-    }
     return { canFocus: true, type: "codex-thread", url: codexThreadUrl };
   }
 
@@ -60,6 +57,28 @@ function getSessionFocusTarget(entry, options = {}) {
   }
 
   return { canFocus: false, type: null, url: null };
+}
+
+// A Codex Desktop deep link can select the application window, but the OS
+// foreground check cannot prove which of its conversations owns the composer.
+// Direct Send must therefore keep Desktop out of the paste path even when the
+// session still carries a sourcePid. Navigation callers continue to use the
+// regular target above and can open the thread URL normally.
+function getDirectSendFocusTarget(entry, options = {}) {
+  const isCodexDesktop = !!entry
+    && entry.agentId === "codex"
+    && isCodexDesktopOriginator(entry.codexOriginator || entry.originator);
+  if (isCodexDesktop) {
+    return {
+      canFocus: false,
+      type: "codex-thread",
+      url: getCodexThreadUrl(entry),
+      reason: "codex_desktop_requires_manual_paste",
+    };
+  }
+
+  const target = getSessionFocusTarget(entry, options);
+  return target;
 }
 
 function isFocusableLocalHudSession(entry, options = {}) {
@@ -81,6 +100,7 @@ function getFocusableLocalHudSessionIds(snapshot, options = {}) {
 module.exports = {
   getCodexThreadId,
   getCodexThreadUrl,
+  getDirectSendFocusTarget,
   getFocusableLocalHudSessionIds,
   getSessionFocusTarget,
   isFocusableLocalHudSession,

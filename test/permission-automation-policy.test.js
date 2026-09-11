@@ -208,6 +208,7 @@ describe("permission automation interaction classifier", () => {
       "copilot-cli",
       "hermes",
       "opencode",
+      "zcode",
     ]) {
       for (const toolName of ["ExitPlanMode", "exitplanmode", "ExitPlanModeTool"]) {
         const interaction = classifyPermissionInteraction({
@@ -232,6 +233,68 @@ describe("permission automation interaction classifier", () => {
       { autoTools: true, unattended: true }
     );
     assert.strictEqual(interaction.capabilities.allowDeny, true);
+  });
+
+  it("keeps ordinary ZCode permissions manual until its tool surface is audited", () => {
+    const interaction = classifyPermissionInteraction({
+      agentId: "zcode",
+      toolName: "Bash",
+    });
+    assert.strictEqual(interaction.intent, INTERACTION_INTENT.TOOL_APPROVAL);
+    assert.deepStrictEqual(
+      { ...interaction.automationEligibility },
+      { autoTools: false, unattended: false }
+    );
+    assert.strictEqual(interaction.capabilities.allowDeny, true);
+    assert.strictEqual(interaction.capabilities.nativeFallback, true);
+    for (const mode of [PERMISSION_AUTOMATION_MODE.AUTO_TOOLS, PERMISSION_AUTOMATION_MODE.UNATTENDED]) {
+      assert.strictEqual(
+        evaluatePermissionAutomation({ mode, interaction }),
+        AUTOMATION_ACTION.DEFER
+      );
+    }
+  });
+
+  it("never auto-allows an unreviewed ZCode built-in name", () => {
+    const interaction = classifyPermissionInteraction({
+      agentId: "zcode",
+      toolName: "RequestUserChoiceV2",
+    });
+    assert.strictEqual(interaction.intent, INTERACTION_INTENT.TOOL_APPROVAL);
+    assert.deepStrictEqual(
+      { ...interaction.automationEligibility },
+      { autoTools: false, unattended: false }
+    );
+    for (const mode of [PERMISSION_AUTOMATION_MODE.AUTO_TOOLS, PERMISSION_AUTOMATION_MODE.UNATTENDED]) {
+      assert.strictEqual(
+        evaluatePermissionAutomation({ mode, interaction }),
+        AUTOMATION_ACTION.DEFER
+      );
+    }
+  });
+
+  it("keeps DSH manually actionable while every automation mode defers", () => {
+    const interaction = classifyPermissionInteraction({
+      agentId: "deepseek-harness",
+      toolName: "execute_shell",
+    });
+    assert.strictEqual(interaction.intent, INTERACTION_INTENT.TOOL_APPROVAL);
+    assert.strictEqual(interaction.capabilities.allowDeny, true);
+    assert.strictEqual(interaction.capabilities.nativeFallback, true);
+    assert.deepStrictEqual(
+      { ...interaction.automationEligibility },
+      { autoTools: false, unattended: false }
+    );
+    for (const mode of [PERMISSION_AUTOMATION_MODE.AUTO_TOOLS, PERMISSION_AUTOMATION_MODE.UNATTENDED]) {
+      assert.strictEqual(evaluate(mode, interaction), AUTOMATION_ACTION.DEFER, mode);
+    }
+    const question = classifyPermissionInteraction({
+      agentId: "deepseek-harness",
+      toolName: "ask_user_question",
+    });
+    assert.strictEqual(question.intent, INTERACTION_INTENT.HUMAN_QUESTION);
+    assert.strictEqual(question.capabilities.answerQuestions, false);
+    assert.strictEqual(evaluate(PERMISSION_AUTOMATION_MODE.UNATTENDED, question), AUTOMATION_ACTION.DEFER);
   });
 
   it("defaults unknown agents to unknown with no automation eligibility", () => {

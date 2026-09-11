@@ -4,8 +4,10 @@ const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 
 const { registerSessionIpc } = require("../src/session-ipc");
+const { SUPPORTED_LANGS } = require("../src/i18n");
 
 class FakeIpcMain {
   constructor() {
@@ -35,6 +37,12 @@ class FakeIpcMain {
     return listener({ sender: "sender-web-contents" }, ...args);
   }
 
+  invokeFrom(event, channel, ...args) {
+    const listener = this.handlers.get(channel);
+    assert.strictEqual(typeof listener, "function", `missing IPC handler ${channel}`);
+    return listener(event, ...args);
+  }
+
   send(channel, ...args) {
     const listener = this.listeners.get(channel);
     assert.strictEqual(typeof listener, "function", `missing IPC listener ${channel}`);
@@ -45,6 +53,28 @@ class FakeIpcMain {
 function createHarness(overrides = {}) {
   const calls = [];
   const ipcMain = new FakeIpcMain();
+  const dashboardMainFrame = {
+    url: pathToFileURL(path.join(__dirname, "..", "src", "dashboard.html")).toString(),
+  };
+  // The page's WebContents belongs to a WebContentsView on darwin/win32, so
+  // the trust check must resolve it directly and never through a window.
+  const dashboardWebContents = {
+    mainFrame: dashboardMainFrame,
+    isDestroyed: () => false,
+  };
+  // A supported-platform quick mode by default, so the shared channel set
+  // reflects a darwin/win32 install.
+  const quickMode = {
+    isSupported: () => overrides.quickSupported !== false,
+    getPendingRevision: () => 7,
+    enter: (payload) => { calls.push(["quickEnter", payload]); return { status: "ok" }; },
+    ready: (payload) => { calls.push(["quickReady", payload]); return { status: "ok" }; },
+    activate: (payload) => { calls.push(["quickActivate", payload]); return { status: "submitted" }; },
+    dismissFromRenderer: (payload) => {
+      calls.push(["quickDismiss", payload]);
+      return { status: "ok" };
+    },
+  };
   const runtime = registerSessionIpc({
     ipcMain,
     getSessionSnapshot: overrides.getSessionSnapshot || (() => ({ sessions: [{ id: "s1" }] })),
@@ -82,8 +112,32 @@ function createHarness(overrides = {}) {
       calls.push(["clearSessionAutomationGrant", payload]);
       return { status: "applied" };
     }),
+    getDashboardWebContents: overrides.getDashboardWebContents
+      || (() => dashboardWebContents),
+    quickMode: Object.prototype.hasOwnProperty.call(overrides, "quickMode")
+      ? overrides.quickMode
+      : quickMode,
+    getKimiQuotaStatus: overrides.getKimiQuotaStatus || (() => ({
+      status: "ok",
+      configured: true,
+      decryptable: true,
+      collectionEnabled: true,
+      agentEnabled: true,
+    })),
+    refreshKimiQuota: overrides.refreshKimiQuota || (() => {
+      calls.push(["refreshKimiQuota"]);
+      return { status: "ok" };
+    }),
   });
-  return { ipcMain, runtime, calls };
+  return {
+    ipcMain,
+    runtime,
+    calls,
+    trustedDashboardEvent: {
+      sender: dashboardWebContents,
+      senderFrame: dashboardMainFrame,
+    },
+  };
 }
 
 test("session IPC registers owned channels and disposes them", () => {
@@ -92,9 +146,16 @@ test("session IPC registers owned channels and disposes them", () => {
   assert.deepStrictEqual([...ipcMain.handlers.keys()].sort(), [
     "dashboard:clear-session-automation-grant",
     "dashboard:get-i18n",
+    "dashboard:get-kimi-quota-status",
     "dashboard:get-snapshot",
     "dashboard:hide-session",
     "dashboard:open-session-folder",
+    "dashboard:quick-activate",
+    "dashboard:quick-dismiss",
+    "dashboard:quick-enter",
+    "dashboard:quick-pending",
+    "dashboard:quick-ready",
+    "dashboard:refresh-kimi-quota",
     "dashboard:set-session-alias",
     "dashboard:set-session-automation",
     "session-hud:get-i18n",
@@ -114,6 +175,56 @@ test("session IPC registers owned channels and disposes them", () => {
 
   assert.strictEqual(ipcMain.handlers.size, 0);
   assert.strictEqual(ipcMain.listeners.size, 0);
+});
+
+test("an unsupported platform never registers the keyboard-mode channels", () => {
+  const { ipcMain } = createHarness({ quickSupported: false });
+  const quickChannels = [...ipcMain.handlers.keys()].filter((c) => c.startsWith("dashboard:quick-"));
+
+  // Not registered at all: there is no capability to reach, rather than a
+  // handler that politely answers "unsupported".
+  assert.deepStrictEqual(quickChannels, []);
+  // The rest of the Dashboard is untouched.
+  assert.ok(ipcMain.handlers.has("dashboard:get-snapshot"));
+  assert.ok(ipcMain.handlers.has("dashboard:get-kimi-quota-status"));
+  assert.ok(ipcMain.listeners.has("dashboard:focus-session"));
+});
+
+test("keyword-mode channels reach the owner only from the trusted page", async () => {
+  const { ipcMain, calls, trustedDashboardEvent } = createHarness();
+
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedDashboardEvent, "dashboard:quick-pending"),
+    { status: "ok", revision: 7 }
+  );
+  await ipcMain.invokeFrom(trustedDashboardEvent, "dashboard:quick-enter", { revision: 7 });
+  await ipcMain.invokeFrom(trustedDashboardEvent, "dashboard:quick-ready", { revision: 7 });
+  await ipcMain.invokeFrom(
+    trustedDashboardEvent,
+    "dashboard:quick-activate",
+    { sessionId: "s1", revision: 7 }
+  );
+  await ipcMain.invokeFrom(trustedDashboardEvent, "dashboard:quick-dismiss", { revision: 7 });
+  assert.deepStrictEqual(calls.map(([name]) => name), [
+    "quickEnter",
+    "quickReady",
+    "quickActivate",
+    "quickDismiss",
+  ]);
+
+  // An untrusted sender is refused before the owner is consulted.
+  calls.length = 0;
+  for (const channel of [
+    "dashboard:quick-pending",
+    "dashboard:quick-enter",
+    "dashboard:quick-ready",
+    "dashboard:quick-activate",
+    "dashboard:quick-dismiss",
+  ]) {
+    const result = await ipcMain.invoke(channel, { revision: 7 });
+    assert.strictEqual(result.reason, "untrusted-dashboard-sender", channel);
+  }
+  assert.deepStrictEqual(calls, []);
 });
 
 test("session IPC delegates dashboard and HUD behavior", async () => {
@@ -172,6 +283,38 @@ test("dashboard and HUD open-folder IPC accept only a sessionId string", async (
     }
   }
   assert.deepStrictEqual(calls, []);
+});
+
+test("Kimi quota Dashboard IPC accepts only the real Dashboard main frame", async () => {
+  const { ipcMain, calls, trustedDashboardEvent } = createHarness();
+
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedDashboardEvent, "dashboard:get-kimi-quota-status"),
+    {
+      status: "ok",
+      configured: true,
+      decryptable: true,
+      collectionEnabled: true,
+      agentEnabled: true,
+    }
+  );
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedDashboardEvent, "dashboard:refresh-kimi-quota"),
+    { status: "ok" }
+  );
+  assert.deepStrictEqual(calls, [["refreshKimiQuota"]]);
+
+  for (const event of [
+    { sender: trustedDashboardEvent.sender },
+    { sender: {}, senderFrame: trustedDashboardEvent.senderFrame },
+    { sender: trustedDashboardEvent.sender, senderFrame: { ...trustedDashboardEvent.senderFrame } },
+  ]) {
+    assert.deepStrictEqual(
+      await ipcMain.invokeFrom(event, "dashboard:refresh-kimi-quota"),
+      { status: "error", reason: "untrusted-dashboard-sender" }
+    );
+  }
+  assert.deepStrictEqual(calls, [["refreshKimiQuota"]]);
 });
 
 test("session IPC owns dashboard open bridges", () => {
@@ -307,11 +450,38 @@ test("dashboard renderer wires the Mark-read button + ackCompletion fallback (so
     "Mark-read click must re-enable button on ack failure");
 
   const i18nSrc = fs.readFileSync(path.join(__dirname, "..", "src", "i18n.js"), "utf8");
-  // Both new keys must appear in all 5 language tables (en/zh/zh-TW/ko/ja).
+  // Both new keys must appear once in every supported language table.
   for (const key of ["dashboardMarkRead", "dashboardMarkReadTitle"]) {
     const matches = i18nSrc.match(new RegExp(`\\b${key}:`, "g"));
-    assert.ok(matches && matches.length >= 5,
-      `${key} should appear in all 5 language tables (saw ${matches ? matches.length : 0})`);
+    const matchCount = matches ? matches.length : 0;
+    assert.strictEqual(matchCount, SUPPORTED_LANGS.length,
+      `${key} should appear in all ${SUPPORTED_LANGS.length} supported language tables (saw ${matchCount})`);
+  }
+});
+
+test("Dashboard exposes the trusted Kimi quota refresh bridge and localized action", () => {
+  const rendererSrc = fs.readFileSync(path.join(__dirname, "..", "src", "dashboard-renderer.js"), "utf8");
+  const preloadSrc = fs.readFileSync(path.join(__dirname, "..", "src", "preload-dashboard.js"), "utf8");
+  const htmlSrc = fs.readFileSync(path.join(__dirname, "..", "src", "dashboard.html"), "utf8");
+  const i18nSrc = fs.readFileSync(path.join(__dirname, "..", "src", "i18n.js"), "utf8");
+
+  // The refresh button is built by the renderer inside the Kimi quota
+  // section header, not static markup in dashboard.html.
+  assert.match(rendererSrc, /quota-refresh-button/);
+  assert.match(htmlSrc, /\.quota-refresh-button\s*\{/);
+  assert.match(preloadSrc, /dashboard:get-kimi-quota-status/);
+  assert.match(preloadSrc, /dashboard:refresh-kimi-quota/);
+  assert.match(rendererSrc, /refreshKimiQuotaFromDashboard/);
+  for (const key of [
+    "dashboardKimiQuotaRefresh",
+    "dashboardKimiQuotaRefreshing",
+    "dashboardKimiQuotaUpdated",
+    "dashboardKimiQuotaRefreshFailed",
+    "dashboardKimiQuotaEmpty",
+    "dashboardKimiQuotaRefreshShort",
+  ]) {
+    const matches = i18nSrc.match(new RegExp(`\\b${key}:`, "g"));
+    assert.strictEqual(matches ? matches.length : 0, SUPPORTED_LANGS.length);
   }
 });
 

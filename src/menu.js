@@ -4,10 +4,13 @@ const { app, BrowserWindow, screen, Menu, Tray, nativeImage } = require("electro
 const path = require("path");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { loadTrayNormalIcon } = require("./tray-flash-icon");
+const { createMacDockVisibilityCoordinator } = require("./mac-dock-visibility");
+const { resolveRuntimeDockIconPolicy } = require("./mac-dock-icon-runtime");
 
-const isMac = process.platform === "darwin";
-const isWin = process.platform === "win32";
-const isLinux = process.platform === "linux";
+const platform = process.platform;
+const isMac = platform === "darwin";
+const isWin = platform === "win32";
+const isLinux = platform === "linux";
 
 // Login-item / autostart helpers and the openAtLogin write path live in
 // src/login-item.js + main.js's settings-actions effect. menu.js used to
@@ -46,6 +49,22 @@ function joinGroups(groups) {
 module.exports = function initMenu(ctx) {
   // ── Translation helper (bound to ctx.lang via the shared i18n module) ──
   const t = createTranslator(() => ctx.lang);
+  const macDockVisibility = isMac ? createMacDockVisibilityCoordinator({
+    app,
+    dock: app.dock,
+    dockIconPath: path.join(__dirname, "../assets/dock-icon.png"),
+    shouldInstallDockIcon: () => resolveRuntimeDockIconPolicy({
+      platform,
+      isPackaged: app.isPackaged === true,
+      getSystemVersion: () => {
+        if (typeof ctx.getSystemVersion === "function") return ctx.getSystemVersion();
+        if (typeof process.getSystemVersion === "function") return process.getSystemVersion();
+        return "";
+      },
+    }),
+    getSettingsWindow: ctx.getSettingsWindow,
+    reapplyMacVisibility: ctx.reapplyMacVisibility,
+  }) : null;
 
   function isMiniSupported() {
     const caps = typeof ctx.getActiveThemeCapabilities === "function"
@@ -219,15 +238,7 @@ module.exports = function initMenu(ctx) {
 
   function applyDockVisibility() {
     if (!isMac) return;
-    if (ctx.showDock) {
-      app.setActivationPolicy("regular");
-      if (app.dock) app.dock.show();
-    } else {
-      app.setActivationPolicy("accessory");
-      if (app.dock) app.dock.hide();
-    }
-    // dock.hide()/show() resets NSWindowCollectionBehavior — re-apply fullscreen visibility
-    ctx.reapplyMacVisibility();
+    return macDockVisibility.apply(ctx.showDock);
   }
 
   function buildTrayMenu() {
@@ -319,9 +330,17 @@ module.exports = function initMenu(ctx) {
       const updateItem = ctx.getUpdateMenuItem();
       if (updateItem) appGroup.push(updateItem);
     }
+    // Intent is captured at build time: the fullscreen auto-hide sync can
+    // restore or hide the pet from its background poll while this menu is
+    // still on screen (the tray is the easy case — right-clicking the tray
+    // icon takes the foreground off the fullscreen app, so the auto-restore
+    // fires under the open menu). A live toggle would invert the labeled
+    // action then; applying the captured intent makes the worst case an
+    // idempotent no-op that matches what the user read.
+    const petHiddenAtBuild = ctx.petHidden;
     appGroup.push({
-      label: ctx.petHidden ? t("showPet") : t("hidePet"),
-      click: () => ctx.togglePetVisibility(),
+      label: petHiddenAtBuild ? t("showPet") : t("hidePet"),
+      click: () => ctx.setPetVisibility(petHiddenAtBuild),
     });
 
     const quitGroup = [
@@ -484,6 +503,10 @@ module.exports = function initMenu(ctx) {
         },
       },
       {
+        label: t("openRecap"),
+        click: () => ctx.openSettingsWindow({ tab: "recap" }),
+      },
+      {
         label: t("newSession"),
         submenu: [
           {
@@ -531,9 +554,17 @@ module.exports = function initMenu(ctx) {
       const updateItem = ctx.getUpdateMenuItem();
       if (updateItem) appGroup.push(updateItem);
     }
+    // Intent is captured at build time: the fullscreen auto-hide sync can
+    // restore or hide the pet from its background poll while this menu is
+    // still on screen (the tray is the easy case — right-clicking the tray
+    // icon takes the foreground off the fullscreen app, so the auto-restore
+    // fires under the open menu). A live toggle would invert the labeled
+    // action then; applying the captured intent makes the worst case an
+    // idempotent no-op that matches what the user read.
+    const petHiddenAtBuild = ctx.petHidden;
     appGroup.push({
-      label: ctx.petHidden ? t("showPet") : t("hidePet"),
-      click: () => ctx.togglePetVisibility(),
+      label: petHiddenAtBuild ? t("showPet") : t("hidePet"),
+      click: () => ctx.setPetVisibility(petHiddenAtBuild),
     });
 
     // Quit stands alone as the final group so it is always set off by a

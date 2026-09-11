@@ -8,7 +8,17 @@ const {
 const {
   CLAWD_SERVER_HEADER,
   CLAWD_SERVER_ID,
+  CLAWD_HOOK_PID_HEADER,
+  CLAWD_LEGACY_PROCESS_CACHE_HEADER,
+  CLAWD_PROCESS_INSTANCE_HEADER,
 } = require("../hooks/server-config");
+const { isCodexDesktopOriginator } = require("../hooks/codex-originator");
+const {
+  assessWindowsProcessChainRequest,
+  buildShadowComparison,
+  processMetadataForState,
+} = require("./server-windows-process-metadata");
+const { stripRemoteProcessMetadata } = require("./remote-process-metadata");
 const {
   normalizeHookToolUseId,
   findPendingPermissionForStateEvent,
@@ -32,6 +42,7 @@ const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
 const { CODEX_QUOTA_FIELDS } = require("../hooks/codex-rate-limits");
 const { extractPermissionToolInput } = require("../hooks/kimi-hook");
 const { normalizeCodexUserInputWire } = require("../hooks/codex-user-input");
+const { sanitizeShadowRecord } = require("./windows-process-chain-shadow-log");
 
 // /state POST body size cap. Raised 1024 → 4096 → 16384: a CJK
 // assistant_last_output (3 UTF-8 bytes/char) on a Stop completion blew past
@@ -43,6 +54,16 @@ const { normalizeCodexUserInputWire } = require("../hooks/codex-user-input");
 // not an Internet DoS concern.
 const MAX_STATE_BODY_BYTES = 16 * 1024;
 const ASSISTANT_LAST_OUTPUT_MAX = 2400;
+const RECAP_PERMISSION_BOUNDARY_AGENT_IDS = new Set([
+  "qoder",
+  "qoderwork",
+  "qwenwork",
+]);
+// Transport recognition and metadata acceptance are distinct wire facts.
+// A recognized 204 may still mean "unknown session" or another designed
+// metadata drop; only this header allows a metadata sender to advance its
+// application-level dedup baseline.
+const CLAWD_METADATA_ACCEPTED_HEADER = "X-Clawd-Metadata-Accepted";
 
 function normalizeHwndString(value) {
   if (value === null || value === undefined) return null;
@@ -106,8 +127,31 @@ function normalizeContextUsage(value) {
     out.percent = Math.max(0, Math.min(100, Math.round((used / out.limit) * 100)));
   }
 
-  if (value.source === "claude" || value.source === "codex" || value.source === "antigravity") out.source = value.source;
+  if (value.source === "claude" || value.source === "codex" || value.source === "antigravity" || value.source === "opencode") out.source = value.source;
   return out;
+}
+
+// Context-usage provenance for metadata_only POSTs (statusline / plugin
+// quota path). Only sources whose posts are a live telemetry stream get an
+// origin; everything else reports plain usage without provenance.
+const OPENCODE_FAMILY_AGENT_IDS = new Set(["opencode", "mimocode"]);
+
+function resolveMetadataContextUsageOrigin(agentId, contextUsage) {
+  if (!contextUsage || typeof contextUsage !== "object") return null;
+  if (agentId === "claude-code" && contextUsage.source === "claude") return "claude-statusline";
+  if (OPENCODE_FAMILY_AGENT_IDS.has(agentId) && contextUsage.source === "opencode") return "opencode-statusline";
+  return null;
+}
+
+// Context-usage provenance for real lifecycle state POSTs. Claude keeps the
+// transcript origin (the state event itself is the delivery path); the
+// opencode family plugin reports the same summary on its own channel, so the
+// state-event usage carries the statusline origin like the metadata branch.
+function resolveStateContextUsageOrigin(agentId, contextUsage) {
+  if (!contextUsage || typeof contextUsage !== "object") return null;
+  if (agentId === "claude-code" && contextUsage.source === "claude") return "claude-transcript";
+  if (OPENCODE_FAMILY_AGENT_IDS.has(agentId) && contextUsage.source === "opencode") return "opencode-statusline";
+  return null;
 }
 
 // Account-wide rate-limit quota. Re-validated here rather than trusted from
@@ -140,12 +184,17 @@ function handleStatePost(req, res, options) {
     createRequestHookRecorder,
     shouldDropForDnd,
     codexOfficialTurns,
+    dshStateSequenceFence = null,
     pathApi = path,
     // #627 residual: injectable so unit tests never load the real koffi FFI.
     // Defaults to the real host OS check / a probe that never samples.
     isWinHost = process.platform === "win32",
     captureForegroundWindowsTerminal = () => null,
     remoteProfile = null,
+    isClaudeStatuslineMetadataAllowed = () => true,
+    windowsProcessChainRuntime = null,
+    resolveWindowsProcessMetadata = null,
+    recordWindowsProcessChainShadow = null,
   } = options;
   let body = "";
   let bodySize = 0;
@@ -164,6 +213,9 @@ function handleStatePost(req, res, options) {
     }
     try {
       const data = JSON.parse(body);
+      const requestHeaders = req && req.headers && typeof req.headers === "object"
+        ? req.headers
+        : {};
       const agentIdentity = resolveHookAgentId(data, {
         customAgentIds: typeof ctx.getCustomAgentIds === "function" ? ctx.getCustomAgentIds() : [],
       });
@@ -179,16 +231,29 @@ function handleStatePost(req, res, options) {
       if (data.display_svg === null) display_svg = null;
       else if (typeof data.display_svg === "string") display_svg = pathApi.basename(data.display_svg);
       else display_svg = undefined;
-      const source_pid = Number.isFinite(data.source_pid) && data.source_pid > 0 ? Math.floor(data.source_pid) : null;
       const wtHwnd = normalizeHwndString(data.wt_hwnd ?? data.wtHwnd);
       const cwd = typeof data.cwd === "string" ? data.cwd : "";
-      const editor = (data.editor === "code" || data.editor === "cursor") ? data.editor : null;
-      const pidChain = Array.isArray(data.pid_chain) ? data.pid_chain.filter(n => Number.isFinite(n) && n > 0) : null;
-      const tmuxSocket = normalizeTmuxSocket(data.tmux_socket);
-      const tmuxClient = normalizeTmuxClient(data.tmux_client);
-      const orcaPaneKey = normalizeOrcaPaneKey(data.orca_pane_key);
       const rawAgentPid = data.agent_pid ?? data.claude_pid ?? data.cursor_pid;
-      const agentPid = Number.isFinite(rawAgentPid) && rawAgentPid > 0 ? Math.floor(rawAgentPid) : null;
+      // Stripped at the parse boundary rather than at the updateSession call so
+      // that no downstream consumer (legacy metadata, the Windows chain gate,
+      // the codex user-input bubble) has to remember the rule. `orcaPaneKey`,
+      // `cwd` and `host` are untouched by design — see remote-process-metadata.js.
+      const {
+        sourcePid: source_pid,
+        agentPid,
+        pidChain,
+        editor,
+        tmuxSocket,
+        tmuxClient,
+      } = stripRemoteProcessMetadata({
+        sourcePid: Number.isFinite(data.source_pid) && data.source_pid > 0 ? Math.floor(data.source_pid) : null,
+        agentPid: Number.isFinite(rawAgentPid) && rawAgentPid > 0 ? Math.floor(rawAgentPid) : null,
+        pidChain: Array.isArray(data.pid_chain) ? data.pid_chain.filter(n => Number.isFinite(n) && n > 0) : null,
+        editor: (data.editor === "code" || data.editor === "cursor") ? data.editor : null,
+        tmuxSocket: normalizeTmuxSocket(data.tmux_socket),
+        tmuxClient: normalizeTmuxClient(data.tmux_client),
+      }, remoteProfile);
+      const orcaPaneKey = normalizeOrcaPaneKey(data.orca_pane_key);
       const agentId = agentIdentity.agentId;
       const trustedProfileId = remoteProfile && typeof remoteProfile.profileId === "string"
         ? remoteProfile.profileId
@@ -261,6 +326,31 @@ function handleStatePost(req, res, options) {
         ? data.ghostty_terminal_id.trim()
         : null;
       const toolName = typeof data.tool_name === "string" && data.tool_name ? data.tool_name : null;
+      const subagentLifecycleSource = (
+        data.subagent_lifecycle_source === "native"
+        || ["synthetic-tool", "synthetic-task"].includes(data.subagent_lifecycle_source)
+        || data.subagent_lifecycle_source === "anonymous"
+      ) ? data.subagent_lifecycle_source : null;
+      const sessionStartSource = (
+        data.session_start_source === "startup"
+        || data.session_start_source === "resume"
+        || data.session_start_source === "clear"
+        || data.session_start_source === "compact"
+      ) ? data.session_start_source : null;
+      // Closed provenance used only by recap metric mapping. Never forward a
+      // free-form upstream event name into state, snapshots or future storage.
+      const recapBoundary = data.recap_boundary === "permission"
+        && RECAP_PERMISSION_BOUNDARY_AGENT_IDS.has(agentId)
+        ? "permission"
+        : (data.recap_boundary === "tool-call"
+            && agentId === "kimi-cli"
+            && event === "PermissionRequest"
+            && data.permission_gate_open === true
+          ? "tool-call"
+          : null);
+      const recapIsSubagent = data.recap_is_subagent === true
+        && agentId === "deepseek-harness"
+        && data.hook_source === "dsh-plugin";
       // #583: hook-reported stdin diagnostics, attached only when the hook's
       // stdin payload carried no session_id. Normalized here so state.js can
       // log it without trusting hook-side shapes.
@@ -289,6 +379,7 @@ function handleStatePost(req, res, options) {
       const antigravityQuota = normalizeAntigravityQuota(data.antigravity_quota);
       const claudeQuota = normalizeClaudeQuota(data.claude_quota);
       const codexQuota = normalizeCodexQuota(data.codex_quota);
+      const codexSparkQuota = normalizeCodexQuota(data.codex_spark_quota);
       const assistantLastOutput = normalizeAssistantLastOutput(data.assistant_last_output);
       const assistantLastOutputTruncated = data.assistant_last_output_truncated === true;
       const transcriptPath = normalizeTranscriptPath(data.transcript_path);
@@ -316,6 +407,11 @@ function handleStatePost(req, res, options) {
         ? data.permission_gate_id.trim().slice(0, 100)
         : null;
       const preserveState = data.preserve_state === true;
+      const testResult = (
+        (agentId === "claude-code" || agentId === "cursor-agent")
+        && (event === "PostToolUse" || event === "PostToolUseFailure")
+        && (data.test_result === "pass" || data.test_result === "fail")
+      ) ? data.test_result : null;
       // Statusline refresh POSTs are metadata, not lifecycle (#590 B2): they
       // may only annotate an existing session with quota/context and must
       // never create one, touch recentEvents, or bump updatedAt. state.js
@@ -327,6 +423,10 @@ function handleStatePost(req, res, options) {
       // only — the hook never forwards task command or description text.
       const backgroundTasksCount = Number.isFinite(data.background_tasks_count)
         ? data.background_tasks_count : 0;
+      const backgroundSubagentsCount = Number.isSafeInteger(data.background_subagents_count)
+        && data.background_subagents_count >= 0
+        ? data.background_subagents_count
+        : null;
       const sessionCronsCount = Number.isFinite(data.session_crons_count)
         ? data.session_crons_count : 0;
       const stopHookActive = data.stop_hook_active === true;
@@ -341,6 +441,34 @@ function handleStatePost(req, res, options) {
         res.end();
         return;
       }
+      if (agentId === "deepseek-harness") {
+        const sequenceResult = dshStateSequenceFence
+          && typeof dshStateSequenceFence.accept === "function"
+          ? dshStateSequenceFence.accept({
+              // The fence is upstream-protocol scoped. Keep it on DSH's raw
+              // canonical id; the local/remote profile key is a separate
+              // Clawd storage concern applied by resolveSessionIdentity.
+              sessionId: sessionIdentity.rawSessionId,
+              event,
+              eventSeq: data.event_seq,
+              sessionSeq: data.session_seq,
+            })
+          : { accepted: false, reason: "sequence-fence-unavailable" };
+        if (!sequenceResult.accepted) {
+          recordRequestHookEvent.droppedUnsupported();
+          res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
+          res.end();
+          return;
+        }
+      }
+      // The persisted preference authorizes statusline telemetry only for the
+      // local profile. Remote SSH profiles have their own deployed lifecycle
+      // and must keep reporting even when this machine's local statusline is
+      // disabled. A WSL session still belongs to profileId="local" — its
+      // client-supplied host label must not bypass the local gate.
+      const localClaudeStatuslineMetadataAllowed = agentId !== "claude-code"
+        || trustedProfileId !== "local"
+        || isClaudeStatuslineMetadataAllowed() === true;
       // Account quota goes to the session-independent per-source store,
       // regardless of POST shape — it must survive with no live session at
       // all ("check the remote's quota before starting work"), so it is
@@ -350,13 +478,15 @@ function handleStatePost(req, res, options) {
       // remote's reverse tunnel lands on the same local port) — same trust
       // model as the session cards' host grouping: machines the user
       // deployed Clawd hooks to. The store shape-sanitizes the label.
+      const acceptedClaudeQuota = localClaudeStatuslineMetadataAllowed ? claudeQuota : null;
       if (typeof ctx.updateAccountQuota === "function"
-        && (antigravityQuota || claudeQuota || codexQuota)) {
+        && (antigravityQuota || acceptedClaudeQuota || codexQuota || codexSparkQuota)) {
         const quotaSource = trustedProfileId === "local" ? host : `remote:${trustedProfileId}`;
         ctx.updateAccountQuota(quotaSource, {
           antigravityQuota,
-          claudeQuota,
+          claudeQuota: acceptedClaudeQuota,
           codexQuota,
+          ...(codexSparkQuota ? { codexSparkQuota } : {}),
           ...(trustedProfileId === "local" ? {} : { displayHost: host }),
         });
       }
@@ -400,13 +530,34 @@ function handleStatePost(req, res, options) {
       if (metadataOnly) {
         // Deliberately NOT recorded in the recent-hook-events ring: a
         // statusline refreshing every few hundred ms would evict the real
-        // hook events the diagnostics exist to show. 204 either way — the
-        // statusline script never reads the response, and "session unknown"
-        // is the designed drop, not an error.
-        if (contextUsage && typeof ctx.updateSessionMetadata === "function") {
-          ctx.updateSessionMetadata(session_id || "default", { contextUsage });
+        // hook events the diagnostics exist to show. 204 either way — legacy
+        // statusline scripts ignore the response, while delivery-aware
+        // plugins use CLAWD_METADATA_ACCEPTED_HEADER to distinguish a live
+        // accepted session from the designed "session unknown" drop.
+        let metadataAccepted = false;
+        if (typeof ctx.updateSessionMetadata === "function") {
+          const metaUpdate = {};
+          if (
+            contextUsage
+            && localClaudeStatuslineMetadataAllowed
+          ) {
+            metaUpdate.contextUsage = contextUsage;
+            metaUpdate.contextUsageOrigin = resolveMetadataContextUsageOrigin(agentId, contextUsage);
+          }
+          if (model && localClaudeStatuslineMetadataAllowed) metaUpdate.model = model;
+          // OpenCode title changes ride the same metadata-only channel (the
+          // placeholder → real title swap arrives on session.updated, which
+          // maps to no Clawd state). Not gated on the Claude telemetry flag —
+          // it's not Claude statusline data.
+          if (sessionTitle) metaUpdate.sessionTitle = sessionTitle;
+          if (Object.keys(metaUpdate).length > 0) {
+            metadataAccepted = ctx.updateSessionMetadata(session_id || "default", metaUpdate) === true;
+          }
         }
-        res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
+        res.writeHead(204, {
+          [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID,
+          ...(metadataAccepted ? { [CLAWD_METADATA_ACCEPTED_HEADER]: "1" } : {}),
+        });
         res.end();
         return;
       }
@@ -465,7 +616,90 @@ function handleStatePost(req, res, options) {
         const effHeadless = headless === true
           || codexHookState.headless === true
           || (existingSession && existingSession.headless) === true;
-        const effSourcePid = source_pid || (existingSession && existingSession.sourcePid) || null;
+        const processChainAssessment = codexUserInput
+          ? { eligible: false, reason: "codex-user-input-outside-b1a", mode: "legacy", hookPid: null }
+          : assessWindowsProcessChainRequest({
+              agentId,
+              runtime: windowsProcessChainRuntime,
+              isWinHost,
+              remoteProfile,
+              effectiveHost: effHost,
+              effectiveWslDistro: effWslDistro,
+              effectivePlatform: effPlatform,
+              effectiveHeadless: effHeadless,
+              hookPidHeader: requestHeaders[CLAWD_HOOK_PID_HEADER.toLowerCase()],
+              instanceGeneration: requestHeaders[CLAWD_PROCESS_INSTANCE_HEADER.toLowerCase()],
+            });
+        let processChainResult = null;
+        if (processChainAssessment.eligible && typeof resolveWindowsProcessMetadata === "function") {
+          try {
+            processChainResult = resolveWindowsProcessMetadata({
+              agentId,
+              hookPid: processChainAssessment.hookPid,
+              preferAgentPid: agentId === "codex" && isCodexDesktopOriginator(codexOriginator),
+            });
+          } catch {
+            processChainResult = {
+              status: "unavailable",
+              reason: "resolver-threw",
+              sourcePid: null,
+              agentPid: null,
+              pidChain: null,
+              editor: null,
+            };
+          }
+        }
+        const legacyProcessMetadata = {
+          sourcePid: source_pid,
+          agentPid,
+          pidChain,
+          editor,
+        };
+        const authoritativeProcessMetadata = processMetadataForState(processChainResult);
+        if (
+          processChainAssessment.mode === "b1a-authoritative"
+          && agentId === "cursor-agent"
+          && !authoritativeProcessMetadata.editor
+        ) {
+          // Cursor's editor label is an adapter-owned constant, not ancestry
+          // output. Preserve it even when the authoritative walk fails.
+          authoritativeProcessMetadata.editor = "cursor";
+        }
+        const replaceProcessMetadata = processChainAssessment.eligible
+          && processChainAssessment.mode === "b1a-authoritative";
+        const effectiveProcessMetadata = replaceProcessMetadata
+          ? authoritativeProcessMetadata
+          : legacyProcessMetadata;
+        if (processChainAssessment.eligible && processChainAssessment.mode === "shadow") {
+          const shadowRecord = {
+            channel: "state",
+            agentId,
+            event,
+            status: processChainResult && processChainResult.status || "unavailable",
+            reason: processChainResult && processChainResult.reason || "resolver-unavailable",
+            comparisonClass: processChainResult && processChainResult.comparisonClass || null,
+            agentSeenBeforeFailure: processChainResult && processChainResult.agentSeenBeforeFailure === true,
+            failureStage: processChainResult && processChainResult.failureStage || null,
+            errorKind: processChainResult && processChainResult.errorKind || null,
+            depth: processChainResult && processChainResult.depth || 0,
+            durationMs: processChainResult && processChainResult.durationMs || 0,
+            cacheSource: requestHeaders[CLAWD_LEGACY_PROCESS_CACHE_HEADER.toLowerCase()] || null,
+            rawEditor: processChainResult && processChainResult.rawEditor || null,
+            effectiveEditor: authoritativeProcessMetadata.editor,
+            legacyMetadata: legacyProcessMetadata,
+            candidateMetadata: authoritativeProcessMetadata,
+            comparison: buildShadowComparison(legacyProcessMetadata, processChainResult),
+          };
+          if (typeof recordWindowsProcessChainShadow === "function") {
+            try { recordWindowsProcessChainShadow(shadowRecord); } catch {}
+          } else if (typeof ctx.debugLog === "function") {
+            const safeShadowRecord = sanitizeShadowRecord(shadowRecord);
+            if (safeShadowRecord) ctx.debugLog(`win-chain-shadow ${JSON.stringify(safeShadowRecord)}`);
+          }
+        }
+        const effSourcePid = effectiveProcessMetadata.sourcePid
+          || (!replaceProcessMetadata && existingSession && existingSession.sourcePid)
+          || null;
         // effectiveSourcePid gate: the focus entry point is a hard sourcePid
         // requirement (src/session-focus.js:41, src/main.js:1668) — sampling
         // for a session nobody can focus yet risks mis-attributing whatever
@@ -473,8 +707,12 @@ function handleStatePost(req, res, options) {
         // session. A cache HIT (server already knows sourcePid) still samples
         // normally; only a miss on a completely unknown session skips.
         let sampledWtHwnd = null;
-        const wtHwndSamplingEligible = !wtHwnd
-          && event === "UserPromptSubmit"
+        const authoritativeCodexSessionStart = replaceProcessMetadata
+          && agentId === "codex"
+          && event === "SessionStart";
+        const trustedIncomingWtHwnd = replaceProcessMetadata ? null : wtHwnd;
+        const wtHwndSamplingEligible = !trustedIncomingWtHwnd
+          && (event === "UserPromptSubmit" || authoritativeCodexSessionStart)
           && isWinHost
           && !effHost
           && !effWslDistro
@@ -484,10 +722,44 @@ function handleStatePost(req, res, options) {
         if (wtHwndSamplingEligible) {
           try { sampledWtHwnd = captureForegroundWindowsTerminal(); } catch { sampledWtHwnd = null; }
         }
+        // Shadow SessionStart comparison intentionally bypasses the legacy
+        // `!wtHwnd` gate: the point is to compare a server-side sample with
+        // the hook-provided HWND. A foreground change between the two sample
+        // times is diagnostic, not a strict parity failure.
+        if (
+          processChainAssessment.eligible
+          && processChainAssessment.mode === "shadow"
+          && agentId === "codex"
+          && event === "SessionStart"
+          && isWinHost
+          && !effHost
+          && !effWslDistro
+          && effPlatform !== "webui"
+          && !effHeadless
+          && !!effSourcePid
+        ) {
+          let shadowWtHwnd = null;
+          try { shadowWtHwnd = captureForegroundWindowsTerminal(); } catch { shadowWtHwnd = null; }
+          const hwndShadowRecord = {
+            channel: "state",
+            agentId,
+            event,
+            kind: "wt-hwnd",
+            hookPresent: !!wtHwnd,
+            serverPresent: !!shadowWtHwnd,
+            equal: !!wtHwnd && !!shadowWtHwnd && wtHwnd === shadowWtHwnd,
+            timingSensitive: true,
+          };
+          if (typeof recordWindowsProcessChainShadow === "function") {
+            try { recordWindowsProcessChainShadow(hwndShadowRecord); } catch {}
+          } else if (typeof ctx.debugLog === "function") {
+            ctx.debugLog(`win-chain-shadow ${JSON.stringify(hwndShadowRecord)}`);
+          }
+        }
         // Failure/ineligibility red line: never anything but null here — no
         // hook-side PowerShell fallback is ever triggered by this route.
-        const effectiveWtHwnd = wtHwnd || sampledWtHwnd || null;
-        const wtHwndSource = wtHwnd
+        const effectiveWtHwnd = trustedIncomingWtHwnd || sampledWtHwnd || null;
+        const wtHwndSource = trustedIncomingWtHwnd
           ? "hook"
           : (sampledWtHwnd
             ? "server"
@@ -511,7 +783,17 @@ function handleStatePost(req, res, options) {
         const pendingForSource = () => pendingForSessionAgent().filter(
           (perm) => (perm.subagentId || null) === subagentId
         );
-        const resolveOnlyUnambiguous = (candidates, behavior, message) => {
+        // Native-fallback adapters (qwen-code, zcode, deepseek-harness) answer
+        // their hook with "{}"/no-decision when Clawd has no real user
+        // decision, and the agent falls back to its own permission UI. For
+        // them, a /state lifecycle sweep must NEVER fabricate a deny — the
+        // user merely answered in the agent's native terminal. CC/CodeBuddy
+        // keep the explicit deny: their hook transport treats the missing
+        // answer as a denial of that tool call.
+        const stateSweepBehaviorFor = (perm) => (
+          perm.isQwenCode || perm.isZcode || perm.isDsh ? "no-decision" : "deny"
+        );
+        const resolveOnlyUnambiguous = (candidates, behaviorFor, message) => {
           if (candidates.length !== 1) {
             if (candidates.length > 1 && typeof ctx.permLog === "function") {
               ctx.permLog(
@@ -521,6 +803,9 @@ function handleStatePost(req, res, options) {
             }
             return;
           }
+          const behavior = typeof behaviorFor === "function"
+            ? behaviorFor(candidates[0])
+            : behaviorFor;
           ctx.resolvePermissionEntry(candidates[0], behavior, message);
         };
         if (event === "PostToolUse" || event === "PostToolUseFailure" || event === "Stop") {
@@ -534,8 +819,7 @@ function handleStatePost(req, res, options) {
             allowSingletonFallback: event === "Stop",
           });
           if (perm) {
-            const behavior = perm.isQwenCode ? "no-decision" : "deny";
-            ctx.resolvePermissionEntry(perm, behavior, "User answered in terminal");
+            ctx.resolvePermissionEntry(perm, stateSweepBehaviorFor(perm), "User answered in terminal");
           }
           // A later hook event may be the only evidence that the user answered
           // a decision in the agent's native terminal UI. Never sweep across
@@ -550,7 +834,7 @@ function handleStatePost(req, res, options) {
             ));
             resolveOnlyUnambiguous(
               staleDecisions,
-              "deny",
+              stateSweepBehaviorFor,
               "User answered in terminal"
             );
           }
@@ -586,7 +870,7 @@ function handleStatePost(req, res, options) {
           ));
           resolveOnlyUnambiguous(
             stalePlans,
-            "deny",
+            stateSweepBehaviorFor,
             "Plan dialog dismissed in terminal"
           );
         }
@@ -596,22 +880,24 @@ function handleStatePost(req, res, options) {
           ctx.setState(state, safeSvg);
         } else {
           ctx.updateSession(sid, state, event, {
-            sourcePid: source_pid,
+            sourcePid: effectiveProcessMetadata.sourcePid,
             wtHwnd: effectiveWtHwnd,
             cwd,
-            editor,
-            pidChain,
+            editor: effectiveProcessMetadata.editor,
+            pidChain: effectiveProcessMetadata.pidChain,
             tmuxSocket,
             tmuxClient,
             orcaPaneKey,
-            agentPid,
+            agentPid: effectiveProcessMetadata.agentPid,
             agentId,
             ...(subagentId ? { subagentId } : {}),
             ...(subagentType ? { subagentType } : {}),
-            ...(trustedProfileId === "local" ? {} : {
-              profileId: sessionIdentity.profileId,
-              rawSessionId: sessionIdentity.rawSessionId,
-            }),
+            ...(subagentLifecycleSource ? { subagentLifecycleSource } : {}),
+            ...(sessionStartSource ? { sessionStartSource } : {}),
+            ...(recapBoundary ? { recapBoundary } : {}),
+            ...((recapIsSubagent || codexHookState.headless === true) ? { recapIsSubagent: true } : {}),
+            profileId: sessionIdentity.profileId,
+            rawSessionId: sessionIdentity.rawSessionId,
             host,
             wslDistro,
             headless: headless || codexHookState.headless === true,
@@ -624,9 +910,11 @@ function handleStatePost(req, res, options) {
             displayHint: display_svg,
             sessionTitle,
             contextUsage,
+            contextUsageOrigin: resolveStateContextUsageOrigin(agentId, contextUsage),
             assistantLastOutput,
             assistantLastOutputTruncated,
             toolName,
+            ...(toolUseId ? { toolUseId } : {}),
             transcriptPath,
             permissionSuspect,
             permissionAction,
@@ -637,14 +925,31 @@ function handleStatePost(req, res, options) {
             permissionGateId,
             preserveState,
             hookSource,
+            ...(codexHookState.turnId ? { turnId: codexHookState.turnId } : {}),
+            ...(codexHookState.turnId ? { recapDedupeId: codexHookState.turnId } : {}),
             backgroundTasksCount,
+            ...(backgroundSubagentsCount !== null ? { backgroundSubagentsCount } : {}),
             sessionCronsCount,
             stopHookActive,
             stdinDiag,
             sessionAutomationIdentity,
             ...(codexUserInput ? { transientPermissionEvent: true } : {}),
             ...(agentIdentity.defaulted ? { agentIdDefaulted: true } : {}),
+            ...(replaceProcessMetadata ? { replaceProcessMetadata: true } : {}),
           });
+        }
+        // Decorative only: the lifecycle update above remains authoritative.
+        // Main owns the opt-in / DND / visibility / mini / drag gate; a visual
+        // failure must never turn a valid hook state POST into a 400.
+        if (testResult && typeof ctx.handleTestResult === "function") {
+          try {
+            ctx.handleTestResult(testResult, {
+              sessionId: sid,
+              agentId,
+              event,
+              headless: effHeadless,
+            });
+          } catch {}
         }
         res.writeHead(200, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
         res.end("ok");
@@ -661,6 +966,7 @@ function handleStatePost(req, res, options) {
 
 module.exports = {
   MAX_STATE_BODY_BYTES,
+  CLAWD_METADATA_ACCEPTED_HEADER,
   sendStateHealthResponse,
   handleStatePost,
 };

@@ -110,6 +110,13 @@ function translations() {
     sessionAutomationOrphansTitle: "Ended or hidden sessions",
     sessionAutomationOrphansHint: "These overrides remain active until revoked.",
     sessionAutomationRevoke: "Revoke",
+    dashboardKimiQuotaRefresh: "Refresh Kimi quota",
+    dashboardKimiQuotaRefreshing: "Refreshing Kimi…",
+    dashboardKimiQuotaUpdated: "Kimi quota updated.",
+    dashboardKimiQuotaRefreshFailed: "Refresh failed: {reason}",
+    dashboardKimiQuotaEmpty: "No quota data yet. Click refresh to fetch it.",
+    dashboardKimiQuotaRefreshShort: "Refresh",
+    dashboardModel: "Model",
   };
 }
 
@@ -133,11 +140,18 @@ async function loadDashboard(
   sessions,
   openResult = { status: "ok" },
   snapshotOverrides = {},
-  automationResult = { status: "applied" }
+  automationResult = { status: "applied" },
+  kimiOptions = {}
 ) {
-  const document = createDocument(["title", "count", "content", "quotaSummary"]);
+  const document = createDocument([
+    "title",
+    "count",
+    "content",
+    "quotaSummary",
+  ]);
   const openCalls = [];
   const automationCalls = [];
+  const kimiRefreshCalls = [];
   let renderInterval = null;
   const api = {
     onLangChange: () => {},
@@ -167,6 +181,17 @@ async function loadDashboard(
         ? automationResult("clear", payload)
         : automationResult;
     },
+    getKimiQuotaStatus: async () => kimiOptions.status || {
+      status: "ok",
+      configured: false,
+      decryptable: false,
+      collectionEnabled: false,
+      agentEnabled: true,
+    },
+    refreshKimiQuota: async () => {
+      kimiRefreshCalls.push(true);
+      return kimiOptions.refreshResult || { status: "ok" };
+    },
   };
   const context = vm.createContext({
     window: { dashboardAPI: api }, document, console, Intl, Date,
@@ -178,8 +203,10 @@ async function loadDashboard(
   await flush();
   return {
     root: document.elements.get("content"),
+    quotaSummary: document.elements.get("quotaSummary"),
     openCalls,
     automationCalls,
+    kimiRefreshCalls,
     tickRender: () => { if (renderInterval) renderInterval(); },
   };
 }
@@ -240,7 +267,88 @@ test("Dashboard renders local/remote/webui reasons and only local folder action"
     "Remote sessions cannot focus a terminal on this computer.",
     "WebUI sessions do not have a local terminal window.",
   ]);
+
+  const cards = byClass(root, "card");
+  const jumpButtons = (card) => descendants(card)
+    .filter((el) => el.tagName === "BUTTON" && el.textContent === "Jump");
+  assert.deepStrictEqual(jumpButtons(cards[0]).map((button) => button.disabled), [true]);
+  assert.deepStrictEqual(jumpButtons(cards[1]), []);
+  assert.deepStrictEqual(jumpButtons(cards[2]).map((button) => button.disabled), [true]);
   assert.strictEqual(byClass(root, "open-folder-button").length, 1);
+});
+
+test("Dashboard hosts the manual Kimi quota refresh inside the Kimi quota section", async () => {
+  const dashboard = await loadDashboard(
+    [],
+    { status: "ok" },
+    {},
+    { status: "applied" },
+    {
+      status: {
+        status: "ok",
+        configured: true,
+        decryptable: true,
+        collectionEnabled: true,
+        agentEnabled: true,
+      },
+    }
+  );
+
+  // Connected but nothing reported yet: the section stays visible with an
+  // empty hint so the refresh that fetches the first numbers has a home.
+  const button = byClass(dashboard.quotaSummary, "quota-refresh-button")[0];
+  assert.ok(button, "Kimi quota section header should host the refresh button");
+  assert.strictEqual(button.disabled, false);
+  assert.strictEqual(button.title, "Refresh Kimi quota");
+  assert.strictEqual(byClass(dashboard.quotaSummary, "quota-empty-hint").length, 1);
+
+  await button.dispatch("click");
+  await flush();
+
+  assert.strictEqual(dashboard.kimiRefreshCalls.length, 1);
+  assert.strictEqual(button.disabled, false);
+  const feedback = byClass(dashboard.quotaSummary, "quota-refresh-feedback")[0];
+  assert.ok(feedback, "Kimi quota section header should host the refresh feedback");
+  assert.strictEqual(feedback.hidden, false);
+  assert.strictEqual(feedback.textContent, "Kimi quota updated.");
+});
+
+test("Dashboard renders no Kimi quota section or refresh for a disconnected key", async () => {
+  const dashboard = await loadDashboard([]);
+
+  assert.strictEqual(byClass(dashboard.quotaSummary, "quota-refresh-button").length, 0);
+  assert.strictEqual(byClass(dashboard.quotaSummary, "quota-section").length, 0);
+});
+
+test("Dashboard quota bars apply the same warn and hot boundaries as Orbit", async () => {
+  const dashboard = await loadDashboard([], { status: "ok" }, {
+    accountQuota: [{
+      host: null,
+      claudeQuota: {
+        lastSeenAt: Date.now(),
+        group: {
+          claudeFiveHour: { usedPercent: 59 },
+          claudeWeekly: { usedPercent: 60 },
+        },
+      },
+      codexQuota: {
+        lastSeenAt: Date.now(),
+        group: {
+          codexFiveHour: { usedPercent: 85 },
+          codexWeekly: { usedPercent: 86 },
+        },
+      },
+    }],
+  });
+
+  const classesByWidth = new Map(
+    byClass(dashboard.quotaSummary, "quota-bar-fill")
+      .map((fill) => [fill.style.width, fill.className])
+  );
+  assert.match(classesByWidth.get("59%"), /\bsev-ok\b/);
+  assert.match(classesByWidth.get("60%"), /\bsev-warn\b/);
+  assert.match(classesByWidth.get("85%"), /\bsev-warn\b/);
+  assert.match(classesByWidth.get("86%"), /\bsev-hot\b/);
 });
 
 test("Dashboard renders the resolved custom agent name instead of its raw id", async () => {
@@ -315,8 +423,13 @@ test("Dashboard session automation sends only sessionId/mode and exact grantId",
     sessionAutomationMode: "auto-tools",
     sessionAutomationGrantId: "grant-current",
   });
-  const { root, automationCalls } = await loadDashboard([configurable, activeButIneligible]);
+  const inactiveIneligible = session("inactive", {
+    canConfigureSessionAutomation: false,
+    sessionAutomationMode: "inherit",
+  });
+  const { root, automationCalls } = await loadDashboard([configurable, activeButIneligible, inactiveIneligible]);
   const selects = byClass(root, "session-automation-select");
+  assert.strictEqual(selects.length, 2);
 
   selects[0].value = "off";
   await selects[0].dispatch("change");
@@ -438,5 +551,38 @@ test("unfocusable and folder feedback copy exists in all supported languages", (
   ];
   for (const lang of SUPPORTED_LANGS) {
     for (const key of keys) assert.ok(i18n[lang][key], `${lang}.${key} is required`);
+  }
+});
+
+test("Dashboard shows a model row only for sessions that report one", async () => {
+  const { root } = await loadDashboard([
+    session("with-model", { model: "claude-opus-5" }),
+    session("without-model"),
+  ]);
+
+  const rows = byClass(root, "model-row");
+  assert.strictEqual(rows.length, 1, "only the session reporting a model gets a row");
+  assert.strictEqual(rows[0].textContent, "Model: claude-opus-5");
+  // Long ids are ellipsized by CSS, so the full value must stay reachable.
+  assert.strictEqual(rows[0].title, "claude-opus-5");
+});
+
+test("model row is its own line, not a chip inside the clipped meta row", async () => {
+  // Regression guard: `.meta` is a single nowrap+overflow-hidden line, so a
+  // model appended there is invisible at the dashboard's default 480px width.
+  const { root } = await loadDashboard([session("with-model", { model: "claude-opus-5" })]);
+
+  const meta = byClass(root, "meta")[0];
+  assert.ok(meta, "meta row must still render");
+  assert.ok(
+    !descendants(meta).some((el) => String(el.textContent || "").includes("claude-opus-5")),
+    "the model must not live inside the clipped meta row"
+  );
+  assert.strictEqual(byClass(root, "model-row").length, 1);
+});
+
+test("model copy exists in all supported languages", () => {
+  for (const lang of SUPPORTED_LANGS) {
+    assert.ok(i18n[lang].dashboardModel, `${lang}.dashboardModel is required`);
   }
 });

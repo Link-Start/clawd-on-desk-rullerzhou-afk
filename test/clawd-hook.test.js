@@ -13,6 +13,8 @@ const path = require("path");
 
 const {
   buildStateBody,
+  classifyTestResult,
+  isRecognizedTestCommand,
   isClaudeHeadlessCommandLine,
   attachStdinDiag,
   STDIN_READ_TIMEOUT_MS: CLAWD_HOOK_STDIN_TIMEOUT_MS,
@@ -145,18 +147,93 @@ describe("buildStateBody", () => {
     assert.strictEqual(body.state, "working");
   });
 
-  it("maps PreToolUse Task to synthetic SubagentStart", () => {
+  it("reports the SessionStart model so the session card can label it", () => {
     const body = buildStateBody(
-      "PreToolUse",
-      { session_id: "s", tool_name: "Task" },
+      "SessionStart",
+      { session_id: "sid-model", model: "claude-opus-5" },
       mockResolve
     );
-    assert.strictEqual(body.state, "juggling");
-    assert.strictEqual(body.event, "SubagentStart");
-    assert.strictEqual(body.tool_name, "Task");
+    assert.strictEqual(body.model, "claude-opus-5");
   });
 
-  it("keeps non-Task PreToolUse as working", () => {
+  it("omits model when SessionStart carries none (clear / some resume paths)", () => {
+    const body = buildStateBody("SessionStart", { session_id: "sid-no-model" }, mockResolve);
+    assert.strictEqual(body.model, undefined);
+  });
+
+  for (const [label, model] of [
+    ["blank", "  \t "],
+    ["overlong", "m".repeat(129)],
+    ["line break", "claude-opus-5\nspoofed"],
+    ["non-string", 5],
+  ]) {
+    it(`drops ${label} model ids rather than rendering them on the card`, () => {
+      const body = buildStateBody(
+        "SessionStart",
+        { session_id: `bad-model-${label.replace(/\s+/g, "-")}`, model },
+        mockResolve
+      );
+      assert.strictEqual(body.model, undefined);
+    });
+  }
+
+  it("maps current Agent and legacy Task tool starts to synthetic SubagentStart", () => {
+    for (const toolName of ["Agent", "Task"]) {
+      const body = buildStateBody(
+        "PreToolUse",
+        { session_id: "s", tool_name: toolName },
+        mockResolve
+      );
+      assert.strictEqual(body.state, "juggling");
+      assert.strictEqual(body.event, "SubagentStart");
+      assert.strictEqual(body.tool_name, toolName);
+      assert.strictEqual(body.subagent_lifecycle_source, "synthetic-tool");
+    }
+  });
+
+  it("marks native subagent lifecycle events and keeps stop continuation evidence", () => {
+    const start = buildStateBody(
+      "SubagentStart",
+      { session_id: "s", agent_id: "child-1", agent_type: "Explore" },
+      mockResolve
+    );
+    const stop = buildStateBody(
+      "SubagentStop",
+      { session_id: "s", agent_id: "child-1", stop_hook_active: true },
+      mockResolve
+    );
+    assert.strictEqual(start.subagent_lifecycle_source, "native");
+    assert.strictEqual(stop.subagent_lifecycle_source, "native");
+    assert.strictEqual(stop.stop_hook_active, true);
+  });
+
+  it("preserves a nested Agent originator id without calling it native", () => {
+    const body = buildStateBody(
+      "PreToolUse",
+      {
+        session_id: "s",
+        tool_name: "Agent",
+        tool_use_id: "tool-child",
+        agent_id: "parent-child",
+      },
+      mockResolve
+    );
+    assert.strictEqual(body.event, "SubagentStart");
+    assert.strictEqual(body.subagent_lifecycle_source, "synthetic-tool");
+    assert.strictEqual(body.subagent_id, "parent-child");
+    assert.strictEqual(body.tool_use_id, "tool-child");
+  });
+
+  it("forwards the SessionStart source needed for scoped lifecycle reset", () => {
+    const body = buildStateBody(
+      "SessionStart",
+      { session_id: "s", source: "compact" },
+      mockResolve
+    );
+    assert.strictEqual(body.session_start_source, "compact");
+  });
+
+  it("keeps non-subagent PreToolUse as working", () => {
     const body = buildStateBody(
       "PreToolUse",
       { session_id: "s", tool_name: "Bash" },
@@ -167,15 +244,17 @@ describe("buildStateBody", () => {
     assert.strictEqual(body.tool_name, "Bash");
   });
 
-  it("keeps PostToolUse Task as working", () => {
-    const body = buildStateBody(
-      "PostToolUse",
-      { session_id: "s", tool_name: "Task" },
-      mockResolve
-    );
-    assert.strictEqual(body.state, "working");
-    assert.strictEqual(body.event, "PostToolUse");
-    assert.strictEqual(body.tool_name, "Task");
+  it("keeps PostToolUse Agent/Task as working", () => {
+    for (const toolName of ["Agent", "Task"]) {
+      const body = buildStateBody(
+        "PostToolUse",
+        { session_id: "s", tool_name: toolName },
+        mockResolve
+      );
+      assert.strictEqual(body.state, "working");
+      assert.strictEqual(body.event, "PostToolUse");
+      assert.strictEqual(body.tool_name, toolName);
+    }
   });
 
   it("maps Stop to attention state", () => {
@@ -210,19 +289,96 @@ describe("buildStateBody", () => {
       mockResolve
     );
     assert.strictEqual(body.background_tasks_count, 2);
+    assert.strictEqual(body.background_subagents_count, 0);
     assert.strictEqual(body.session_crons_count, 1);
+  });
+
+  it("counts only exact typed one-shot background subagents and preserves known zero (#952)", () => {
+    const typed = buildStateBody(
+      "Stop",
+      {
+        session_id: "s",
+        background_tasks: [
+          { type: "subagent", id: "private-1", status: "running" },
+          { type: " SUBAGENT ", description: "private description" },
+          { type: "teammate" },
+          { type: "shell" },
+          { type: "monitor" },
+          { type: "subagent-extra" },
+          { type: 123 },
+          {},
+          null,
+          [],
+        ],
+      },
+      mockResolve
+    );
+    assert.strictEqual(typed.background_tasks_count, 10);
+    assert.strictEqual(typed.background_subagents_count, 2);
+
+    const knownZero = buildStateBody(
+      "Stop",
+      { session_id: "s", background_tasks: [{ type: "teammate" }] },
+      mockResolve
+    );
+    assert.strictEqual(knownZero.background_subagents_count, 0);
+
+    const empty = buildStateBody(
+      "Stop",
+      { session_id: "s", background_tasks: [] },
+      mockResolve
+    );
+    assert.strictEqual(empty.background_subagents_count, 0);
+
+    const absent = buildStateBody("Stop", { session_id: "s" }, mockResolve);
+    assert.ok(!Object.prototype.hasOwnProperty.call(absent, "background_subagents_count"));
+    const malformed = buildStateBody(
+      "Stop",
+      { session_id: "s", background_tasks: { type: "subagent" } },
+      mockResolve
+    );
+    assert.ok(!Object.prototype.hasOwnProperty.call(malformed, "background_subagents_count"));
+  });
+
+  it("derives the typed aggregate on SubagentStop without forwarding task details (#952)", () => {
+    const body = buildStateBody(
+      "SubagentStop",
+      {
+        session_id: "s",
+        background_tasks: [{ type: "subagent", id: "secret-child", command: "secret command" }],
+      },
+      mockResolve
+    );
+    assert.strictEqual(body.background_subagents_count, 1);
+    const serialized = JSON.stringify(body);
+    assert.ok(!serialized.includes("secret-child"));
+    assert.ok(!serialized.includes("secret command"));
   });
 
   it("forwards only counts — never background task command/description text (#406)", () => {
     const body = buildStateBody(
       "Stop",
-      { session_id: "s", background_tasks: [{ command: "npm run secret-dev", description: "do not leak" }] },
+      {
+        session_id: "s",
+        background_tasks: [{
+          type: "teammate",
+          id: "secret-task-id",
+          agent_type: "secret-agent-type",
+          status: "secret-status",
+          command: "npm run secret-dev",
+          description: "do not leak",
+        }],
+      },
       mockResolve
     );
     assert.strictEqual(body.background_tasks_count, 1);
+    assert.strictEqual(body.background_subagents_count, 0);
     const serialized = JSON.stringify(body);
     assert.ok(!serialized.includes("npm run secret-dev"), "task command must not leak");
     assert.ok(!serialized.includes("do not leak"), "task description must not leak");
+    assert.ok(!serialized.includes("secret-task-id"), "task id must not leak");
+    assert.ok(!serialized.includes("secret-agent-type"), "agent type must not leak");
+    assert.ok(!serialized.includes("secret-status"), "task status must not leak");
   });
 
   it("forwards stop_hook_active on Stop (#406)", () => {
@@ -233,6 +389,7 @@ describe("buildStateBody", () => {
   it("omits completion-gate fields on a plain Stop with no background work (#406)", () => {
     const body = buildStateBody("Stop", { session_id: "s" }, mockResolve);
     assert.ok(!("background_tasks_count" in body));
+    assert.ok(!("background_subagents_count" in body));
     assert.ok(!("session_crons_count" in body));
     assert.ok(!("stop_hook_active" in body));
   });
@@ -521,6 +678,124 @@ describe("buildStateBody", () => {
       tool_input: { command: "npm test" },
     }, mockResolve);
     assert.strictEqual(body.tool_use_id, "toolu_alias");
+  });
+
+  describe("test-result reaction metadata", () => {
+    it("recognizes common runner segments without matching echoed prose", () => {
+      for (const command of [
+        "npm test",
+        "npm run test:unit",
+        "cd app && pnpm run test -- --runInBand",
+        "NODE_ENV=test npx vitest run",
+        "python3 -m pytest tests/unit",
+        "go test ./...",
+        "cargo test --workspace",
+        "bundle exec rspec spec",
+        "./gradlew test",
+      ]) {
+        assert.strictEqual(isRecognizedTestCommand(command), true, command);
+      }
+      for (const command of [
+        "echo npm test",
+        "printf 'pytest passed'",
+        "printf 'setup; npm test'",
+        "node scripts/test-data.js",
+        "git commit -m 'run tests'",
+      ]) {
+        assert.strictEqual(isRecognizedTestCommand(command), false, command);
+      }
+    });
+
+    it("classifies positive and failure summaries with failures taking precedence", () => {
+      const base = { tool_name: "Bash", tool_input: { command: "npm test" } };
+      assert.strictEqual(classifyTestResult("PostToolUse", {
+        ...base,
+        tool_response: { stdout: "Tests: 12 passed, 12 total" },
+      }), "pass");
+      assert.strictEqual(classifyTestResult("PostToolUse", {
+        ...base,
+        tool_response: { stdout: "Tests: 11 passed, 1 failed, 12 total" },
+      }), "fail");
+      assert.strictEqual(classifyTestResult("PostToolUse", {
+        ...base,
+        tool_response: { stdout: "0 errors in setup\nTests: 11 passed, 1 failed, 12 total" },
+      }), "fail");
+      assert.strictEqual(classifyTestResult("PostToolUse", {
+        ...base,
+        tool_response: { content: [{ type: "text", text: "test result: ok. 3 passed; 0 failed" }] },
+      }), "pass");
+      assert.strictEqual(classifyTestResult("PostToolUse", {
+        ...base,
+        tool_response: { stderr: "Traceback (most recent call last):\nAssertionError" },
+      }), "fail");
+    });
+
+    it("treats a recognized PostToolUseFailure as fail even without output", () => {
+      assert.strictEqual(classifyTestResult("PostToolUseFailure", {
+        tool_name: "Bash",
+        tool_input: { command: "pytest" },
+      }), "fail");
+      assert.strictEqual(classifyTestResult("PostToolUseFailure", {
+        tool_name: "Bash",
+        tool_input: { command: "cd app && npm test" },
+      }), "fail");
+    });
+
+    it("does not blame a test for another segment's failure", () => {
+      for (const command of [
+        "npm run build && npm test",
+        "npm test && npm run lint",
+        "npm test && python scripts/package.py",
+        "npm test | tee test.log",
+      ]) {
+        assert.strictEqual(classifyTestResult("PostToolUseFailure", {
+          tool_name: "Bash",
+          tool_input: { command },
+          tool_response: {
+            stderr: command.includes("package.py")
+              ? "Traceback (most recent call last):\nAssertionError"
+              : "BUILD FAILED: 1 error",
+          },
+        }), null, command);
+      }
+    });
+
+    it("accepts a test-specific failure summary from a compound command", () => {
+      assert.strictEqual(classifyTestResult("PostToolUseFailure", {
+        tool_name: "Bash",
+        tool_input: { command: "npm test && npm run lint" },
+        tool_response: { stderr: "Tests: 1 failed, 11 passed, 12 total" },
+      }), "fail");
+    });
+
+    it("requires Bash, a recognized command, and a confident successful summary", () => {
+      assert.strictEqual(classifyTestResult("PostToolUse", {
+        tool_name: "Read",
+        tool_input: { command: "npm test" },
+        tool_response: "12 passed",
+      }), null);
+      assert.strictEqual(classifyTestResult("PostToolUse", {
+        tool_name: "Bash",
+        tool_input: { command: "echo npm test" },
+        tool_response: "12 passed",
+      }), null);
+      assert.strictEqual(classifyTestResult("PostToolUse", {
+        tool_name: "Bash",
+        tool_input: { command: "npm test" },
+        tool_response: "command finished",
+      }), null);
+    });
+
+    it("adds only the pass/fail tag to the state body", () => {
+      const body = buildStateBody("PostToolUse", {
+        session_id: "test-session",
+        tool_name: "Bash",
+        tool_input: { command: "node --test" },
+        tool_response: "# tests 4\n# pass 4\n# fail 0",
+      }, mockResolve);
+      assert.strictEqual(body.test_result, "pass");
+      assert.ok(!JSON.stringify(body).includes("# tests 4"));
+    });
   });
 
   describe("session_title extraction", () => {
