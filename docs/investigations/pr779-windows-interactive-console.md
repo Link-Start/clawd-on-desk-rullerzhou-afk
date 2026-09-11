@@ -111,9 +111,10 @@ The user initially reported being unable to type. At their request, a helper
 then supplied input only to verified test-owned consoles. Initial commands,
 the post-quit command, and cleanup used console input records; keyboard
 checks used system key events and required the test console to be foreground.
-The user confirmed visible output, but did not separately confirm physical
-keyboard typing. The initial symptom's cause remains unresolved: these checks
-must not be described as proving every physical-keyboard/focus path works.
+At this stage the user confirmed visible output, but had not separately
+confirmed physical keyboard typing. The manual recheck below subsequently
+closed that validation gap. The initial symptom's cause remains unknown;
+the observed results do not establish every keyboard/focus configuration.
 
 Console ownership was checked against the exact temporary SSH config before
 every input, and the expected remote or local prompt was checked before
@@ -129,6 +130,33 @@ Additional local evidence under `D:\animation\.tmp\pr779-native\`:
 - `pi-console-inspect-1789099667768.json`: successful remote command after app exit.
 - `pi-console-inspect-1789099697885.json` and `pi-console-inspect-1789099717886.json`: both local prompt checks and final `exit` inputs.
 - `pi-gui-1789098447821/cleanup-check.json`: final process inventory.
+
+### Manual keyboard recheck
+
+A fresh isolated full-app run at `581ffe8a911796fd57834694735664cba19c7461`
+(documentation-only changes since the tested implementation) opened the Pi
+through Settings → Remote SSH → Open Terminal. The console was already at
+the remote shell prompt before handoff. The user was asked to click its title
+bar, use English input, physically type `echo pr779`, and press Enter.
+After the user reported completing this, read-only console inspection showed:
+
+```text
+rullerpi@raspberrypi:~$ echo pr779
+pr779
+rullerpi@raspberrypi:~$
+```
+
+The assistant supplied no input between opening the console and this
+inspection. This confirms manual keyboard input, command execution, and
+output in the full-app Pi session; the previously reported typing symptom
+did not recur in this check. Both remote and local shells were then closed
+using their own `exit`, and the test Clawd was quit through its menu. The
+original Clawd remained running.
+
+Local evidence: `pi-gui-1789099999140/launch.json`,
+`pi-console-inspect-1789100064427.json` (prompt before handoff),
+`pi-console-inspect-1789100130802.json` (manual command and result), and
+`pi-gui-1789099999140/cleanup-check.json` under the same evidence directory.
 
 These checks cover full source-app GUI clicks and interaction with an actual
 Pi in addition to the loopback launch matrix. Installed-package launch,
