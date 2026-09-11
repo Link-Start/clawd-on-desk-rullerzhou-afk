@@ -47,7 +47,7 @@ transport admission. Argument cases cover spaces, Chinese, empty strings,
 parentheses, quotes, trailing backslashes, shell metacharacters, and literal
 percent/delayed-expansion variables with an injection-shaped environment value.
 
-## Native Windows checks
+## Native Windows loopback checks
 
 Environment: Windows 11 x64 build 26200, Electron 41.10.4, Node 24.12.0,
 Windows Terminal Stable 1.24.11911.0, Windows OpenSSH client.
@@ -84,7 +84,53 @@ Local evidence under `D:\animation\.tmp\pr779-native\`:
 - `dns-error-1789097923820.json`: terminal survival after Electron exit.
 - `focused-tests.tap`: automated regression results.
 
-These checks establish the Windows client launch and interaction behavior.
-Packaged-app UI clicks, Windows 10/ARM64, and a fresh Codespaces transport
-matrix were not exercised; the existing transport gate remains covered by
-the regression suite.
+## Full-app Raspberry Pi GUI follow-up
+
+On the same date, the complete source app at `a5f43c9090b7e67b57797dd3eace141828132293`
+was launched with isolated user data and a temporary copy of the configured
+Raspberry Pi profile. Both actions were clicked in Settings → Remote SSH.
+The target was an actual Raspberry Pi running Debian, `aarch64`, kernel
+`6.18.34+rpt-rpi-2712`; the remote shell reported `/dev/pts/0`.
+
+This run used the Console Host default and the existing SSH key, with an
+explicit temporary SSH config and a copied known-hosts file. It did not
+exercise a new password/host-key prompt or repeat the Terminal-default,
+globally elevated profile configuration; those cases belong to the loopback
+matrix above. The isolated app did not deploy hooks or change remote config.
+
+| Full-app scenario | Observed result |
+| --- | --- |
+| Click Authenticate | Visible console logged into the Pi; `hostname`, `uname -m`, `tty`, and a marker command returned expected output. |
+| Keyboard events in Authenticate console | System Unicode key events executed `echo PR779_KEYBOARD_OK`; the user confirmed seeing both command-result markers. |
+| Click Open Terminal | A second visible console logged into the Pi; ordinary virtual-key events executed `echo pr779vk` and returned `pr779vk`. |
+| Quit the test Clawd through its menu | Both SSH sessions remained alive; a subsequent `echo pr779afterquit` returned successfully in the second session. |
+| Exit SSH in each console | Both returned to their local cmd prompt, which accepted and echoed `pr779local`. |
+| Exit each local cmd | Both test consoles closed normally; the user's original Clawd remained running. |
+
+The user initially reported being unable to type. At their request, a helper
+then supplied input only to verified test-owned consoles. Initial commands,
+the post-quit command, and cleanup used console input records; keyboard
+checks used system key events and required the test console to be foreground.
+The user confirmed visible output, but did not separately confirm physical
+keyboard typing. The initial symptom's cause remains unresolved: these checks
+must not be described as proving every physical-keyboard/focus path works.
+
+Console ownership was checked against the exact temporary SSH config before
+every input, and the expected remote or local prompt was checked before
+commands were sent. Cleanup used session-local `exit` only, with no process
+termination. The test app, both SSH/cmd pairs, and their console hosts were
+absent in the final process check; the original Clawd was still present.
+
+Additional local evidence under `D:\animation\.tmp\pr779-native\`:
+
+- `pi-gui-1789098447821/launch.json`: tested commit, isolated app, and target.
+- `pi-console-inspect-1789098850097.json`: Authenticate results and keyboard marker.
+- `pi-console-inspect-1789099071708.json`: Open Terminal virtual-key command result.
+- `pi-console-inspect-1789099667768.json`: successful remote command after app exit.
+- `pi-console-inspect-1789099697885.json` and `pi-console-inspect-1789099717886.json`: both local prompt checks and final `exit` inputs.
+- `pi-gui-1789098447821/cleanup-check.json`: final process inventory.
+
+These checks cover full source-app GUI clicks and interaction with an actual
+Pi in addition to the loopback launch matrix. Installed-package launch,
+Windows 10/ARM64 clients, and a fresh Codespaces transport matrix were not
+exercised; the existing transport gate remains covered by the regression suite.
