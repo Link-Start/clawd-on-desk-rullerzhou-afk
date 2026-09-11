@@ -32,7 +32,7 @@ the system `ssh` and your system terminal.
    - **SSH transport compatibility**: leave **Automatic** for normal hosts and GitHub Codespaces. Use **Force single SSH session** only for another ProxyCommand transport that cannot tolerate overlapping SSH sessions
    - **Remote forward port**: defaults to `23333`; only change to `23334-23337` when you run multiple profiles against the same remote
    - **Host prefix**: optional, used in Sessions / Dashboard to disambiguate the remote
-3. If SSH needs first-time host-key confirmation, a passphrase, or an ssh-agent load, click **Authenticate**. Clawd opens your system terminal to run a plain `ssh` once.
+3. If SSH needs first-time host-key confirmation, a passphrase, or an ssh-agent load, click **Authenticate**. Clawd opens a terminal to run a plain `ssh` once. On Windows, **Authenticate / Open Terminal** use a separate Windows Console Host window so Windows Terminal's administrator-profile settings cannot interrupt the session. After SSH exits, the local command prompt stays open so you can read errors; type `exit` to close it.
 4. Click **Deploy / Repair Hooks**, then connect the profile.
    - Clawd creates a dedicated local ingress for this profile and maintains an `ssh -R` reverse tunnel to that ingress
    - It writes a profile identity atomically, pins hooks and the static Claude permission URL to the profile's exact remote port, and never exposes the general local `/state` or `/permission` routes to the tunnel

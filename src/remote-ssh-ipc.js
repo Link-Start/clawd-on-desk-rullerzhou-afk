@@ -81,6 +81,7 @@ function registerRemoteSshIpc(options = {}) {
   const BrowserWindow = requireDep(options.BrowserWindow, "BrowserWindow");
   const platform = options.platform || process.platform;
   const spawn = options.spawn || childProcess.spawn;
+  const execFile = options.execFile || childProcess.execFile;
   const log = options.log || (() => {});
   const isPackaged = !!options.isPackaged;
   const enableProfileIsolation = options.enableProfileIsolation === true;
@@ -1708,20 +1709,32 @@ function registerRemoteSshIpc(options = {}) {
   }
 
   async function spawnWindowsTerminal(sshArgs) {
-    // Launch the interactive command through cmd.exe instead of handing it to
-    // `wt.exe --` directly. Windows Terminal can spawn successfully while its
-    // requested command later fails (notably with globally elevated profiles),
-    // and the wt client gives us no failure signal to trigger a fallback.
-    // Windows routes cmd through the user's configured default terminal host.
-    const opts = { detached: true, stdio: "ignore", windowsHide: false };
+    // Explicit conhost bypasses Windows Terminal's default-host / elevation
+    // handoff (#779). START gives it fresh console handles; spawning conhost
+    // with Node's redirected stdio can instead put it in unusable ConPTY mode.
+    // Keep the escaped SSH command in this child's environment: conhost parses
+    // and rebuilds argv, which would otherwise damage cmd's caret quoting.
+    // The outer cmd passes the literal variable name; only the inner cmd
+    // expands it, once. /k leaves SSH errors and the local prompt visible.
     const quoted = sshArgs.map(quoteForCmd).join(" ");
-    const cmd = await tryLaunch("cmd.exe", ["/d", "/v:off", "/s", "/k", `ssh ${quoted}`], {
-      ...opts,
-      shell: false,
-      windowsVerbatimArguments: true,
+    return new Promise((resolve) => {
+      const done = (error) => resolve(error
+        ? { ok: false, message: error.message || "could not spawn terminal" }
+        : { ok: true, terminal: "conhost" });
+      try {
+        execFile("cmd.exe", ["/d", "/v:off", "/s", "/c",
+          'start "" conhost.exe cmd.exe /d /v:off /s /k ^%CLAWD_REMOTE_SSH_COMMAND^%',
+        ], {
+          detached: true,
+          windowsHide: true,
+          windowsVerbatimArguments: true,
+          shell: false,
+          env: { ...process.env, CLAWD_REMOTE_SSH_COMMAND: `ssh ${quoted}` },
+        }, done);
+      } catch (error) {
+        done(error);
+      }
     });
-    if (cmd.ok) return { ok: true, terminal: "cmd" };
-    return { ok: false, message: (cmd.error && cmd.error.message) || "could not spawn terminal" };
   }
 
   async function spawnMacTerminal(sshArgs) {
