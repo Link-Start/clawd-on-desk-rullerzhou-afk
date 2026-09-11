@@ -1437,7 +1437,7 @@ describe("opencode resume context hydration", () => {
     assert.strictEqual(h.queries.length, 0);
   });
 
-  it("retries rejected/unaccepted hydration on a later signal with a bounded cooldown", async () => {
+  it("cools down failed reads but replays an unaccepted sample without rereading history", async () => {
     const originalNow = Date.now;
     let now = originalNow();
     Date.now = () => now;
@@ -1456,11 +1456,10 @@ describe("opencode resume context hydration", () => {
       await settle(h.plugin);
       assert.strictEqual(h.queries.length, 2);
       assert.strictEqual([...h.plugin.__test._contextStateByInstance.values()][0].get("opencode:ses_resume").delivered, null);
-      now += 31_000;
       fetchImpl = async (url, opts) => { const call = parseFetchCall(url, opts); h.calls.push(call); return clawdResponse(call.body); };
       await emit(h.hooks, resumed());
       await settle(h.plugin);
-      assert.strictEqual(h.queries.length, 3);
+      assert.strictEqual(h.queries.length, 2);
       assert.strictEqual(h.metadata().length, 1);
     } finally { Date.now = originalNow; }
   });
@@ -1473,9 +1472,8 @@ describe("opencode resume context hydration", () => {
     assert.strictEqual(h.queries.length, 4);
     gate.resolve({ data: [] });
     await settle(h.plugin);
-    await emit(h.hooks, resumed("ses_9"));
-    await settle(h.plugin);
-    assert.strictEqual(h.queries.length, 5, "a skipped session can be retried after capacity is freed");
+    assert.strictEqual(h.queries.length, 10, "all original signals are served after capacity is freed");
+    assert.strictEqual(new Set(h.queries.map((query) => query.path.id)).size, 10);
   });
 
   it("keeps client/directory lookups isolated across initialized instances", async () => {
