@@ -256,12 +256,16 @@ describe("agent-runtime-main", () => {
       cwd: "/repo",
       sourcePid: 42,
       agentPid: 42,
+      turnId: "live-question-turn",
+      recapOccurredAt: Date.now(),
       headless: false,
       contextUsage: { used: 10, limit: 100, percent: 10, source: "codex" },
     };
 
     monitor.options.onUserInputRequest("codex:s1", request, extra);
-    monitor.options.onUserInputResolved("codex:s1", "call_1");
+    monitor.options.onUserInputResolved("codex:s1", "call_1", {
+      source: "function-call-output", turnId: extra.turnId, recapOccurredAt: extra.recapOccurredAt,
+    });
 
     const expectedTouch = [
       "touch",
@@ -1227,5 +1231,18 @@ describe("agent-runtime-main", () => {
     assert.strictEqual(runtime.getCodexTurnFenceSnapshot("local-session"), null);
     assert.strictEqual(runtime.getCodexOfficialActivitySnapshot("local-session"), null);
     assert.deepStrictEqual(clearCalls, [["codex"]]);
+  });
+
+  it("clears the Qoder title tracker on disable and shutdown", () => {
+    let clears = 0;
+    const runtime = createAgentRuntimeMain({
+      codexSubagentClassifier: {},
+      qoderSessionTitleTracker: { clear: () => { clears++; return 1; } },
+      getStateRuntime: () => ({ clearSessionsByAgent: () => 2 }),
+    });
+    assert.strictEqual(runtime.clearSessionsByAgent("qoder"), 2);
+    assert.strictEqual(clears, 1);
+    runtime.cleanup();
+    assert.strictEqual(clears, 2);
   });
 });
