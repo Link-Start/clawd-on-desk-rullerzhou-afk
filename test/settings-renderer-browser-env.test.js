@@ -4025,6 +4025,29 @@ describe("settings renderer browser environment", () => {
     assert.equal(autoUpdateSwitch.getAttribute("aria-checked"), "true");
   });
 
+  it("rolls a cancelled consent switch back without a failure toast", async () => {
+    const body = new FakeElement("body");
+    const core = loadSettingsCoreForTest({}, { document: {
+      body, getElementById: () => null,
+      createElement: () => { throw new Error("cancellation must not create a toast"); },
+    } });
+    const sw = new FakeElement("button");
+    let transient = null;
+    core.helpers.attachAnimatedSwitch(sw, {
+      getCommittedVisual: () => false,
+      getTransientState: () => transient,
+      setTransientState: (value) => { transient = value; },
+      clearTransientState: () => { transient = null; },
+      invoke: () => ({ status: "error", cancelled: true }),
+    });
+    sw.dispatchEvent({ type: "click" });
+    assert.equal(sw.classList.contains("pending"), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sw.getAttribute("aria-checked"), "false");
+    assert.equal(sw.classList.contains("pending"), false);
+    assert.equal(transient, null);
+  });
+
   it("rolls the About auto-update switch back when persistence fails", async () => {
     const harness = loadAboutTabForTest({
       snapshot: { autoUpdateCheck: true },
