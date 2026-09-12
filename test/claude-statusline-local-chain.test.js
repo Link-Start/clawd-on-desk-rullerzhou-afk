@@ -56,6 +56,47 @@ for (const platform of ["darwin", "linux", "win32"]) {
   });
 }
 
+for (const sshRemote of [false, true]) {
+  it(`${sshRemote ? "secure" : "ordinary"} remote registration refuses a local chain until explicit local opt-out`, () => {
+    const f = fixture();
+    f.enable();
+    const remoteIdentityPath = path.join(f.dir, "identity.json");
+    fs.writeFileSync(remoteIdentityPath, JSON.stringify({
+      version: 2, layoutVersion: 1, runtimeKey: "profile-a", profileId: "profile-a",
+      installId: "a".repeat(64), remotePort: 23334, routingNonce: "b".repeat(32), deployedAt: 1,
+    }));
+    const remoteOpts = {
+      ...f.opts, homeDir: f.dir, remote: true, sshRemote, remoteIdentityPath,
+      chainSidecarPath: path.join(f.dir, "remote-chain.json"),
+    };
+    const settingsBefore = fs.readFileSync(f.settingsPath, "utf8");
+    const recordBefore = fs.readFileSync(f.localChainSidecarPath, "utf8");
+    for (const chainExisting of [undefined, false, true]) {
+      for (const nodeBin of [process.execPath, "/changed/node"]) {
+        assert.throws(() => registerClaudeStatusline({ ...remoteOpts, chainExisting, nodeBin }), (error) => {
+          assert.match(error.message, /local coexistence.*before remote deployment/);
+          assert.ok(error.message.includes(f.localChainSidecarPath));
+          return true;
+        });
+        assert.equal(fs.readFileSync(f.settingsPath, "utf8"), settingsBefore);
+        assert.equal(fs.readFileSync(f.localChainSidecarPath, "utf8"), recordBefore);
+        assert.equal(fs.existsSync(remoteOpts.chainSidecarPath), false);
+      }
+    }
+    // Resolving the local mode explicitly allows a fresh remote registration,
+    // with its separate recovery record and the appropriate routing prefix.
+    unregisterClaudeStatusline(f.opts);
+    assert.deepEqual(f.read(), f.settings);
+    assert.equal(registerClaudeStatusline({ ...remoteOpts, chainExisting: true }).chained, true);
+    assert.match(f.read().statusLine.command, /CLAWD_REMOTE=1/);
+    if (sshRemote) assert.match(f.read().statusLine.command, /CLAWD_SSH_REMOTE=1/);
+    assert.equal(fs.existsSync(f.localChainSidecarPath), false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(remoteOpts.chainSidecarPath, "utf8")).statusLine, original);
+    unregisterClaudeStatusline(remoteOpts);
+    assert.deepEqual(f.read(), f.settings);
+  });
+}
+
 it("an explicit settingsPath also isolates the default local recovery path", () => {
   const f = fixture();
   const { localChainSidecarPath: _ignored, ...opts } = f.opts;

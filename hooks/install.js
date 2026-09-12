@@ -2011,6 +2011,12 @@ function registerClaudeStatusline(options = {}) {
       : resolveClaudeHooksDir({ ...options, homeDir }), LOCAL_CHAIN_FILE);
   const localChainRequested = options.remote !== true && options.chainExisting === true;
   if (existingIsOurs && existing.command.includes(` ${LOCAL_CHAIN_FLAG} `)) {
+    // Local consent cannot authorize a remote routing/mode migration. Refuse
+    // before refreshing either file; the two recovery records are independent.
+    if (options.remote === true) {
+      throw new Error("Claude statusline uses local coexistence; turn off local Claude usage collection on this account before remote deployment. "
+        + `Statusline and local recovery record kept unchanged: ${localSidecar}`);
+    }
     const record = requireOwnedLocalChain(localSidecar, existing);
     const platform = options.platform || process.platform;
     if (record.platform !== platform) throw new Error("Statusline recovery record belongs to a different platform");
