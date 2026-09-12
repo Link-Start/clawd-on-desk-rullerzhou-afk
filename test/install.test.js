@@ -2802,22 +2802,24 @@ describe("Claude Code statusline installer", () => {
     assert.strictEqual(fs.existsSync(chainSidecarPath), false);
   });
 
-  it("local chainExisting is ignored (chain is remote-only in v1)", () => {
+  it("local explicit coexistence preserves the third-party object in a separate recovery record", () => {
     const settingsPath = makeTempSettings({ statusLine: NASTY_STATUSLINE });
     const chainSidecarPath = makeChainSidecarPath();
 
     const result = registerClaudeStatusline({
       silent: true,
       settingsPath,
-      chainSidecarPath,
+      localChainSidecarPath: chainSidecarPath,
       chainExisting: true,
       platform: "linux",
       nodeBin: "/usr/bin/node",
     });
 
-    assert.strictEqual(result.skippedExisting, true);
-    assert.strictEqual(fs.existsSync(chainSidecarPath), false);
-    assert.deepStrictEqual(readSettings(settingsPath).statusLine, NASTY_STATUSLINE);
+    assert.strictEqual(result.skippedExisting, false);
+    assert.strictEqual(result.localChained, true);
+    assert.strictEqual(fs.existsSync(chainSidecarPath), true);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(chainSidecarPath, "utf8")).statusLine, NASTY_STATUSLINE);
+    assert.strictEqual(readSettings(settingsPath).statusLine.padding, NASTY_STATUSLINE.padding);
   });
 
   // On Windows Claude Code runs statusLine.command through Git Bash whenever
