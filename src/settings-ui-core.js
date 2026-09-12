@@ -493,6 +493,16 @@
     return `settings-${suffix}-${id}`;
   }
 
+  function resolveCanonicalOrAlias(config, canonicalKey, aliasKey) {
+    if (Object.prototype.hasOwnProperty.call(config, canonicalKey)) {
+      return config[canonicalKey];
+    }
+    if (Object.prototype.hasOwnProperty.call(config, aliasKey)) {
+      return config[aliasKey];
+    }
+    return undefined;
+  }
+
   // Shared layout primitive for ordinary Settings rows. It deliberately owns
   // only structure and accessible relationships; feature tabs still own the
   // contents placed into the text and control slots.
@@ -535,10 +545,11 @@
     const type = config.type || "text";
     if (!supportedTypes.has(type)) throw new Error(`Unsupported Settings form field type: ${type}`);
     const ariaLabel = config.ariaLabel != null ? String(config.ariaLabel) : "";
-    const ariaLabelledBy = config.ariaLabelledBy || config.labelledBy;
+    const ariaLabelledBy = resolveCanonicalOrAlias(config, "ariaLabelledBy", "labelledBy");
     if (!ariaLabel && !ariaLabelledBy) {
       throw new Error("Settings form fields require ariaLabel or ariaLabelledBy");
     }
+    const ariaDescribedBy = resolveCanonicalOrAlias(config, "ariaDescribedBy", "describedBy");
 
     const element = document.createElement("input");
     const size = config.size === "compact" ? "compact" : "regular";
@@ -573,7 +584,7 @@
       invalid: false,
       ariaLabel,
       ariaLabelledBy: ariaLabelledBy ? String(ariaLabelledBy) : "",
-      ariaDescribedBy: config.ariaDescribedBy || config.describedBy || "",
+      ariaDescribedBy: ariaDescribedBy == null ? "" : String(ariaDescribedBy),
       validationMessage: "",
     };
 
@@ -667,7 +678,7 @@
       invalid: config.invalid,
       ariaLabel,
       ariaLabelledBy,
-      ariaDescribedBy: config.ariaDescribedBy || config.describedBy,
+      ariaDescribedBy,
       validationMessage: config.validationMessage,
     });
     state.mountedControls.formFields.add(control);
@@ -708,8 +719,6 @@
   function buildTextInput(config = {}) {
     const control = buildFormField({
       ...config,
-      ariaLabelledBy: config.ariaLabelledBy || config.labelledBy,
-      ariaDescribedBy: config.ariaDescribedBy || config.describedBy,
       onInput: config.onInput
         ? ({ event }) => config.onInput(event)
         : null,

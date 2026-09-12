@@ -9436,6 +9436,20 @@ describe("settings renderer browser environment", () => {
       ariaDescribedBy: "canonical-help",
     });
     assert.equal(canonical.getAttribute("aria-describedby"), "canonical-help");
+    const canonicalEmpty = core.helpers.buildTextInput({
+      ariaLabel: "Canonical empty description",
+      ariaDescribedBy: "",
+      describedBy: "legacy-help",
+    });
+    assert.ok(!canonicalEmpty.getAttribute("aria-describedby"),
+      "an explicit empty canonical value must not fall back to the compatibility alias");
+    const canonicalEmptyLabel = core.helpers.buildTextInput({
+      ariaLabel: "Canonical empty label relationship",
+      ariaLabelledBy: "",
+      labelledBy: "legacy-label",
+    });
+    assert.ok(!canonicalEmptyLabel.getAttribute("aria-labelledby"),
+      "an explicit empty canonical label relationship must not fall back to the compatibility alias");
     const compatibility = core.helpers.buildTextInput({
       ariaLabel: "Compatibility description",
       describedBy: "compatibility-help",
