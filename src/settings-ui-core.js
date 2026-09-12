@@ -45,6 +45,15 @@
   // startsWith("Mac") not /\bMac\b/ — "MacIntel" has \w after "c", fails \b (regression #135).
   const IS_MAC = (navigator.platform || "").startsWith("Mac");
   const IS_WIN = (navigator.platform || "").startsWith("Win");
+  // Renderers have no `process`, so platform-gated shortcut rows resolve their
+  // support from the same navigator probe. Anything we cannot positively
+  // identify as darwin/win32 is treated as unsupported, which is the safe
+  // direction for a gate that must stay closed on Linux.
+  const SHORTCUT_PLATFORM = IS_MAC ? "darwin" : (IS_WIN ? "win32" : "linux");
+  const isShortcutActionSupported = shortcutApi.isShortcutActionSupported
+    || (() => true);
+  const SUPPORTED_SHORTCUT_ACTION_IDS = SHORTCUT_ACTION_IDS.filter((actionId) =>
+    isShortcutActionSupported(actionId, SHORTCUT_PLATFORM));
   const COLLAPSED_GROUPS_STORAGE_KEY = "clawd.settings.collapsedGroups.v1";
   const NAVIGATION_STORAGE_KEY = "clawd.settings.navigation.v1";
   const MAX_PERSISTED_SCROLL_TOP = 10_000_000;
@@ -100,6 +109,11 @@
     shortcutRecordingPartial: [],
     nextTransientUiSeq: 1,
   };
+
+  // Native `disabled` cannot distinguish a business rule from a temporary
+  // pending lock. Keep those axes separate so async actions can recover
+  // without accidentally enabling a button that should remain unavailable.
+  const settingsButtonStates = new WeakMap();
 
   const runtime = {
     agentMetadata: null,
@@ -330,7 +344,7 @@
           if (!result || result.status !== "ok" || result.noop) {
             clearTransientState(seq);
             setSwitchVisual(sw, getCommittedVisual(), { pending: false });
-            if (result && result.noop) return;
+            if (result && (result.noop || result.cancelled)) return;
             const msg = (result && result.message) || "unknown error";
             showToast(t("toastSaveFailed") + msg, { error: true });
             return;
@@ -371,9 +385,62 @@
     return section;
   }
 
-  // Shared Settings button primitive. Feature tabs keep ownership of business
-  // behavior while tone, sizing and pending/accessibility semantics stay
-  // consistent across the Settings window.
+  function resolveButtonLabel(config = {}) {
+    if (Object.prototype.hasOwnProperty.call(config, "label")) {
+      return config.label == null ? "" : String(config.label);
+    }
+    return config.labelKey ? t(String(config.labelKey)) : "";
+  }
+
+  function isDomNode(value) {
+    if (!value || typeof value !== "object") return false;
+    const NodeCtor = typeof globalThis !== "undefined" ? globalThis.Node : null;
+    if (typeof NodeCtor === "function") return value instanceof NodeCtor;
+    return typeof value.tagName === "string" && typeof value.appendChild === "function";
+  }
+
+  function applyButtonState(button, buttonState) {
+    buttonState.labelElement.textContent = buttonState.label;
+    button.disabled = buttonState.disabled || buttonState.pending;
+    button.classList.toggle("pending", buttonState.pending);
+    button.setAttribute("aria-busy", buttonState.pending ? "true" : "false");
+    if (typeof buttonState.ariaPressed === "boolean") {
+      button.setAttribute("aria-pressed", buttonState.ariaPressed ? "true" : "false");
+    } else {
+      button.removeAttribute("aria-pressed");
+    }
+  }
+
+  // Shared Settings button primitive. Feature tabs keep ownership of commands,
+  // confirmation, persistence and rollback while this layer owns structure and
+  // presentation state. Updating the label never replaces an optional icon.
+  function setButtonState(button, patch = {}) {
+    if (!button || typeof button !== "object") return button;
+    const current = settingsButtonStates.get(button);
+    if (!current) {
+      throw new TypeError("setButtonState requires a button built by buildButton");
+    }
+    const next = { ...current };
+    if (
+      Object.prototype.hasOwnProperty.call(patch, "label")
+      || Object.prototype.hasOwnProperty.call(patch, "labelKey")
+    ) {
+      next.label = resolveButtonLabel(patch);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "disabled")) {
+      next.disabled = patch.disabled === true;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "pending")) {
+      next.pending = patch.pending === true;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "ariaPressed")) {
+      next.ariaPressed = typeof patch.ariaPressed === "boolean" ? patch.ariaPressed : null;
+    }
+    settingsButtonStates.set(button, next);
+    applyButtonState(button, next);
+    return button;
+  }
+
   function buildButton(config = {}) {
     const button = document.createElement("button");
     const tone = ["neutral", "accent", "danger", "quiet"].includes(config.tone)
@@ -390,15 +457,32 @@
       tone === "neutral" ? "" : tone,
       config.className || "",
     ].filter(Boolean).join(" ");
-    button.textContent = config.label != null
-      ? String(config.label)
-      : (config.labelKey ? t(config.labelKey) : "");
+
+    if (config.icon != null) {
+      if (!isDomNode(config.icon)) {
+        throw new TypeError("buildButton icon must be a DOM Node");
+      }
+      const iconElement = document.createElement("span");
+      iconElement.className = "settings-button-icon";
+      iconElement.setAttribute("aria-hidden", "true");
+      iconElement.appendChild(config.icon);
+      button.appendChild(iconElement);
+    }
+    const labelElement = document.createElement("span");
+    labelElement.className = "settings-button-label";
+    button.appendChild(labelElement);
+    const buttonState = {
+      labelElement,
+      label: resolveButtonLabel(config),
+      disabled: config.disabled === true,
+      pending: config.pending === true,
+      ariaPressed: typeof config.ariaPressed === "boolean" ? config.ariaPressed : null,
+    };
+    settingsButtonStates.set(button, buttonState);
     if (config.ariaLabel) button.setAttribute("aria-label", String(config.ariaLabel));
     if (config.title) button.title = String(config.title);
-    if (config.disabled === true || config.pending === true) button.disabled = true;
-    button.classList.toggle("pending", config.pending === true);
-    button.setAttribute("aria-busy", config.pending === true ? "true" : "false");
     if (typeof config.onClick === "function") button.addEventListener("click", config.onClick);
+    applyButtonState(button, buttonState);
     return button;
   }
 
@@ -1346,11 +1430,13 @@
     return null;
   }
 
-  function restoreSettingsFocus(rootNode, focusKey) {
+  function focusSettingsTarget(rootNode, focusKey, { onlyIfFocusLost = false } = {}) {
     const target = findSettingsFocusTarget(rootNode, focusKey);
     if (!target || target.disabled === true || typeof target.focus !== "function") return;
-    const active = document.activeElement;
-    if (active && active !== document.body && active.isConnected !== false) return;
+    if (onlyIfFocusLost) {
+      const active = document.activeElement;
+      if (active && active !== document.body && active.isConnected !== false) return;
+    }
     try { target.focus({ preventScroll: true }); } catch (_) { target.focus(); }
   }
 
@@ -1377,7 +1463,9 @@
           && typeof exactTarget.focus === "function"
           ? focusKey
           : fallbackKey;
-        if (restoreKey) restoreSettingsFocus(currentContentRoot, restoreKey);
+        if (restoreKey) {
+          focusSettingsTarget(currentContentRoot, restoreKey, { onlyIfFocusLost: true });
+        }
       }
       if (scrollTop !== null
         && document.getElementById("content") === contentRoot
@@ -2128,6 +2216,7 @@
   core.helpers = {
     t,
     buildButton,
+    setButtonState,
     showSettingsDialog,
     showSettingsConfirmModal,
     escapeHtml,
@@ -2163,6 +2252,8 @@
     IS_WIN,
     SHORTCUT_ACTIONS,
     SHORTCUT_ACTION_IDS,
+    SUPPORTED_SHORTCUT_ACTION_IDS,
+    SHORTCUT_PLATFORM,
     buildAcceleratorFromEvent,
     formatAcceleratorLabel,
     formatAcceleratorPartial,
@@ -2170,6 +2261,7 @@
 
   core.ops = {
     installRenderHooks,
+    focusSettingsTarget,
     requestRender,
     selectTab,
     persistNavigationState,
