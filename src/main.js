@@ -317,6 +317,7 @@ const prefsModule = require("./prefs");
 const { createSettingsController } = require("./settings-controller");
 const { loadOrCreateInstallationIdentity } = require("./remote-ssh-identity");
 const { createTranslator, i18n, SUPPORTED_LANGS } = require("./i18n");
+const { setClaudeCollectionWithConsent } = require("./claude-statusline-consent");
 const {
   getBubblePolicy,
   isAllBubblesHidden,
@@ -496,9 +497,23 @@ const _settingsController = createSettingsController({
     uninstallAutoStart: _uninstallAutoStartHook,
     resolveTextScaleDisplayKey: () => getSettingsDisplayKey(),
     syncClaudeHooksNow: () => _server.syncClawdHooks({ source: "settings", automatic: false }),
-    setClaudeQuotaCollectionEnabled: (enabled) => _server.setClaudeQuotaCollectionEnabled({
-      enabled,
-      source: "settings-quota-collection",
+    setClaudeQuotaCollectionEnabled: (enabled) => setClaudeCollectionWithConsent(enabled, {
+      setEnabled: (options) => _server.setClaudeQuotaCollectionEnabled({
+        ...options, source: "settings-quota-collection",
+      }),
+      confirm: async () => {
+        const parent = settingsWindowRuntime.getWindow();
+        const options = {
+          type: "question", noLink: true, defaultId: 1, cancelId: 1,
+          buttons: [translate("confirm"), translate("cancel")],
+          message: translate("claudeStatuslineCoexistTitle"),
+          detail: translate("claudeStatuslineCoexistDetail"),
+        };
+        const { response } = parent && !parent.isDestroyed()
+          ? await electronDialog.showMessageBox(parent, options)
+          : await electronDialog.showMessageBox(options);
+        return response === 0;
+      },
     }),
     uninstallClaudeHooksNow: _uninstallClaudeHooksNow,
     startClaudeSettingsWatcher: () => _server.startClaudeSettingsWatcher(),

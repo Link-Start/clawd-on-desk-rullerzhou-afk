@@ -497,11 +497,22 @@ function setClaudeQuotaCollectionEnabled(callOptions = {}) {
         message: "Enable the Claude Code integration before collecting its usage metadata",
       };
     }
-    const result = registerClaudeStatusline({ backup: true, silent: true });
+    if (callOptions.chainExisting === true
+      && !/^[a-f0-9]{64}$/.test(callOptions.expectedStatuslineFingerprint || "")) {
+      return { status: "error", message: "Confirm the current Claude statusline before enabling coexistence" };
+    }
+    const result = registerClaudeStatusline({
+      backup: true, silent: true,
+      ...(callOptions.chainExisting === true ? {
+        chainExisting: true,
+        expectedStatuslineFingerprint: callOptions.expectedStatuslineFingerprint,
+      } : {}),
+    });
     if (result.skippedExisting) {
       return {
         status: "error",
         reason: "statusline-occupied",
+        statuslineFingerprint: result.statuslineFingerprint,
         message: "Claude Code already has a custom statusline; Clawd left it unchanged",
       };
     }
