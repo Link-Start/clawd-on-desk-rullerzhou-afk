@@ -84,6 +84,8 @@ const HOOK_FILES = [
   "state-payload-size.js",
   "claude-stop-disposition.js",
   "session-recovery-lease.js",
+  "session-history.js",
+  "claude-session-id.js",
   "cursor-session-title.js",
   "clawd-hook.js",
   "install.js",

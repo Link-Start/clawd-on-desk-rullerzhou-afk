@@ -75,6 +75,8 @@ contextBridge.exposeInMainWorld("dashboardAPI", {
     ipcRenderer.invoke("dashboard:set-session-automation", payload),
   clearSessionAutomationGrant: (payload) =>
     ipcRenderer.invoke("dashboard:clear-session-automation-grant", payload),
+  getSessionHistory: () => ipcRenderer.invoke("dashboard:get-session-history"),
+  resumeSession: (payload) => ipcRenderer.invoke("dashboard:resume-session", payload),
   ackCompletion: (sessionId) => ipcRenderer.invoke("session:ack-completion", sessionId),
   onSessionSnapshot: (cb) => {
     if (typeof cb !== "function") return () => {};

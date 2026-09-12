@@ -722,6 +722,13 @@ async function reloadKimiQuotaStatus() {
   return kimiQuotaStatus;
 }
 
+// Identity of the live session set. Only a change here can add or remove a
+// resumable row, so it gates the disk read.
+function liveSessionKey(value) {
+  const sessions = value && Array.isArray(value.sessions) ? value.sessions : [];
+  return sessions.map((session) => (session && session.id) || "").sort().join("\u0000");
+}
+
 function snapshotHasKimiQuota(value) {
   const accountQuota = Array.isArray(value && value.accountQuota) ? value.accountQuota : [];
   return accountQuota.some((entry) => entry && entry.kimiQuota && entry.kimiQuota.group);
@@ -1626,7 +1633,18 @@ function renderEmpty() {
   empty.className = "empty";
   empty.appendChild(createText("div", "empty-title", t("dashboardEmpty")));
   empty.appendChild(createText("div", "empty-hint", t("dashboardEmptyHint")));
-  contentEl.replaceChildren(empty);
+  // "No sessions running" is exactly when the resume list is most useful —
+  // it is the state a machine comes back up in. With nothing to resume the
+  // node tree stays exactly as it was before this section existed.
+  if (!sessionHistory.length) {
+    contentEl.replaceChildren(empty);
+    return;
+  }
+  empty.classList.add("empty-with-history");
+  const fragment = document.createDocumentFragment();
+  fragment.appendChild(empty);
+  appendSessionHistory(fragment, Date.now());
+  contentEl.replaceChildren(fragment);
 }
 
 function createSessionAutomationOrphan(record) {
@@ -1706,6 +1724,168 @@ function appendSessionAutomationOrphans(fragment) {
   const cards = document.createElement("div");
   cards.className = "cards";
   for (const record of orphans) cards.appendChild(createSessionAutomationOrphan(record));
+  section.appendChild(cards);
+  fragment.appendChild(section);
+}
+
+// ── Session history ──────────────────────────────────────────────────────
+// Rows come from ~/.clawd/session-history-v1 via main. render() runs on a
+// one-second tick and rebuilds the whole tree, so the list is fetched into
+// this cache and re-read only on real changes — never once per frame.
+let sessionHistory = [];
+let sessionHistoryPending = false;
+let sessionHistoryReloadRequested = false;
+const sessionHistoryActionState = new Map();
+
+function historyKey(row) {
+  return `${row.agentId}\u0000${row.sessionId}`;
+}
+
+async function reloadSessionHistory(options = {}) {
+  if (!window.dashboardAPI || typeof window.dashboardAPI.getSessionHistory !== "function") return;
+  if (sessionHistoryPending) {
+    sessionHistoryReloadRequested = true;
+    return;
+  }
+  sessionHistoryPending = true;
+  try {
+    do {
+      sessionHistoryReloadRequested = false;
+      const rows = await window.dashboardAPI.getSessionHistory();
+      sessionHistory = Array.isArray(rows) ? rows : [];
+    } while (sessionHistoryReloadRequested);
+  } catch {
+    sessionHistory = [];
+  } finally {
+    sessionHistoryPending = false;
+  }
+  // Drop feedback for rows that are gone so it cannot outlive its card.
+  const live = new Set(sessionHistory.map(historyKey));
+  for (const key of sessionHistoryActionState.keys()) {
+    if (!live.has(key)) sessionHistoryActionState.delete(key);
+  }
+  for (const row of sessionHistory) {
+    if (row.resumePending && !sessionHistoryActionState.has(historyKey(row))) {
+      sessionHistoryActionState.set(historyKey(row), {
+        status: "submitted", retryAt: row.resumeRetryAt,
+      });
+    }
+  }
+  if (options.rerender !== false) render();
+}
+
+function isHistoryResumePending(state, now = Date.now()) {
+  return !!state && (state.status === "pending"
+    || (state.status === "submitted" && now < state.retryAt));
+}
+
+async function resumeHistoryRow(row) {
+  const key = historyKey(row);
+  if (isHistoryResumePending(sessionHistoryActionState.get(key))) return;
+  sessionHistoryActionState.set(key, { status: "pending" });
+  render({ force: true });
+  let result = null;
+  try {
+    result = await window.dashboardAPI.resumeSession({
+      agentId: row.agentId,
+      sessionId: row.sessionId,
+    });
+  } catch {
+    result = null;
+  }
+  if (result && result.status === "submitted") {
+    sessionHistoryActionState.set(key, { status: "submitted", retryAt: result.retryAt });
+    render({ force: true });
+    return;
+  }
+  if (result && result.status === "already-running") {
+    sessionHistoryActionState.delete(key);
+    sessionHistory = sessionHistory.filter((item) => historyKey(item) !== key);
+    await reloadSessionHistory();
+    return;
+  }
+  sessionHistoryActionState.set(key, { status: "error" });
+  render({ force: true });
+}
+
+function createSessionHistoryCard(row, now) {
+  const card = document.createElement("article");
+  card.className = "session-history-card";
+
+  const main = document.createElement("div");
+  main.className = "session-history-main";
+  main.appendChild(createText(
+    "div",
+    "session-history-title",
+    row.title || row.sessionId
+  ));
+
+  const meta = document.createElement("div");
+  meta.className = "session-history-meta";
+  if (row.interrupted) {
+    meta.appendChild(createText("span", "session-history-flag", t("dashboardHistoryInterrupted")));
+  }
+  // null means the probe could not tell; only a confident false warns.
+  if (row.transcriptPresent === false) {
+    meta.appendChild(createText(
+      "span",
+      "session-history-flag is-missing",
+      t("dashboardHistoryTranscriptMissing")
+    ));
+  }
+  const folder = sessionHistoryFolderLabel(row.cwd);
+  const elapsed = formatElapsed(Math.max(0, now - row.lastEventAt));
+  meta.appendChild(document.createTextNode(folder ? `${folder} · ${elapsed}` : elapsed));
+  main.appendChild(meta);
+  card.appendChild(main);
+
+  const actions = document.createElement("div");
+  actions.className = "session-history-actions";
+  const state = sessionHistoryActionState.get(historyKey(row)) || null;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "session-history-resume";
+  const pending = isHistoryResumePending(state, now);
+  button.textContent = pending
+    ? t("dashboardHistoryResuming")
+    : t("dashboardHistoryResume");
+  button.disabled = pending;
+  button.addEventListener("click", () => { void resumeHistoryRow(row); });
+  actions.appendChild(button);
+  if (state && (state.status === "error" || (state.status === "submitted" && !pending))) {
+    actions.appendChild(createText(
+      "div",
+      "session-history-feedback",
+      t(state.status === "error" ? "dashboardHistoryResumeFailed" : "dashboardHistoryNotConfirmed")
+    ));
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+function sessionHistoryFolderLabel(cwd) {
+  if (typeof cwd !== "string" || !cwd) return "";
+  const parts = cwd.split(/[/\\]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : cwd;
+}
+
+function appendSessionHistory(fragment, now) {
+  // A queued disk read can finish after the hook has already put a session
+  // on screen. Always apply the current live snapshot at render time too.
+  const activeIds = new Set((snapshot.sessions || [])
+    .filter((session) => session.agentId === "claude-code"
+      && (session.profileId || "local") === "local" && !session.host && !session.wslDistro)
+    .map((session) => session.rawSessionId));
+  const rows = sessionHistory.filter((row) => !activeIds.has(row.sessionId));
+  for (const id of activeIds) sessionHistoryActionState.delete(`claude-code\u0000${id}`);
+  if (!rows.length) return;
+  const section = document.createElement("section");
+  section.className = "group session-history";
+  section.appendChild(createText("h2", "group-title", t("dashboardHistoryTitle")));
+  section.appendChild(createText("p", "session-history-hint", t("dashboardHistoryHint")));
+  const cards = document.createElement("div");
+  cards.className = "cards";
+  for (const row of rows) cards.appendChild(createSessionHistoryCard(row, now));
   section.appendChild(cards);
   fragment.appendChild(section);
 }
@@ -1913,6 +2093,7 @@ function render(options = {}) {
   // ordinary dynamic ordering resumes as soon as it ends.
   appendSessionGroups(fragment, byId, now);
   appendSessionAutomationOrphans(fragment);
+  appendSessionHistory(fragment, now);
 
   contentEl.replaceChildren(fragment);
 }
@@ -1925,9 +2106,13 @@ async function init() {
   });
   window.dashboardAPI.onSessionSnapshot((nextSnapshot) => {
     const hadKimiQuota = snapshotHasKimiQuota(snapshot);
+    const previousSessionKey = liveSessionKey(snapshot);
     snapshot = nextSnapshot || snapshot;
     if (hadKimiQuota !== snapshotHasKimiQuota(snapshot)) {
       void reloadKimiQuotaStatus();
+    }
+    if (previousSessionKey !== liveSessionKey(snapshot)) {
+      void reloadSessionHistory({ rerender: false });
     }
     if (activeEdit && !snapshotHasSession(snapshot, activeEdit.sessionId)) {
       activeEdit = null;
@@ -1948,6 +2133,7 @@ async function init() {
   snapshot = nextSnapshot || snapshot;
   kimiQuotaStatus = nextKimiQuotaStatus || null;
   render();
+  void reloadSessionHistory();
 
   setInterval(render, 1000);
 
