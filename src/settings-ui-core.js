@@ -1355,11 +1355,13 @@
     return null;
   }
 
-  function restoreSettingsFocus(rootNode, focusKey) {
+  function focusSettingsTarget(rootNode, focusKey, { onlyIfFocusLost = false } = {}) {
     const target = findSettingsFocusTarget(rootNode, focusKey);
     if (!target || target.disabled === true || typeof target.focus !== "function") return;
-    const active = document.activeElement;
-    if (active && active !== document.body && active.isConnected !== false) return;
+    if (onlyIfFocusLost) {
+      const active = document.activeElement;
+      if (active && active !== document.body && active.isConnected !== false) return;
+    }
     try { target.focus({ preventScroll: true }); } catch (_) { target.focus(); }
   }
 
@@ -1386,7 +1388,9 @@
           && typeof exactTarget.focus === "function"
           ? focusKey
           : fallbackKey;
-        if (restoreKey) restoreSettingsFocus(currentContentRoot, restoreKey);
+        if (restoreKey) {
+          focusSettingsTarget(currentContentRoot, restoreKey, { onlyIfFocusLost: true });
+        }
       }
       if (scrollTop !== null
         && document.getElementById("content") === contentRoot
@@ -2181,6 +2185,7 @@
 
   core.ops = {
     installRenderHooks,
+    focusSettingsTarget,
     requestRender,
     selectTab,
     persistNavigationState,
