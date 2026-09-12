@@ -147,6 +147,24 @@
       return typeof value === "number" && Number.isFinite(value) ? value : null;
     }
 
+    function getPlacementZoom() {
+      if (!usesViewportPlacement || !root || typeof root.getComputedStyle !== "function") return 1;
+      // Settings applies text scale as root CSS zoom. DOMRects include that
+      // zoom, but scrollHeight and fixed-position CSS lengths do not.
+      const zoom = Number.parseFloat(root.getComputedStyle(document.documentElement).zoom);
+      return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+    }
+
+    function getLayoutRect(element, zoom) {
+      const rect = element.getBoundingClientRect();
+      const layout = {};
+      for (const key of ["top", "bottom", "left", "right", "width"]) {
+        const value = finiteNumber(rect && rect[key]);
+        layout[key] = value == null ? null : value / zoom;
+      }
+      return layout;
+    }
+
     function findPlacementBoundary() {
       let current = picker.parentNode;
       while (current) {
@@ -160,20 +178,20 @@
       return null;
     }
 
-    function getPlacementBounds() {
+    function getPlacementBounds(zoom) {
       const viewportHeight = finiteNumber(root && root.innerHeight)
         || finiteNumber(document && document.documentElement && document.documentElement.clientHeight);
       if (!viewportHeight || viewportHeight <= 0) return null;
 
       let top = 0;
-      let bottom = viewportHeight;
+      let bottom = viewportHeight / zoom;
       const viewportWidth = finiteNumber(root && root.innerWidth)
         || finiteNumber(document && document.documentElement && document.documentElement.clientWidth);
       let left = 0;
-      let right = viewportWidth && viewportWidth > 0 ? viewportWidth : null;
+      let right = viewportWidth && viewportWidth > 0 ? viewportWidth / zoom : null;
       const boundary = findPlacementBoundary();
       if (boundary && typeof boundary.getBoundingClientRect === "function") {
-        const rect = boundary.getBoundingClientRect();
+        const rect = getLayoutRect(boundary, zoom);
         const boundaryTop = finiteNumber(rect && rect.top);
         const boundaryBottom = finiteNumber(rect && rect.bottom);
         const boundaryLeft = finiteNumber(rect && rect.left);
@@ -200,8 +218,9 @@
       if (disposed || typeof trigger.getBoundingClientRect !== "function") return;
       const boundary = findPlacementBoundary();
       if (!boundary) return;
-      const bounds = getPlacementBounds();
-      const triggerRect = trigger.getBoundingClientRect();
+      const zoom = getPlacementZoom();
+      const bounds = getPlacementBounds(zoom);
+      const triggerRect = getLayoutRect(trigger, zoom);
       const triggerTop = finiteNumber(triggerRect && triggerRect.top);
       const triggerBottom = finiteNumber(triggerRect && triggerRect.bottom);
       if (!bounds || triggerTop == null || triggerBottom == null) return;
@@ -224,8 +243,9 @@
       resetFixedMenuGeometry();
       if (typeof trigger.getBoundingClientRect !== "function") return;
 
-      const bounds = getPlacementBounds();
-      const triggerRect = trigger.getBoundingClientRect();
+      const zoom = getPlacementZoom();
+      const bounds = getPlacementBounds(zoom);
+      const triggerRect = getLayoutRect(trigger, zoom);
       const triggerTop = finiteNumber(triggerRect && triggerRect.top);
       const triggerBottom = finiteNumber(triggerRect && triggerRect.bottom);
       const triggerLeft = finiteNumber(triggerRect && triggerRect.left);
@@ -234,6 +254,16 @@
         || (triggerLeft != null && triggerRight != null ? triggerRight - triggerLeft : null);
       if (!bounds || triggerTop == null || triggerBottom == null) return;
 
+      let renderedWidth = null;
+      if (usesViewportPlacement) {
+        const maxWidth = bounds.right == null ? null : Math.max(0, bounds.right - bounds.left);
+        renderedWidth = triggerWidth == null
+          ? null
+          : (maxWidth == null ? triggerWidth : Math.min(triggerWidth, maxWidth));
+        // Measure wrapping at the final width, not the fixed menu's default
+        // 100% of the viewport, before choosing a side and height limit.
+        if (renderedWidth != null) menu.style.width = `${renderedWidth}px`;
+      }
       const contentHeight = finiteNumber(menu.scrollHeight) || DEFAULT_MENU_MAX_HEIGHT_PX;
       const offsetHeight = finiteNumber(menu.offsetHeight) || contentHeight;
       const clientHeight = finiteNumber(menu.clientHeight) || contentHeight;
@@ -261,10 +291,6 @@
       menu.style.maxHeight = maxHeight + "px";
       if (usesViewportPlacement) {
         const renderedHeight = Math.min(naturalHeight, maxHeight);
-        const maxWidth = bounds.right == null ? null : Math.max(0, bounds.right - bounds.left);
-        const renderedWidth = triggerWidth == null
-          ? null
-          : (maxWidth == null ? triggerWidth : Math.min(triggerWidth, maxWidth));
         let menuLeft = triggerLeft;
         if (menuLeft != null) {
           if (bounds.right != null && renderedWidth != null) {
@@ -273,7 +299,6 @@
           menuLeft = Math.max(bounds.left, menuLeft);
           menu.style.left = `${menuLeft}px`;
         }
-        if (renderedWidth != null) menu.style.width = `${renderedWidth}px`;
         const menuTop = openUp
           ? Math.max(bounds.top, triggerTop - MENU_GAP_PX - renderedHeight)
           : Math.min(triggerBottom + MENU_GAP_PX, bounds.bottom - renderedHeight);

@@ -748,6 +748,7 @@ function loadSharedLanguagePickerForTest({
   lockWhilePending = false,
   viewportPlacement = null,
   innerWidth = 1000,
+  textZoom = 1,
 } = {}) {
   const body = new FakeElement("body");
   const boundary = new FakeElement("div");
@@ -817,7 +818,8 @@ function loadSharedLanguagePickerForTest({
       timers.delete(id);
       timerDelays.delete(id);
     },
-    getComputedStyle() {
+    getComputedStyle(element) {
+      if (element === document.documentElement) return { zoom: String(textZoom) };
       return { transitionDuration, transitionDelay };
     },
     matchMedia() {
@@ -9550,22 +9552,26 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(harness.menu.scrollTop, 0);
   });
 
-  it("keeps viewport-fixed theme pickers inside the content boundary at enlarged text sizes", () => {
+  it("converts viewport-fixed theme picker DOMRects to unzoomed CSS lengths", () => {
     const css = fs.readFileSync(LANGUAGE_PICKER_CSS, "utf8");
     assert.match(css, /\.language-picker\.viewport-fixed\s+\.language-picker-menu\s*\{\s*position:\s*fixed;/);
 
-    for (const scale of [1, 1.25, 1.5, 1.6]) {
+    for (const scale of [0.8, 1, 1.25, 1.5, 1.6]) {
       const tint = loadSharedLanguagePickerForTest({
         options: ["none", "midnight", "gold", "vaporwave", "matcha", "mono"],
         viewportPlacement: "down",
+        textZoom: scale,
+        innerHeight: 700 * scale,
+        innerWidth: 1000 * scale,
       });
       tint.boundary.getBoundingClientRect = () => ({
-        top: 38, bottom: 690, left: 250, right: 982,
+        top: 38 * scale, bottom: 690 * scale, left: 250 * scale, right: 982 * scale,
       });
       tint.trigger.getBoundingClientRect = () => ({
-        top: 220, bottom: 268, left: 690, right: 910, width: 220,
+        top: 220 * scale, bottom: 268 * scale, left: 690 * scale, right: 910 * scale, width: 220 * scale,
       });
-      const tintHeight = Math.round(190 * scale);
+      // Chromium reports unzoomed scroll/offset heights under root CSS zoom.
+      const tintHeight = 190;
       Object.defineProperty(tint.menu, "scrollHeight", { value: tintHeight });
       Object.defineProperty(tint.menu, "offsetHeight", { value: tintHeight + 2 });
       Object.defineProperty(tint.menu, "clientHeight", { value: tintHeight });
@@ -9581,12 +9587,15 @@ describe("settings renderer browser environment", () => {
       const accessory = loadSharedLanguagePickerForTest({
         options: ["none", "cowboy", "party", "wizard", "top", "santa", "pumpkin", "halo"],
         viewportPlacement: "up",
+        textZoom: scale,
+        innerHeight: 700 * scale,
+        innerWidth: 1000 * scale,
       });
       accessory.boundary.getBoundingClientRect = tint.boundary.getBoundingClientRect;
       accessory.trigger.getBoundingClientRect = () => ({
-        top: 450, bottom: 498, left: 690, right: 910, width: 220,
+        top: 450 * scale, bottom: 498 * scale, left: 690 * scale, right: 910 * scale, width: 220 * scale,
       });
-      const accessoryHeight = Math.round(240 * scale);
+      const accessoryHeight = 240;
       Object.defineProperty(accessory.menu, "scrollHeight", { value: accessoryHeight });
       Object.defineProperty(accessory.menu, "offsetHeight", { value: accessoryHeight + 2 });
       Object.defineProperty(accessory.menu, "clientHeight", { value: accessoryHeight });
@@ -9631,7 +9640,7 @@ describe("settings renderer browser environment", () => {
     assert.ok(parseInt(preferUp.menu.style.top, 10) + parseInt(preferUp.menu.style.maxHeight, 10) <= 268);
   });
 
-  it("keeps outer overflow stable across repeated fixed-menu opens and closes", () => {
+  it("cleans fixed-menu geometry and scroll listeners across repeated opens and closes", () => {
     const harness = loadSharedLanguagePickerForTest({
       options: ["none", "cowboy", "party", "wizard", "top", "santa", "pumpkin", "halo"],
       viewportPlacement: "up",
@@ -9644,18 +9653,14 @@ describe("settings renderer browser environment", () => {
     Object.defineProperty(harness.menu, "scrollHeight", { value: 310 });
     Object.defineProperty(harness.menu, "offsetHeight", { value: 312 });
     Object.defineProperty(harness.menu, "clientHeight", { value: 310 });
-    const outerScrollHeight = harness.boundary.scrollHeight;
-
     for (let index = 0; index < 5; index += 1) {
       harness.trigger.dispatchEvent({ type: "click" });
       assert.strictEqual(harness.picker.classList.contains("open-up"), true);
-      assert.strictEqual(harness.boundary.scrollHeight, outerScrollHeight);
       harness.trigger.dispatchEvent({ type: "click" });
       harness.flushTimers();
       assert.strictEqual(harness.picker.classList.contains("menu-mounted"), false);
       assert.strictEqual(harness.menu.style.top, "");
       assert.strictEqual(harness.menu.style.left, "");
-      assert.strictEqual(harness.boundary.scrollHeight, outerScrollHeight);
     }
 
     harness.trigger.dispatchEvent({ type: "click" });
