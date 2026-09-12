@@ -382,14 +382,12 @@ class FakeClassList {
   }
 }
 
-// FakeElement.textContent is a plain field, not an aggregating DOM getter, so
-// reading it on a container yields "" and any "does this text appear?" check
-// against it passes vacuously. Walk the tree instead, and include innerHTML —
-// the guide rows render through it.
+// Walk the tree using each node's own text so checks can include innerHTML
+// without double-counting the aggregating textContent getter below.
 function collectText(el) {
   if (!el) return "";
   const parts = [];
-  if (el.textContent) parts.push(String(el.textContent));
+  if (el._textContent) parts.push(String(el._textContent));
   if (el.innerHTML) parts.push(String(el.innerHTML));
   for (const child of el.children || []) parts.push(collectText(child));
   return parts.join(" ");
@@ -403,7 +401,7 @@ class FakeElement {
     this.dataset = {};
     this.eventListeners = {};
     this.className = "";
-    this.textContent = "";
+    this._textContent = "";
     this.title = "";
     this.type = "";
     this.disabled = false;
@@ -432,6 +430,17 @@ class FakeElement {
     child.parentNode = this;
     this.children.push(child);
     return child;
+  }
+
+  set textContent(value) {
+    this._textContent = value == null ? "" : String(value);
+    for (const child of this.children) child.parentNode = null;
+    this.children = [];
+    this._innerHTML = "";
+  }
+
+  get textContent() {
+    return this._textContent + this.children.map((child) => child.textContent).join("");
   }
 
   append(...children) {
@@ -522,6 +531,7 @@ class FakeElement {
   set innerHTML(_value) {
     for (const child of this.children) child.parentNode = null;
     this.children = [];
+    this._textContent = "";
     const html = String(_value || "");
     this._innerHTML = html;
     const stack = [this];
@@ -647,6 +657,22 @@ function buildFakeSettingRow(document, config = {}) {
   element.appendChild(textElement);
   element.appendChild(controlElement);
   return { element, textElement, labelElement, descriptionElement, controlElement };
+}
+
+function loadSharedButtonHelpersForTest(document, settingsAPI = {}, getTranslate = null) {
+  const shared = loadSettingsCoreForTest(settingsAPI, { document }).helpers;
+  const translateConfig = (config = {}) => {
+    if (!Object.prototype.hasOwnProperty.call(config, "labelKey")) return config;
+    const translate = typeof getTranslate === "function" ? getTranslate() : null;
+    return {
+      ...config,
+      label: typeof translate === "function" ? translate(config.labelKey) : config.labelKey,
+    };
+  };
+  return {
+    buildButton: (config) => shared.buildButton(translateConfig(config)),
+    setButtonState: (button, patch) => shared.setButtonState(button, translateConfig(patch)),
+  };
 }
 
 function loadRecapTabForTest({ data, agentMetadata = [], queryRecap } = {}) {
@@ -825,6 +851,9 @@ function loadSharedLanguagePickerForTest({
   transitionDuration = "0.14s",
   transitionDelay = "0s",
   lockWhilePending = false,
+  viewportPlacement = null,
+  innerWidth = 1000,
+  textZoom = 1,
 } = {}) {
   const body = new FakeElement("body");
   const boundary = new FakeElement("div");
@@ -840,12 +869,13 @@ function loadSharedLanguagePickerForTest({
   const document = {
     body,
     activeElement: body,
-    documentElement: { clientHeight: innerHeight },
+    documentElement: { clientHeight: innerHeight, clientWidth: innerWidth },
     createElement(tagName) {
       const element = new FakeElement(tagName);
-      element.focus = () => {
+      element.focus = (options = {}) => {
         element.focused = true;
         document.activeElement = element;
+        if (options.preventScroll !== true) boundary.scrollTop = 0;
       };
       return element;
     },
@@ -864,6 +894,7 @@ function loadSharedLanguagePickerForTest({
     console,
     document,
     innerHeight,
+    innerWidth,
     addEventListener(type, cb) {
       if (!windowListeners.has(type)) windowListeners.set(type, []);
       windowListeners.get(type).push(cb);
@@ -892,7 +923,8 @@ function loadSharedLanguagePickerForTest({
       timers.delete(id);
       timerDelays.delete(id);
     },
-    getComputedStyle() {
+    getComputedStyle(element) {
+      if (element === document.documentElement) return { zoom: String(textZoom) };
       return { transitionDuration, transitionDelay };
     },
     matchMedia() {
@@ -912,6 +944,7 @@ function loadSharedLanguagePickerForTest({
     ariaLabel: "Language",
     onChange,
     lockWhilePending,
+    viewportPlacement,
   });
   boundary.appendChild(control.element);
 
@@ -1427,7 +1460,16 @@ function loadThemeTabForTest({
   let themeListState = Array.isArray(themes) ? themes : [];
   const document = {
     body,
-    createElement: (tagName) => new FakeElement(tagName),
+    activeElement: body,
+    createElement(tagName) {
+      const element = new FakeElement(tagName);
+      element.focus = (options) => {
+        element.focused = true;
+        element.focusOptions = options;
+        document.activeElement = element;
+      };
+      return element;
+    },
     getElementById(id) {
       if (id === "content") return content;
       return null;
@@ -1888,6 +1930,7 @@ function loadTelegramApprovalTabForTest({
   vm.runInContext(fs.readFileSync(LANGUAGE_PICKER_JS, "utf8"), context);
   vm.runInContext(fs.readFileSync(FEISHU_APPROVAL_RECIPIENT, "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-tab-telegram-approval.js"), "utf8"), context);
+  const buttonHelpers = loadSharedButtonHelpersForTest(document, api, () => core.helpers.t);
 
   const core = {
     state: {
@@ -1915,6 +1958,8 @@ function loadTelegramApprovalTabForTest({
       buildSettingRow: (config) => buildFakeSettingRow(document, config),
       buildTextInput: (config) => buildFakeTextInput(document, config),
       setTextInputState: setFakeTextInputState,
+      buildButton: buttonHelpers.buildButton,
+      setButtonState: buttonHelpers.setButtonState,
       showSettingsConfirmModal: showConfirmModal,
       buildSection: (_title, rows) => {
         const section = document.createElement("section");
@@ -2208,6 +2253,7 @@ function loadDiscordPresenceTabForTest({ snapshot, update } = {}) {
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(SETTINGS_TAB_DISCORD_PRESENCE, "utf8"), context);
+  const buttonHelpers = loadSharedButtonHelpersForTest(document, settingsAPI, () => core.helpers.t);
 
   const core = {
     state: {
@@ -2226,6 +2272,8 @@ function loadDiscordPresenceTabForTest({ snapshot, update } = {}) {
       buildSettingRow: (config) => buildFakeSettingRow(document, config),
       buildTextInput: (config) => buildFakeTextInput(document, config),
       setTextInputState: setFakeTextInputState,
+      buildButton: buttonHelpers.buildButton,
+      setButtonState: buttonHelpers.setButtonState,
       buildSection: (_title, rows) => {
         const section = document.createElement("section");
         for (const row of rows) section.appendChild(row);
@@ -2417,6 +2465,7 @@ function loadAboutTabForTest({
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-tab-about.js"), "utf8"), context);
+  const buttonHelpers = loadSharedButtonHelpersForTest(document, context.settingsAPI, () => core.helpers.t);
 
   const core = {
     state: {
@@ -2427,6 +2476,8 @@ function loadAboutTabForTest({
     runtime: { about: { infoCache: null, clickCount: 0, updateCheckSnapshot: { state: "idle" } } },
     helpers: {
       t: (key) => key,
+      buildButton: buttonHelpers.buildButton,
+      setButtonState: buttonHelpers.setButtonState,
       attachSettingsDisclosure: attachDisclosureForHarness,
       registerMountedDisposable: disposableHarness.register,
       disposeMountedDisposable: disposableHarness.dispose,
@@ -3885,11 +3936,15 @@ describe("settings renderer browser environment", () => {
     const pendingDelete = harness.content.querySelector(".remote-ssh-btn-danger");
     assert.notStrictEqual(pendingDelete, originalDelete, "starting cleanup rebuilds the detail view");
     assert.strictEqual(pendingDelete.disabled, true);
+    assert.strictEqual(pendingDelete.classList.contains("pending"), true);
+    assert.strictEqual(pendingDelete.getAttribute("aria-busy"), "true");
 
     harness.emitStatus({ profileId: profile.id, status: "idle" });
     const afterStatusRerender = harness.content.querySelector(".remote-ssh-btn-danger");
     assert.notStrictEqual(afterStatusRerender, pendingDelete);
     assert.strictEqual(afterStatusRerender.disabled, true, "runtime status repaint preserves pending state");
+    assert.strictEqual(afterStatusRerender.classList.contains("pending"), true);
+    assert.strictEqual(afterStatusRerender.getAttribute("aria-busy"), "true");
 
     // FakeElement permits dispatching a disabled button, unlike the browser.
     // The handler guard must still prevent duplicate destructive IPC work.
@@ -4116,6 +4171,29 @@ describe("settings renderer browser environment", () => {
     assert.equal(harness.core.tabs.about.patchInPlace({ autoUpdateCheck: true }), true);
     assert.strictEqual(harness.content.querySelector(".about-auto-update-switch"), autoUpdateSwitch);
     assert.equal(autoUpdateSwitch.getAttribute("aria-checked"), "true");
+  });
+
+  it("rolls a cancelled consent switch back without a failure toast", async () => {
+    const body = new FakeElement("body");
+    const core = loadSettingsCoreForTest({}, { document: {
+      body, getElementById: () => null,
+      createElement: () => { throw new Error("cancellation must not create a toast"); },
+    } });
+    const sw = new FakeElement("button");
+    let transient = null;
+    core.helpers.attachAnimatedSwitch(sw, {
+      getCommittedVisual: () => false,
+      getTransientState: () => transient,
+      setTransientState: (value) => { transient = value; },
+      clearTransientState: () => { transient = null; },
+      invoke: () => ({ status: "error", cancelled: true }),
+    });
+    sw.dispatchEvent({ type: "click" });
+    assert.equal(sw.classList.contains("pending"), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sw.getAttribute("aria-checked"), "false");
+    assert.equal(sw.classList.contains("pending"), false);
+    assert.equal(transient, null);
   });
 
   it("rolls the About auto-update switch back when persistence fails", async () => {
@@ -9226,6 +9304,70 @@ describe("settings renderer browser environment", () => {
     assert.equal(button.disabled, true);
     assert.equal(button.getAttribute("aria-busy"), "true");
     assert.equal(button.getAttribute("aria-label"), "Delete profile");
+    assert.equal(button.querySelector(".settings-button-label").textContent, "Delete");
+  });
+
+  it("preserves a DOM Node icon while updating label, pressed, pending, and disabled state", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const icon = document.createElement("svg");
+    const button = core.helpers.buildButton({
+      label: "Install",
+      icon,
+      disabled: true,
+      ariaPressed: false,
+    });
+    const iconWrapper = button.querySelector(".settings-button-icon");
+    const label = button.querySelector(".settings-button-label");
+
+    assert.ok(iconWrapper);
+    assert.strictEqual(iconWrapper.children[0], icon);
+    assert.equal(iconWrapper.getAttribute("aria-hidden"), "true");
+    assert.equal(label.textContent, "Install");
+    assert.equal(button.getAttribute("aria-pressed"), "false");
+    assert.equal(button.disabled, true);
+
+    core.helpers.setButtonState(button, {
+      label: "Installing",
+      pending: true,
+      ariaPressed: true,
+    });
+    assert.strictEqual(iconWrapper.children[0], icon, "state updates must retain the icon node");
+    assert.strictEqual(button.querySelector(".settings-button-icon"), iconWrapper);
+    assert.strictEqual(button.querySelector(".settings-button-label"), label);
+    assert.equal(label.textContent, "Installing");
+    assert.equal(button.getAttribute("aria-pressed"), "true");
+    assert.equal(button.getAttribute("aria-busy"), "true");
+    assert.equal(button.disabled, true);
+
+    core.helpers.setButtonState(button, { pending: false });
+    assert.equal(button.disabled, true, "clearing pending must preserve business disabled state");
+    core.helpers.setButtonState(button, { disabled: false, ariaPressed: null });
+    assert.equal(button.disabled, false);
+    assert.equal(button.getAttribute("aria-pressed"), undefined);
+    assert.strictEqual(iconWrapper.children[0], icon);
+  });
+
+  it("rejects non-node icons and state updates for unmanaged buttons", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    assert.throws(
+      () => core.helpers.buildButton({ label: "Invalid", icon: "not-a-node" }),
+      /icon must be a DOM Node/,
+    );
+    const rawButton = document.createElement("button");
+    assert.throws(
+      () => core.helpers.setButtonState(rawButton, { pending: true }),
+      /requires a button built by buildButton/,
+    );
   });
 
   it("builds Settings text inputs from one size, accessibility, state, and IME-safe Enter contract", () => {
@@ -9838,6 +9980,144 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(harness.menu.scrollTop, 0);
   });
 
+  it("converts viewport-fixed theme picker DOMRects to unzoomed CSS lengths", () => {
+    const css = fs.readFileSync(LANGUAGE_PICKER_CSS, "utf8");
+    assert.match(css, /\.language-picker\.viewport-fixed\s+\.language-picker-menu\s*\{\s*position:\s*fixed;/);
+
+    for (const scale of [0.8, 1, 1.25, 1.5, 1.6]) {
+      const tint = loadSharedLanguagePickerForTest({
+        options: ["none", "midnight", "gold", "vaporwave", "matcha", "mono"],
+        viewportPlacement: "down",
+        textZoom: scale,
+        innerHeight: 700 * scale,
+        innerWidth: 1000 * scale,
+      });
+      tint.boundary.getBoundingClientRect = () => ({
+        top: 38 * scale, bottom: 690 * scale, left: 250 * scale, right: 982 * scale,
+      });
+      tint.trigger.getBoundingClientRect = () => ({
+        top: 220 * scale, bottom: 268 * scale, left: 690 * scale, right: 910 * scale, width: 220 * scale,
+      });
+      // Chromium reports unzoomed scroll/offset heights under root CSS zoom.
+      const tintHeight = 190;
+      Object.defineProperty(tint.menu, "scrollHeight", { value: tintHeight });
+      Object.defineProperty(tint.menu, "offsetHeight", { value: tintHeight + 2 });
+      Object.defineProperty(tint.menu, "clientHeight", { value: tintHeight });
+
+      tint.trigger.dispatchEvent({ type: "click" });
+      assert.strictEqual(tint.picker.classList.contains("viewport-fixed"), true);
+      assert.strictEqual(tint.picker.classList.contains("open-up"), false);
+      assert.ok(parseInt(tint.menu.style.top, 10) >= 274);
+      assert.ok(parseInt(tint.menu.style.top, 10) + parseInt(tint.menu.style.maxHeight, 10) <= 678);
+      assert.strictEqual(tint.menu.style.left, "690px");
+      assert.strictEqual(tint.menu.style.width, "220px");
+
+      const accessory = loadSharedLanguagePickerForTest({
+        options: ["none", "cowboy", "party", "wizard", "top", "santa", "pumpkin", "halo"],
+        viewportPlacement: "up",
+        textZoom: scale,
+        innerHeight: 700 * scale,
+        innerWidth: 1000 * scale,
+      });
+      accessory.boundary.getBoundingClientRect = tint.boundary.getBoundingClientRect;
+      accessory.trigger.getBoundingClientRect = () => ({
+        top: 450 * scale, bottom: 498 * scale, left: 690 * scale, right: 910 * scale, width: 220 * scale,
+      });
+      const accessoryHeight = 240;
+      Object.defineProperty(accessory.menu, "scrollHeight", { value: accessoryHeight });
+      Object.defineProperty(accessory.menu, "offsetHeight", { value: accessoryHeight + 2 });
+      Object.defineProperty(accessory.menu, "clientHeight", { value: accessoryHeight });
+
+      accessory.trigger.dispatchEvent({ type: "click" });
+      assert.strictEqual(accessory.picker.classList.contains("open-up"), true);
+      assert.ok(parseInt(accessory.menu.style.top, 10) >= 50);
+      assert.ok(parseInt(accessory.menu.style.top, 10) + parseInt(accessory.menu.style.maxHeight, 10) <= 444);
+      assert.ok(parseInt(accessory.menu.style.maxHeight, 10) <= 240);
+    }
+  });
+
+  it("falls back from a preferred theme-menu direction only when the other side is safer", () => {
+    const preferDown = loadSharedLanguagePickerForTest({
+      viewportPlacement: "down",
+      innerHeight: 280,
+    });
+    preferDown.boundary.getBoundingClientRect = () => ({ top: 0, bottom: 280, left: 0, right: 500 });
+    preferDown.trigger.getBoundingClientRect = () => ({
+      top: 190, bottom: 238, left: 240, right: 368, width: 128,
+    });
+    Object.defineProperty(preferDown.menu, "scrollHeight", { value: 180 });
+    Object.defineProperty(preferDown.menu, "offsetHeight", { value: 182 });
+    Object.defineProperty(preferDown.menu, "clientHeight", { value: 180 });
+    preferDown.trigger.dispatchEvent({ type: "click" });
+    assert.strictEqual(preferDown.picker.classList.contains("open-up"), true);
+    assert.ok(parseInt(preferDown.menu.style.top, 10) >= 12);
+
+    const preferUp = loadSharedLanguagePickerForTest({
+      viewportPlacement: "up",
+      innerHeight: 280,
+    });
+    preferUp.boundary.getBoundingClientRect = preferDown.boundary.getBoundingClientRect;
+    preferUp.trigger.getBoundingClientRect = () => ({
+      top: 28, bottom: 76, left: 240, right: 368, width: 128,
+    });
+    Object.defineProperty(preferUp.menu, "scrollHeight", { value: 180 });
+    Object.defineProperty(preferUp.menu, "offsetHeight", { value: 182 });
+    Object.defineProperty(preferUp.menu, "clientHeight", { value: 180 });
+    preferUp.trigger.dispatchEvent({ type: "click" });
+    assert.strictEqual(preferUp.picker.classList.contains("open-up"), false);
+    assert.ok(parseInt(preferUp.menu.style.top, 10) + parseInt(preferUp.menu.style.maxHeight, 10) <= 268);
+  });
+
+  it("cleans fixed-menu geometry and scroll listeners across repeated opens and closes", () => {
+    const harness = loadSharedLanguagePickerForTest({
+      options: ["none", "cowboy", "party", "wizard", "top", "santa", "pumpkin", "halo"],
+      viewportPlacement: "up",
+    });
+    harness.boundary.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 250, right: 982 });
+    const triggerRect = {
+      top: 390, bottom: 438, left: 690, right: 910, width: 220,
+    };
+    harness.trigger.getBoundingClientRect = () => ({ ...triggerRect });
+    Object.defineProperty(harness.menu, "scrollHeight", { value: 310 });
+    Object.defineProperty(harness.menu, "offsetHeight", { value: 312 });
+    Object.defineProperty(harness.menu, "clientHeight", { value: 310 });
+    for (let index = 0; index < 5; index += 1) {
+      harness.trigger.dispatchEvent({ type: "click" });
+      assert.strictEqual(harness.picker.classList.contains("open-up"), true);
+      harness.trigger.dispatchEvent({ type: "click" });
+      harness.flushTimers();
+      assert.strictEqual(harness.picker.classList.contains("menu-mounted"), false);
+      assert.strictEqual(harness.menu.style.top, "");
+      assert.strictEqual(harness.menu.style.left, "");
+    }
+
+    harness.trigger.dispatchEvent({ type: "click" });
+    assert.strictEqual((harness.boundary.eventListeners.scroll || []).length, 1);
+    const originalTop = harness.menu.style.top;
+    triggerRect.top -= 40;
+    triggerRect.bottom -= 40;
+    harness.dispatchWindowEvent("resize");
+    harness.flushAnimationFrames();
+    assert.notStrictEqual(harness.menu.style.top, originalTop);
+    harness.boundary.scrollTop = 180;
+    assert.strictEqual(harness.getActiveElement(), harness.optionElements[0]);
+    harness.boundary.dispatchEvent({ type: "scroll", bubbles: false });
+    assert.strictEqual(harness.picker.classList.contains("open"), false);
+    assert.strictEqual(harness.getActiveElement(), harness.trigger,
+      "scroll-close restores focus when an option owned focus");
+    assert.strictEqual(harness.boundary.scrollTop, 180,
+      "focus restoration must not change the user's scroll position");
+    assert.strictEqual((harness.boundary.eventListeners.scroll || []).length, 0);
+
+    harness.trigger.dispatchEvent({ type: "click" });
+    const externalControl = new FakeElement("button");
+    harness.body.appendChild(externalControl);
+    harness.setActiveElement(externalControl);
+    harness.boundary.dispatchEvent({ type: "scroll", bubbles: false });
+    assert.strictEqual(harness.getActiveElement(), externalControl,
+      "scroll-close does not steal focus from another control");
+  });
+
   it("reveals selected and keyboard-focused options in a scrollable picker", () => {
     const harness = loadSharedLanguagePickerForTest({
       value: "halo",
@@ -10408,6 +10688,31 @@ describe("settings renderer browser environment", () => {
       "Clawd is larger than this display's work area. Reduce the pet size before choosing an activity area.",
     );
     assert.strictEqual(toasts[0].options.error, true);
+  });
+
+  it("restores the General cleanup action after a failed shared pending state", async () => {
+    const commandDeferred = createDeferred();
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot(),
+      settingsAPI: {
+        command: () => commandDeferred.promise,
+      },
+    });
+    harness.renderContent();
+
+    const button = harness.content.querySelector(".session-cleanup-reset-row button");
+    assert.ok(button);
+    assert.equal(button.classList.contains("settings-button"), true);
+    button.dispatchEvent({ type: "click", bubbles: false });
+    assert.equal(button.disabled, true);
+    assert.equal(button.classList.contains("pending"), true);
+    assert.equal(button.getAttribute("aria-busy"), "true");
+
+    commandDeferred.resolve({ status: "error", message: "reset failed" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(button.disabled, false);
+    assert.equal(button.classList.contains("pending"), false);
+    assert.equal(button.getAttribute("aria-busy"), "false");
   });
 
   it("registers the Session cleanup group with four number rows, atomic reset, and i18n keys", () => {
@@ -12532,6 +12837,8 @@ describe("settings renderer browser environment", () => {
       .find((button) => collectText(findAncestorByClass(button, "theme-card")).includes("Cloudling"));
     assert.ok(cloudlingButton);
 
+    harness.content.scrollTop = 211;
+    cloudlingButton.focus();
     cloudlingButton.dispatchEvent({ type: "click" });
     assert.deepStrictEqual(
       JSON.parse(JSON.stringify(harness.commands)),
@@ -12549,7 +12856,17 @@ describe("settings renderer browser environment", () => {
     assert.ok(harness.content.querySelector(".pet-accessory-select"));
     assert.strictEqual(harness.content.querySelector(".pet-tint-select"), null);
     assert.strictEqual(harness.content.querySelector(".theme-grid"), null);
+    assert.strictEqual(harness.content.scrollTop, 0);
+    assert.strictEqual(harness.core.state.activeTab, "theme");
+    assert.strictEqual(harness.content.querySelector(".theme-detail-back").focused, true);
     assert.strictEqual(listThemesCalls, 0, "opening details should not depend on a second theme fetch");
+
+    harness.content.querySelector(".theme-detail-back").dispatchEvent({ type: "click" });
+    const restoredCloudlingButton = harness.content.querySelectorAll(".theme-customize-btn")
+      .find((button) => collectText(findAncestorByClass(button, "theme-card")).includes("Cloudling"));
+    assert.strictEqual(harness.content.scrollTop, 211);
+    assert.strictEqual(restoredCloudlingButton.focused, true);
+    assert.strictEqual(restoredCloudlingButton.focusOptions.preventScroll, true);
   });
 
   it("does not open stale customization when the activated runtime disables it", async () => {
@@ -12720,13 +13037,20 @@ describe("settings renderer browser environment", () => {
       ],
     });
 
-    harness.content.querySelector(".theme-customize-btn").dispatchEvent({ type: "click" });
+    harness.content.scrollTop = 173;
+    const customizeButton = harness.content.querySelector(".theme-customize-btn");
+    customizeButton.focus();
+    customizeButton.dispatchEvent({ type: "click" });
     assert.ok(harness.content.querySelector(".theme-detail-back"));
     assert.ok(harness.content.querySelector(".theme-detail-hero"));
     assert.strictEqual(harness.content.querySelectorAll(".theme-customization-row").length, 4);
     assert.strictEqual(harness.content.querySelector(".theme-grid"), null);
+    assert.strictEqual(harness.content.scrollTop, 0);
+    assert.strictEqual(harness.content.querySelector(".theme-detail-back").focused, true);
+    assert.strictEqual(harness.content.querySelector(".theme-detail-back").focusOptions.preventScroll, true);
 
     const select = harness.content.querySelector(".pet-tint-select");
+    assert.strictEqual(select.classList.contains("viewport-fixed"), true);
     assert.strictEqual(getSelectedPickerValue(select), "matcha");
     assert.deepStrictEqual(
       select.querySelectorAll(".language-picker-option").map((option) => option.textContent),
@@ -12752,6 +13076,7 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(select.classList.contains("pending"), false);
 
     const accessorySelect = harness.content.querySelector(".pet-accessory-select");
+    assert.strictEqual(accessorySelect.classList.contains("viewport-fixed"), true);
     assert.strictEqual(getSelectedPickerValue(accessorySelect), "wizard-hat");
     assert.deepStrictEqual(
       accessorySelect.querySelectorAll(".language-picker-option").map((option) => option.textContent),
@@ -12820,6 +13145,10 @@ describe("settings renderer browser environment", () => {
     harness.content.querySelector(".theme-detail-back").dispatchEvent({ type: "click" });
     assert.ok(harness.content.querySelector(".theme-grid"));
     assert.strictEqual(harness.content.querySelector(".theme-detail-hero"), null);
+    assert.strictEqual(harness.content.scrollTop, 173);
+    const restoredCustomizeButton = harness.content.querySelector(".theme-customize-btn");
+    assert.strictEqual(restoredCustomizeButton.focused, true);
+    assert.strictEqual(restoredCustomizeButton.focusOptions.preventScroll, true);
   });
 
   it("patches theme customization broadcasts in place without replacing the detail view", () => {
@@ -13048,8 +13377,11 @@ describe("settings renderer browser environment", () => {
     input.value = "sk-renderer-secret";
     connectPrimary[0].dispatchEvent({ type: "click", stopPropagation() {} });
     assert.strictEqual(input.value, "", "the DOM must drop the key immediately after submission");
+    assert.strictEqual(connectPrimary[0].classList.contains("pending"), true);
+    assert.strictEqual(connectPrimary[0].getAttribute("aria-busy"), "true");
     await flush();
     assert.strictEqual(connectedKey, "sk-renderer-secret");
+    assert.strictEqual(connectPrimary[0].classList.contains("pending"), false);
     assert.strictEqual(
       genericCommands.some((call) => JSON.stringify(call).includes("sk-renderer-secret")),
       false,
@@ -13068,8 +13400,10 @@ describe("settings renderer browser environment", () => {
     // The password field only appears after opting into the replace flow.
     const replaceToggle = primaryRow.querySelectorAll("button")
       .find((button) => button.classList.contains("quiet"));
+    assert.strictEqual(replaceToggle.getAttribute("aria-pressed"), "false");
     replaceToggle.dispatchEvent({ type: "click", stopPropagation() {} });
     assert.strictEqual(replacePanel.hidden, false);
+    assert.strictEqual(replaceToggle.getAttribute("aria-pressed"), "true");
     const replaceInput = replacePanel.querySelector(".kimi-quota-key-input");
     assert.ok(replaceInput);
     replaceInput.value = "sk-replacement-secret";
@@ -13077,6 +13411,17 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(replaceInput.value, "", "Enter clears replacement credentials immediately");
     await flush();
     assert.strictEqual(connectedKey, "sk-replacement-secret", "Enter uses the dedicated key IPC");
+
+    // The replacement submission closes the panel; reopening it exercises the
+    // explicit cancel path independently.
+    replaceToggle.dispatchEvent({ type: "click", stopPropagation() {} });
+    assert.strictEqual(replacePanel.hidden, false);
+    assert.strictEqual(replaceToggle.getAttribute("aria-pressed"), "true");
+    const replaceCancel = replacePanel.querySelectorAll("button")
+      .find((button) => button.textContent === "kimiQuotaCancel");
+    replaceCancel.dispatchEvent({ type: "click", stopPropagation() {} });
+    assert.strictEqual(replacePanel.hidden, true);
+    assert.strictEqual(replaceToggle.getAttribute("aria-pressed"), "false");
 
     // Destructive / low-frequency actions live in the separated danger zone,
     // each with its own consequence note — never beside Refresh.
@@ -13387,7 +13732,7 @@ describe("settings renderer browser environment", () => {
     const subtabs = harness.content.querySelector(".agents-subtabs");
     assert.ok(subtabs, "the Agents tab should render a subtab switcher");
     const pills = subtabs.querySelectorAll(".segmented button");
-    assert.deepStrictEqual(pills.map((pill) => pill.textContent), ["Connected", "Discover and add"]);
+    assert.deepStrictEqual(pills.map((pill) => pill._textContent), ["Connected", "Discover and add"]);
     assert.strictEqual(pills[0].classList.contains("active"), true);
     assert.strictEqual(pills[0].getAttribute("aria-selected"), "true");
     // The badge counts what can be acted on now, not the whole catalog.
@@ -14135,6 +14480,54 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(toasts.length, 1);
     assert.match(toasts[0].message, /Qwen Code/);
     assert.notStrictEqual(toasts[0].options.error, true);
+  });
+
+  it("restores an Agent integration action after a failed shared pending state", async () => {
+    const commandDeferred = createDeferred();
+    const harness = loadAgentsTabForTest({
+      snapshot: {
+        agents: { "qwen-code": { integrationInstalled: false, enabled: false } },
+        customApplications: [],
+        customToolDiscoveryPaths: [],
+        dismissedAgentCleanupHints: {},
+        dismissedAgentInstallHints: {},
+      },
+      agentMetadata: [{
+        id: "qwen-code",
+        name: "Qwen Code",
+        eventSource: "hook",
+        capabilities: {},
+      }],
+      settingsAPI: {
+        command: () => commandDeferred.promise,
+      },
+    });
+    harness.core.runtime.agentInstallationHints = {
+      checkedAt: 1,
+      agents: [],
+      customAgents: [],
+      customTools: [],
+      skippedAgentIds: [],
+    };
+    harness.core.runtime.agentInstallationHintsFetched = true;
+    harness.core.ops.requestRender({ content: true });
+
+    const button = harness.content.querySelector(".agent-integration-action");
+    assert.ok(button);
+    assert.equal(button.querySelector(".settings-button-label").textContent, "Install");
+    button.dispatchEvent({ type: "click", bubbles: false });
+    assert.equal(button.disabled, true);
+    assert.equal(button.classList.contains("pending"), true);
+    assert.equal(button.getAttribute("aria-busy"), "true");
+
+    commandDeferred.resolve({ status: "error", message: "install failed" });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(button.disabled, false);
+    assert.equal(button.classList.contains("pending"), false);
+    assert.equal(button.getAttribute("aria-busy"), "false");
+    assert.equal(button.querySelector(".settings-button-label").textContent, "Install");
   });
 
   it("shows a non-error toast when a manual agent install is skipped", async () => {
