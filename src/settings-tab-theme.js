@@ -645,11 +645,12 @@
     text.className = "row-text";
     const label = document.createElement("span");
     label.className = "row-label";
-    label.id = `settings-holiday-accessory-${theme.id}-label`;
+    // Only one theme detail is mounted; folder names may contain IDREF whitespace.
+    label.id = "settings-holiday-accessory-label";
     label.textContent = t("rowHolidayAccessory");
     const desc = document.createElement("span");
     desc.className = "row-desc";
-    desc.id = `settings-holiday-accessory-${theme.id}-description`;
+    desc.id = "settings-holiday-accessory-description";
     desc.textContent = t("themeHolidayAccessoryDesc");
     text.appendChild(label);
     text.appendChild(desc);

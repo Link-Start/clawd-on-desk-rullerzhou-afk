@@ -13021,6 +13021,35 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(restoredCustomizeButton.focusOptions.preventScroll, true);
   });
 
+  it("resolves holiday switch labels for theme directory names containing spaces", () => {
+    for (const themeId of ["clawd", "pixel-cat", "pixel cat"]) {
+      const harness = loadThemeTabForTest({
+        themes: [{
+          id: themeId,
+          name: "Test pet",
+          builtin: themeId === "clawd",
+          active: true,
+          capabilities: { accessories: true },
+        }],
+      });
+      harness.content.querySelector(".theme-customize-btn").dispatchEvent({ type: "click" });
+      const row = harness.content.querySelector(".holiday-accessory-row");
+      const sw = row.querySelector(".holiday-accessory-switch");
+      for (const [attribute, labelKey] of [
+        ["aria-labelledby", "rowHolidayAccessory"],
+        ["aria-describedby", "themeHolidayAccessoryDesc"],
+      ]) {
+        const refs = (sw.getAttribute(attribute) || "").trim().split(/[\t\n\f\r ]+/);
+        const text = refs.map((ref) => {
+          const targets = row.querySelectorAll("span").filter((element) => element.id === ref);
+          assert.strictEqual(targets.length, 1, `${themeId}: ${attribute} must resolve each ID reference`);
+          return targets[0].textContent;
+        }).join(" ");
+        assert.strictEqual(text, harness.core.helpers.t(labelKey), `${themeId}: ${attribute}`);
+      }
+    }
+  });
+
   it("patches theme customization broadcasts in place without replacing the detail view", () => {
     const harness = loadThemeTabForTest({
       themes: [
