@@ -1193,11 +1193,18 @@ function registerHooks(options = {}) {
   const platform = options.platform || process.platform;
   const wslDistro = resolveInstallWslDistro(options);
 
-  // Read existing settings
+  // Read existing settings. readJsonFile strips a single leading UTF-8 BOM
+  // (#657) so a BOM-prefixed canonical config can be merged instead of
+  // failing to parse. A valid-JSON non-object root is rejected here (thrown
+  // inside the try so the existing catch wraps it as a read failure) rather
+  // than being treated as an empty config and overwritten.
   let settings = {};
   let preExisting = false;
   try {
-    settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+    settings = readJsonFile(settingsPath);
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+      throw new Error("settings.json root must be a JSON object");
+    }
     preExisting = true;
   } catch (err) {
     if (err.code !== "ENOENT") {
@@ -1335,17 +1342,18 @@ function registerHooks(options = {}) {
       skipped++;
     }
 
-    // Remove all legacy auto-start.sh entries if present
-    const beforeLen = settings.hooks.SessionStart.length;
-    settings.hooks.SessionStart = settings.hooks.SessionStart.filter((entry) => {
-      if (!entry || typeof entry !== "object") return true;
-      if (typeof entry.command === "string" && entry.command.includes(LEGACY_AUTO_START_MARKER)) return false;
-      if (Array.isArray(entry.hooks)) {
-        if (entry.hooks.some((h) => h && typeof h.command === "string" && h.command.includes(LEGACY_AUTO_START_MARKER))) return false;
-      }
-      return true;
-    });
-    if (settings.hooks.SessionStart.length < beforeLen) changed = true;
+    // Remove all legacy auto-start.sh entries if present. Match per sub-hook so
+    // a mixed wrapper keeps its third-party siblings (unlike the old
+    // whole-entry filter), and count each removal.
+    const legacyAutoStartResult = removeMatchingCommandHooks(
+      settings.hooks.SessionStart,
+      (command) => command.includes(LEGACY_AUTO_START_MARKER)
+    );
+    if (legacyAutoStartResult.changed) {
+      settings.hooks.SessionStart = legacyAutoStartResult.entries;
+      removed += legacyAutoStartResult.removed;
+      changed = true;
+    }
   }
 
   // Clean up stale command hooks for HTTP-only events (e.g. PermissionRequest).
@@ -1523,7 +1531,10 @@ async function registerHooksAsync(options = {}) {
   let settings = {};
   let preExisting = false;
   try {
-    settings = JSON.parse(await fs.promises.readFile(settingsPath, "utf-8"));
+    settings = await readJsonFileAsync(settingsPath);
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+      throw new Error("settings.json root must be a JSON object");
+    }
     preExisting = true;
   } catch (err) {
     if (err.code !== "ENOENT") {
@@ -1645,16 +1656,18 @@ async function registerHooksAsync(options = {}) {
       skipped++;
     }
 
-    const beforeLen = settings.hooks.SessionStart.length;
-    settings.hooks.SessionStart = settings.hooks.SessionStart.filter((entry) => {
-      if (!entry || typeof entry !== "object") return true;
-      if (typeof entry.command === "string" && entry.command.includes(LEGACY_AUTO_START_MARKER)) return false;
-      if (Array.isArray(entry.hooks)) {
-        if (entry.hooks.some((h) => h && typeof h.command === "string" && h.command.includes(LEGACY_AUTO_START_MARKER))) return false;
-      }
-      return true;
-    });
-    if (settings.hooks.SessionStart.length < beforeLen) changed = true;
+    // Remove all legacy auto-start.sh entries if present. Match per sub-hook so
+    // a mixed wrapper keeps its third-party siblings (unlike the old
+    // whole-entry filter), and count each removal.
+    const legacyAutoStartResult = removeMatchingCommandHooks(
+      settings.hooks.SessionStart,
+      (command) => command.includes(LEGACY_AUTO_START_MARKER)
+    );
+    if (legacyAutoStartResult.changed) {
+      settings.hooks.SessionStart = legacyAutoStartResult.entries;
+      removed += legacyAutoStartResult.removed;
+      changed = true;
+    }
   }
 
   for (const event of Object.keys(HTTP_HOOKS)) {
@@ -1877,35 +1890,25 @@ function unregisterAutoStart(options = {}) {
   const writePath = resolveWritePath(settingsPath);
   let settings;
   try {
-    settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+    settings = readJsonFile(settingsPath);
   } catch {
     return false;
   }
 
-  const arr = settings.hooks && settings.hooks.SessionStart;
+  const arr = settings && settings.hooks && settings.hooks.SessionStart;
   if (!Array.isArray(arr)) return false;
 
-  const before = arr.length;
-  settings.hooks.SessionStart = arr.filter((entry) => {
-    if (!entry || typeof entry !== "object") return true;
-    // Remove auto-start.js entries
-    if (typeof entry.command === "string" && entry.command.includes(AUTO_START_MARKER)) return false;
-    if (Array.isArray(entry.hooks)) {
-      if (entry.hooks.some((h) => h && typeof h.command === "string" && h.command.includes(AUTO_START_MARKER))) return false;
-    }
-    // Remove legacy auto-start.sh entries
-    if (typeof entry.command === "string" && entry.command.includes(LEGACY_AUTO_START_MARKER)) return false;
-    if (Array.isArray(entry.hooks)) {
-      if (entry.hooks.some((h) => h && typeof h.command === "string" && h.command.includes(LEGACY_AUTO_START_MARKER))) return false;
-    }
-    return true;
-  });
+  // Remove only the managed sub-hooks. A whole-entry filter would drop a mixed
+  // wrapper's third-party siblings along with the managed command.
+  const result = removeMatchingCommandHooks(
+    arr,
+    (command) => command.includes(AUTO_START_MARKER) || command.includes(LEGACY_AUTO_START_MARKER)
+  );
+  if (!result.changed) return false;
 
-  if (settings.hooks.SessionStart.length < before) {
-    writeJsonAtomic(writePath, settings);
-    return true;
-  }
-  return false;
+  settings.hooks.SessionStart = result.entries;
+  writeJsonAtomic(writePath, settings);
+  return true;
 }
 
 /**
@@ -1915,7 +1918,7 @@ function unregisterAutoStart(options = {}) {
 function isAutoStartRegistered(options = {}) {
   const settingsPath = resolveClaudeSettingsPath(options);
   try {
-    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+    const settings = readJsonFile(settingsPath);
     const arr = settings.hooks && settings.hooks.SessionStart;
     if (!Array.isArray(arr)) return false;
     return arr.some((entry) => {
