@@ -440,7 +440,7 @@
           if (!result || result.status !== "ok" || result.noop) {
             clearTransientState(seq);
             control.setState({ checked: getCommittedVisual(), pending: false });
-            if (result && result.noop) return;
+            if (result && (result.noop || result.cancelled)) return;
             const msg = (result && result.message) || "unknown error";
             showToast(t("toastSaveFailed") + msg, { error: true });
             return;

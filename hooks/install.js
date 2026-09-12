@@ -28,6 +28,9 @@ const {
   writeJsonAtomicAsync,
   writeJsonAtomicWithBackup,
   writeJsonAtomicWithBackupAsync,
+  writeTextAtomic,
+  createBackup,
+  pruneOldBackups,
   asarUnpackedPath,
   buildPortableStatuslineCommand,
   classifyManagedClaudeStateHookCommand,
@@ -1931,6 +1934,14 @@ function isAutoStartRegistered(options = {}) {
 const STATUSLINE_MARKER = "claude-statusline.js";
 const STATUSLINE_CHAIN_FLAG = "--chain";
 
+function writeLocalStatuslineSettings(file, settings, options) {
+  const mode = fs.statSync(file).mode & 0o777;
+  const backupPath = createBackup(file, options);
+  writeTextAtomic(file, JSON.stringify(settings, null, 2), { encoding: "utf8", mode });
+  if (backupPath) pruneOldBackups(file, options, backupPath);
+  return backupPath;
+}
+
 function hasClaudeSettingsDir(homeDir, options = {}) {
   return fs.existsSync(resolveClaudeHome({ ...options, homeDir }));
 }
@@ -1960,11 +1971,16 @@ function readChainSidecarStatusLine(sidecarPath) {
 
 // Claude Code's statusLine setting is a single slot, not an event-keyed map
 // like hooks - only one script can render the visible status line at a
-// time. We only ever take that slot when it is empty or already ours, and
-// unregister only clears it when the command still carries our marker. A
-// user's own (or a third-party) statusline script is never touched. Mirrors
-// hooks/antigravity-install.js registerAntigravityStatusline.
+// time. Default registration only takes an empty/owned slot. Explicit local
+// coexistence preserves the original before wrapping it; remote --chain keeps
+// its separate historical contract.
 function registerClaudeStatusline(options = {}) {
+  // Lazy load so a partial manual copy can still run the CLI dependency
+  // preflight and report every missing runtime file before any mutation.
+  const {
+    LOCAL_CHAIN_FLAG, LOCAL_CHAIN_FILE, statuslineFingerprint,
+    createLocalChainRecord, requireOwnedLocalChain, resolveLocalChainShell,
+  } = require("./claude-statusline-local-chain");
   const homeDir = options.homeDir || os.homedir();
   const settingsPath = resolveClaudeSettingsPath({ ...options, homeDir });
   const writePath = resolveWritePath(settingsPath);
@@ -1986,9 +2002,64 @@ function registerClaudeStatusline(options = {}) {
   const existing = settings.statusLine && typeof settings.statusLine === "object" ? settings.statusLine : null;
   const existingIsOurs = !!(existing && typeof existing.command === "string" && existing.command.includes(STATUSLINE_MARKER));
 
-  // Chain opt-in is remote-only in v1: the remote deploy path guarantees a
-  // POSIX shell, while a local Windows chain would need a cross-shell
-  // runner - the exact swamp buildPortableStatuslineCommand crawled out of.
+  if (options.expectedStatuslineFingerprint !== undefined
+    && statuslineFingerprint(existing) !== options.expectedStatuslineFingerprint) {
+    throw new Error("Claude statusline changed while confirmation was open; please try again");
+  }
+  const localSidecar = options.localChainSidecarPath
+    || path.join(options.settingsPath ? path.join(path.dirname(settingsPath), "hooks")
+      : resolveClaudeHooksDir({ ...options, homeDir }), LOCAL_CHAIN_FILE);
+  const localChainRequested = options.remote !== true && options.chainExisting === true;
+  if (existingIsOurs && existing.command.includes(` ${LOCAL_CHAIN_FLAG} `)) {
+    // Local consent cannot authorize a remote routing/mode migration. Refuse
+    // before refreshing either file; the two recovery records are independent.
+    if (options.remote === true) {
+      throw new Error("Claude statusline uses local coexistence; turn off local Claude usage collection on this account before remote deployment. "
+        + `Statusline and local recovery record kept unchanged: ${localSidecar}`);
+    }
+    const record = requireOwnedLocalChain(localSidecar, existing);
+    const platform = options.platform || process.platform;
+    if (record.platform !== platform) throw new Error("Statusline recovery record belongs to a different platform");
+    const script = asarUnpackedPath(path.resolve(__dirname, "claude-statusline.js").replace(/\\/g, "/"));
+    const nodeBin = options.nodeBin !== undefined ? options.nodeBin : resolveNodeBin();
+    const command = `${buildPortableStatuslineCommand(nodeBin || "node", script, { platform })} ${LOCAL_CHAIN_FLAG} ${record.id}`;
+    if (command === existing.command) {
+      return { installed: true, changed: false, skippedExisting: false, chained: true, localChained: true, settingsPath };
+    }
+    // Keep both exact owned commands during a path refresh so a failed/crashed
+    // settings write can still be restored. The original is never rewritten.
+    writeTextAtomic(localSidecar, JSON.stringify({ ...record, managedCommand: command, previousManagedCommand: existing.command }),
+      { encoding: "utf8", mode: 0o600 });
+    const current = readJsonFile(settingsPath);
+    if (statuslineFingerprint(current.statusLine || null) !== statuslineFingerprint(existing)) {
+      throw new Error("Claude statusline changed during refresh; recovery record was retained");
+    }
+    current.statusLine = { ...existing, command };
+    writeLocalStatuslineSettings(writePath, current, options);
+    return { installed: true, changed: true, skippedExisting: false, chained: true, localChained: true, settingsPath };
+  }
+  if (localChainRequested && existing && !existingIsOurs) {
+    if (existing.type !== "command" || typeof existing.command !== "string" || !existing.command.trim()) {
+      throw new Error("The existing Claude statusline is not a supported command; kept unchanged");
+    }
+    const platform = options.platform || process.platform;
+    resolveLocalChainShell({ platform, env: options.env, exists: options.shellExists });
+    const script = asarUnpackedPath(path.resolve(__dirname, "claude-statusline.js").replace(/\\/g, "/"));
+    const nodeBin = options.nodeBin !== undefined ? options.nodeBin : resolveNodeBin();
+    const portable = buildPortableStatuslineCommand(nodeBin || "node", script, { platform });
+    const record = createLocalChainRecord(localSidecar, existing, portable, platform);
+    // Re-read after saving recovery evidence, preserving unrelated changes
+    // made by another application while we prepared this registration.
+    const current = readJsonFile(settingsPath);
+    if (statuslineFingerprint(current.statusLine || null) !== statuslineFingerprint(existing)) {
+      throw new Error("Claude statusline changed during registration; recovery record was retained");
+    }
+    current.statusLine = { ...existing, command: record.managedCommand };
+    writeLocalStatuslineSettings(writePath, current, options);
+    return { installed: true, changed: true, skippedExisting: false, chained: true, localChained: true, settingsPath };
+  }
+
+  // Legacy remote chain is independent from the consent-bound local record.
   const chainRequested = options.remote === true && options.chainExisting === true;
   const chainExplicitlyDisabled = options.remote === true && options.chainExisting === false;
   const sidecarPath = options.chainSidecarPath
@@ -1996,7 +2067,10 @@ function registerClaudeStatusline(options = {}) {
 
   if (existing && !existingIsOurs && !chainRequested) {
     if (!options.silent) console.log(`Clawd: existing Claude Code statusline detected at ${settingsPath} - leaving it in place`);
-    return { installed: true, changed: false, skippedExisting: true, settingsPath };
+    return {
+      installed: true, changed: false, skippedExisting: true, settingsPath,
+      statuslineFingerprint: statuslineFingerprint(existing),
+    };
   }
 
   let chainActive = false;
@@ -2075,6 +2149,9 @@ function registerClaudeStatusline(options = {}) {
 }
 
 function unregisterClaudeStatusline(options = {}) {
+  const {
+    LOCAL_CHAIN_FLAG, LOCAL_CHAIN_FILE, statuslineFingerprint, requireOwnedLocalChain,
+  } = require("./claude-statusline-local-chain");
   const homeDir = options.homeDir || os.homedir();
   const settingsPath = resolveClaudeSettingsPath({ ...options, homeDir });
   const writePath = resolveWritePath(settingsPath);
@@ -2091,6 +2168,27 @@ function unregisterClaudeStatusline(options = {}) {
 
   if (!existingIsOurs) {
     return { installed: !!existing, removed: 0, changed: false, settingsPath };
+  }
+
+  if (existing.command.includes(` ${LOCAL_CHAIN_FLAG} `)) {
+    const localSidecar = options.localChainSidecarPath
+      || path.join(options.settingsPath ? path.join(path.dirname(settingsPath), "hooks")
+        : resolveClaudeHooksDir({ ...options, homeDir }), LOCAL_CHAIN_FILE);
+    const record = requireOwnedLocalChain(localSidecar, existing);
+    const current = readJsonFile(settingsPath);
+    if (statuslineFingerprint(current.statusLine || null) !== statuslineFingerprint(existing)) {
+      throw new Error("Claude statusline changed during restoration; recovery record was retained");
+    }
+    current.statusLine = record.statusLine;
+    const backupPath = writeLocalStatuslineSettings(writePath, current, options);
+    // Never delete recovery evidence before the original settings are saved.
+    let recoveryRecordRetained = false;
+    try {
+      if (statuslineFingerprint(readJsonFile(localSidecar)) !== statuslineFingerprint(record)) {
+        recoveryRecordRetained = true;
+      } else fs.unlinkSync(localSidecar);
+    } catch { recoveryRecordRetained = true; }
+    return { installed: true, removed: 1, changed: true, restoredChained: true, recoveryRecordRetained, settingsPath, backupPath };
   }
 
   // A chained slot restores the user's original statusLine object from the

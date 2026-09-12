@@ -4075,6 +4075,30 @@ describe("settings renderer browser environment", () => {
     assert.equal(autoUpdateSwitch.getAttribute("aria-checked"), "true");
   });
 
+  it("rolls a cancelled consent switch back without a failure toast", async () => {
+    const body = new FakeElement("body");
+    const core = loadSettingsCoreForTest({}, { document: {
+      body, getElementById: () => null,
+      createElement: () => { throw new Error("cancellation must not create a toast"); },
+    } });
+    const sw = new FakeElement("button");
+    let transient = null;
+    const control = core.helpers.buildSwitch({ element: sw, ariaLabel: "Collect Claude usage" });
+    core.helpers.attachOptimisticSwitch(control, {
+      getCommittedVisual: () => false,
+      getTransientState: () => transient,
+      setTransientState: (value) => { transient = value; },
+      clearTransientState: () => { transient = null; },
+      invoke: () => ({ status: "error", cancelled: true }),
+    });
+    sw.dispatchEvent({ type: "click" });
+    assert.equal(sw.classList.contains("pending"), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sw.getAttribute("aria-checked"), "false");
+    assert.equal(sw.classList.contains("pending"), false);
+    assert.equal(transient, null);
+  });
+
   it("rolls the About auto-update switch back when persistence fails", async () => {
     const harness = loadAboutTabForTest({
       snapshot: { autoUpdateCheck: true },
@@ -11270,6 +11294,55 @@ describe("settings renderer browser environment", () => {
       { key: "quotaRingHiddenProviders", value: [] },
     ]);
   });
+
+  for (const scenario of [
+    { name: "a resolved save error", reply: () => ({ status: "error", message: "disk full" }), toast: true },
+    { name: "an empty result", reply: () => undefined, toast: true },
+    { name: "a no-op without a broadcast", reply: () => ({ status: "ok", noop: true }), toast: false },
+    { name: "a rejected IPC request", reply: () => Promise.reject(new Error("IPC unavailable")), toast: true },
+    { name: "a synchronous IPC error", reply: () => { throw new Error("IPC unavailable"); }, toast: true },
+  ]) {
+    it(`recovers a quota provider switch after ${scenario.name}`, async () => {
+      const calls = [];
+      const toasts = [];
+      const harness = loadGeneralTabForTest({
+        snapshot: makeGeneralSnapshot({ quotaRingHiddenProviders: ["codexQuota"] }),
+        settingsAPI: {
+          getQuotaRingProviders: async () => ([
+            { key: "codexQuota", label: "Codex" },
+            { key: "kimiQuota", label: "Kimi" },
+          ]),
+          update: (key, value) => {
+            calls.push({ key, value });
+            return calls.length === 1 ? scenario.reply() : Promise.resolve({ status: "ok" });
+          },
+        },
+      });
+      harness.core.ops.showToast = (message) => toasts.push(message);
+      harness.renderContent();
+      await new Promise((resolve) => setImmediate(resolve));
+      const sw = harness.content.querySelectorAll(".quota-ring-provider-row")[1].querySelector(".switch");
+
+      sw.dispatchEvent({ type: "click" });
+      assert.equal(sw.getAttribute("aria-checked"), "false");
+      assert.equal(sw.getAttribute("aria-busy"), "true");
+      sw.dispatchEvent({ type: "click" });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.equal(calls.length, 1, "pending must suppress duplicate activation");
+      assert.equal(sw.getAttribute("aria-checked"), "true", "unsaved visibility must roll back");
+      assert.equal(sw.getAttribute("aria-busy"), "false", "settled requests must release pending");
+      assert.equal(toasts.length, scenario.toast ? 1 : 0);
+      assert.deepStrictEqual(harness.core.state.snapshot.quotaRingHiddenProviders, ["codexQuota"]);
+
+      sw.dispatchEvent({ type: "click" });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(calls.length, 2, "the same mounted control must allow retry");
+      assert.deepStrictEqual(calls[1], { key: "quotaRingHiddenProviders", value: ["codexQuota", "kimiQuota"] });
+      assert.equal(sw.getAttribute("aria-checked"), "false");
+      assert.equal(sw.getAttribute("aria-busy"), "false", "success must not depend on receiving a broadcast");
+    });
+  }
 
   it("offers no provider list when only one provider reports", async () => {
     // One connected provider cannot crowd anything out, so the control would be

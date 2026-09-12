@@ -951,9 +951,8 @@
       control.className = "row-control";
       // ON means "shown", so the switch reads the way the label does. The pref
       // stores the inverse (what is HIDDEN) — see prefs.js for why.
-      let shown = !hiddenList().includes(provider.key);
       const switchControl = helpers.buildSwitch({
-        checked: shown,
+        checked: !hiddenList().includes(provider.key),
         ariaLabel: provider.label || provider.key,
       });
       control.appendChild(switchControl.element);
@@ -962,16 +961,26 @@
       switchControl.setOnToggle(({ nextChecked: next }) => {
         // Optimistic: the broadcast that confirms this rebuilds the tab, and
         // leaving the switch stale until then reads as an ignored click.
-        shown = next;
-        switchControl.setState({ checked: shown, pending: true });
+        switchControl.setState({ checked: next, pending: true });
         const hidden = hiddenList().filter((key) => key !== provider.key);
         if (!next) hidden.push(provider.key);
-        return Promise.resolve(
-          window.settingsAPI.update("quotaRingHiddenProviders", hidden)
-        ).catch(() => {
-          shown = !next;
-          switchControl.setState({ checked: shown, pending: false });
-        });
+        return Promise.resolve()
+          .then(() => window.settingsAPI.update("quotaRingHiddenProviders", hidden))
+          .then((result) => {
+            if (!result || result.status !== "ok" || result.noop) {
+              switchControl.setState({ checked: !hiddenList().includes(provider.key) });
+              if (result && result.noop) return;
+              ops.showToast(t("toastSaveFailed") + ((result && result.message) || "unknown error"), { error: true });
+            }
+          })
+          .catch((err) => {
+            switchControl.setState({ checked: !hiddenList().includes(provider.key) });
+            ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+          })
+          .finally(() => {
+            // A rejected/no-op save has no snapshot broadcast to rebuild this row.
+            switchControl.setState({ pending: false });
+          });
       });
       return row;
     }
