@@ -11,6 +11,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { loadSessionHistory } = require("../hooks/session-history");
+const { normalizeClaudeSessionId } = require("../hooks/claude-session-id");
 
 const DEFAULT_HISTORY_LIMIT = 25;
 
@@ -27,7 +28,8 @@ function getClaudeProjectsDir(options = {}) {
   if (typeof options.claudeProjectsDir === "string" && options.claudeProjectsDir) {
     return path.resolve(options.claudeProjectsDir);
   }
-  return path.join(os.homedir(), ".claude", "projects");
+  const configDir = process.env.CLAUDE_CONFIG_DIR;
+  return path.join(configDir || path.join(os.homedir(), ".claude"), "projects");
 }
 
 /**
@@ -42,6 +44,9 @@ function getClaudeProjectsDir(options = {}) {
  */
 function probeTranscript(agentId, sessionId, cwd, options = {}) {
   if (agentId !== "claude-code") return null;
+  try {
+    if (!sessionId || normalizeClaudeSessionId(sessionId) !== sessionId) return null;
+  } catch { return null; }
   const dirName = encodeClaudeProjectDir(cwd);
   if (!dirName) return null;
   const projectDir = path.join(getClaudeProjectsDir(options), dirName);
@@ -55,8 +60,8 @@ function probeTranscript(agentId, sessionId, cwd, options = {}) {
     const transcript = path.join(projectDir, `${sessionId}.jsonl`);
     const stat = fs.lstatSync(transcript);
     return stat.isFile() && !stat.isSymbolicLink() && stat.size > 0;
-  } catch {
-    return false;
+  } catch (err) {
+    return err && err.code === "ENOENT" ? false : null;
   }
 }
 
@@ -109,13 +114,16 @@ function loadResumableSessionHistory(options = {}) {
  * session is relaunched in.
  */
 function resolveResumeTarget(agentId, sessionId, options = {}) {
-  if (typeof agentId !== "string" || typeof sessionId !== "string") return null;
+  if (agentId !== "claude-code" || typeof sessionId !== "string") return null;
+  try {
+    if (!sessionId || normalizeClaudeSessionId(sessionId) !== sessionId) return null;
+  } catch { return null; }
   const records = loadSessionHistory({ ...options, limit: undefined });
   const match = records.find(
     (record) => record.agentId === agentId && record.sessionId === sessionId,
   );
   if (!match) return null;
-  if (!match.cwd) return null;
+  if (!match.cwd || !path.isAbsolute(match.cwd)) return null;
   try {
     const stat = fs.lstatSync(match.cwd);
     if (!stat.isDirectory()) return null;

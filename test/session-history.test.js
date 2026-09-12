@@ -5,6 +5,8 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { Worker } = require("node:worker_threads");
+const { once } = require("node:events");
 
 const {
   HISTORY_FILE_PREFIX,
@@ -21,6 +23,8 @@ const {
 const {
   updateRecoveryLeaseFromStateBody,
   loadActiveRecoveryLeases,
+  acquireLeaseLock,
+  releaseLeaseLock,
 } = require("../hooks/session-recovery-lease");
 
 describe("durable session history", () => {
@@ -71,6 +75,79 @@ describe("durable session history", () => {
   }
 
   describe("recording", () => {
+    it("rejects path-bearing session IDs and never persists prompt-derived titles", () => {
+      for (const session_id of ["../private", "a/b", "a\\b"]) {
+        assert.equal(recordSessionHistoryFromStateBody(body({ session_id }), writeOpts(T0)).written, false);
+      }
+      assert.equal(fs.readdirSync(historyDir).length, 0);
+      recordSessionHistoryFromStateBody(body({ session_title: "secret prompt", _sessionTitleFromPrompt: true }), writeOpts(T0));
+      assert.equal(readOne().title, null);
+    });
+
+    it("makes a terminal event win same-millisecond late active traffic", () => {
+      recordSessionHistoryFromStateBody(body(), writeOpts(T0));
+      recordSessionHistoryFromStateBody(body({ event: "SessionEnd", state: "sleeping" }), writeOpts(T0 + 1000));
+      const stale = recordSessionHistoryFromStateBody(body({ state: "working" }), writeOpts(T0 + 1000));
+      assert.equal(stale.reason, "older-event");
+      assert.equal(readOne().endedAt, T0 + 1000);
+      recordSessionHistoryFromStateBody(body({ state: "working" }), writeOpts(T0 + 1001));
+      assert.equal(readOne().endedAt, null, "later real activity may resume the conversation");
+    });
+
+    it("serializes overlapping writers so an older read cannot erase SessionEnd", { timeout: 10_000 }, async (t) => {
+      recordSessionHistoryFromStateBody(body(), writeOpts(T0));
+      const signal = new SharedArrayBuffer(4);
+      const workerCode = `
+        const { parentPort, workerData: d } = require('node:worker_threads');
+        const fs = require('node:fs');
+        const history = require(d.module);
+        const file = history.getHistoryFilePath('claude-code', 'session-alpha', d.opts);
+        const read = fs.readFileSync;
+        let paused = false;
+        fs.readFileSync = function(p, ...args) {
+          const value = read.call(this, p, ...args);
+          if (d.pause && p === file && !paused) {
+            paused = true;
+            parentPort.postMessage('read');
+            Atomics.wait(new Int32Array(d.signal), 0, 0, 5000);
+          }
+          return value;
+        };
+        const rename = fs.renameSync;
+        let reported = false;
+        fs.renameSync = function(from, to) {
+          try { return rename.call(this, from, to); }
+          catch (err) {
+            if (!d.pause && to === file + '.lock' && !reported) {
+              reported = true;
+              parentPort.postMessage('contending');
+            }
+            throw err;
+          }
+        };
+        const result = history.recordSessionHistoryFromStateBody(d.body, d.opts);
+        parentPort.postMessage(result);
+      `;
+      const makeWorker = (pause) => new Worker(workerCode, { eval: true, workerData: {
+        module: require.resolve("../hooks/session-history"), signal, pause,
+        opts: { historyDir, eventAt: T0 + (pause ? 1000 : 2000) },
+        body: body(pause ? { state: "working" } : { event: "SessionEnd", state: "sleeping" }),
+      } });
+      const older = makeWorker(true);
+      t.after(() => older.terminate());
+      assert.equal((await once(older, "message"))[0], "read");
+      const newer = makeWorker(false);
+      t.after(() => newer.terminate());
+      assert.equal((await once(newer, "message"))[0], "contending");
+      const olderDone = once(older, "message");
+      const newerDone = once(newer, "message");
+      Atomics.store(new Int32Array(signal), 0, 1);
+      Atomics.notify(new Int32Array(signal), 0);
+      assert.equal((await olderDone)[0].written, true);
+      assert.equal((await newerDone)[0].written, true);
+      assert.equal(readOne().endedAt, T0 + 2000);
+      assert.equal(readOne().lastEventAt, T0 + 2000.5);
+    });
     it("writes a pointer row and never conversation content", () => {
       const result = recordSessionHistoryFromStateBody(
         body({ assistant_last_output: "secret reply", prompt: "secret prompt" }),
@@ -268,6 +345,67 @@ describe("durable session history", () => {
   });
 
   describe("file hygiene", () => {
+    it("reclaims only history locks with explicitly dead owners", () => {
+      const locks = new Map();
+      for (const id of ["dead", "live", "denied", "unknown", "foreign", "ownerless"]) {
+        const file = getHistoryFilePath("claude-code", id, { historyDir });
+        const lock = acquireLeaseLock(file);
+        assert.ok(lock);
+        locks.set(id, lock);
+      }
+      const pids = { dead: 10001, live: 10002, denied: 10003, unknown: 10004 };
+      for (const [id, pid] of Object.entries(pids)) {
+        fs.writeFileSync(locks.get(id).ownerPath, `${pid}-${T0}-abc123`);
+      }
+      fs.writeFileSync(locks.get("foreign").ownerPath, "foreign schema");
+      fs.unlinkSync(locks.get("ownerless").ownerPath);
+      const unrelated = path.join(historyDir, "unrelated.json.lock");
+      fs.mkdirSync(unrelated);
+      fs.writeFileSync(path.join(unrelated, "owner"), `10001-${T0}-abc123`);
+      loadSessionHistory(readOpts(T0, BOOT_A, { processKill: (pid) => {
+        if (pid === pids.live) return;
+        throw Object.assign(new Error("probe"), { code: pid === pids.dead ? "ESRCH"
+          : pid === pids.denied ? "EPERM" : "EIO" });
+      } }));
+      assert.ok(!fs.existsSync(locks.get("dead").lockPath));
+      for (const id of ["live", "denied", "unknown", "foreign", "ownerless"]) {
+        assert.ok(fs.existsSync(locks.get(id).lockPath), id);
+      }
+      assert.ok(fs.existsSync(unrelated), "history cleanup must remain prefix-scoped");
+    });
+
+    it("skips locked rows during pruning and preserves a row refreshed before deletion", (t) => {
+      recordSessionHistoryFromStateBody(body(), writeOpts(T0));
+      const file = getHistoryFilePath("claude-code", "session-alpha", { historyDir });
+      const lock = acquireLeaseLock(file);
+      const later = T0 + MAX_HISTORY_AGE_MS + 1;
+      try {
+        pruneHistoryFiles(historyDir, { now: later });
+        assert.ok(fs.existsSync(file));
+      } finally { releaseLeaseLock(lock); }
+      const mkdir = fs.mkdirSync;
+      let refreshed = false;
+      t.mock.method(fs, "mkdirSync", (dir, ...args) => {
+        if (!refreshed && String(dir).startsWith(file + ".lock.pending-")) {
+          refreshed = true;
+          recordSessionHistoryFromStateBody(body({ state: "working" }), writeOpts(later));
+        }
+        return mkdir(dir, ...args);
+      });
+      pruneHistoryFiles(historyDir, { now: later });
+      assert.equal(readOne().lastEventAt, later);
+    });
+
+    it("preserves foreign schema rows on write and during count pruning", () => {
+      const result = recordSessionHistoryFromStateBody(body(), writeOpts(T0));
+      const foreign = JSON.stringify({ ...result.record, version: 2 });
+      fs.writeFileSync(result.filePath, foreign);
+      assert.equal(recordSessionHistoryFromStateBody(body(), writeOpts(T0 + 1000)).reason, "invalid-record");
+      for (let i = 0; i < 3; i++) recordSessionHistoryFromStateBody(body({ session_id: `s-${i}` }), writeOpts(T0 + i));
+      assert.equal(pruneHistoryFiles(historyDir, { now: T0 + 1000, maxFiles: 1 }).length, 1);
+      assert.equal(fs.readFileSync(result.filePath, "utf8"), foreign);
+    });
+
     it("rejects foreign, oversized, and misfiled records", () => {
       const valid = {
         version: 1,
@@ -301,7 +439,7 @@ describe("durable session history", () => {
       assert.notEqual(readHistoryFile(goodPath), null, "the control case must still read");
     });
 
-    it("prunes by age and then by count, and sweeps unreadable files", () => {
+    it("prunes owned rows by age and count while preserving unreadable files", () => {
       recordSessionHistoryFromStateBody(body({ session_id: "fresh" }), writeOpts(T0));
       recordSessionHistoryFromStateBody(body({ session_id: "ancient" }), writeOpts(T0));
 
@@ -315,7 +453,7 @@ describe("durable session history", () => {
       );
       const kept = pruneHistoryFiles(historyDir, { now: wellPastRetention });
       assert.equal(kept.length, 1);
-      assert.ok(!fs.existsSync(junk), "an unreadable file must not accumulate");
+      assert.ok(fs.existsSync(junk), "an unreadable or foreign file is not safe to delete");
 
       const survivor = readHistoryFile(path.join(historyDir, kept[0]));
       assert.equal(survivor.sessionId, "fresh");

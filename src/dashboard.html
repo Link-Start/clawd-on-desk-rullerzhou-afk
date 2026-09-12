@@ -812,6 +812,14 @@ button:disabled {
   font-size: 15px;
 }
 
+/* Do not push the resume list below a full-height empty-state panel. */
+.empty.empty-with-history {
+  height: auto;
+  min-height: 0;
+  padding: 16px 24px;
+  margin-bottom: 16px;
+}
+
 .empty-hint {
   max-width: 260px;
   line-height: 1.45;

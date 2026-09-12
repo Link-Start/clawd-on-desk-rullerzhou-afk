@@ -86,7 +86,8 @@ async function flush() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-function loadDashboard({ sessions = [], history = [], resumeResult = { status: "ok" } } = {}) {
+function loadDashboard({ sessions = [], history = [],
+  resumeResult = { status: "submitted", retryAt: Date.now() + 30_000 } } = {}) {
   const elements = new Map(
     ["content", "title", "count", "quickBanner", "quotaSummary"]
       .map((id) => [id, new FakeElement("div")]),
@@ -110,8 +111,8 @@ function loadDashboard({ sessions = [], history = [], resumeResult = { status: "
     getI18n: async () => ({ lang: "en", translations: { ...i18n.en } }),
     getSnapshot: async () => ({ sessions, groups: [] }),
     getKimiQuotaStatus: async () => null,
-    getSessionHistory: async () => { historyCalls += 1; return history; },
-    resumeSession: async (payload) => { resumeCalls.push(payload); return resumeResult; },
+    getSessionHistory: async () => { historyCalls += 1; return typeof history === "function" ? history() : history; },
+    resumeSession: async (payload) => { resumeCalls.push(payload); return typeof resumeResult === "function" ? resumeResult() : resumeResult; },
     onLangChange: () => {},
     onSessionSnapshot: (cb) => { snapshotListener = cb; },
     focusSession: () => {},
@@ -163,6 +164,51 @@ function historyRow(overrides = {}) {
 }
 
 describe("dashboard session history section", () => {
+  it("keeps a submitted launch disabled until the real local session appears", async () => {
+    const app = loadDashboard({ history: [historyRow()] });
+    await flush();
+    const oldButton = byClass(app.root, "session-history-resume")[0];
+    await oldButton.dispatch("click");
+    await oldButton.dispatch("click");
+    await flush();
+    assert.equal(app.resumeCalls.length, 1, "even a stale DOM click must be deduplicated");
+    assert.equal(byClass(app.root, "session-history-resume")[0].disabled, true);
+    app.tickRender();
+    assert.equal(byClass(app.root, "session-history-resume")[0].disabled, true);
+    app.pushSnapshot({ sessions: [{ id: "canonical", rawSessionId: "abc-123",
+      agentId: "claude-code", profileId: "local" }], groups: [] });
+    await flush();
+    app.tickRender();
+    assert.equal(byClass(app.root, "session-history-card").length, 0,
+      "even a stale history reply cannot restore a live session's Resume card");
+  });
+
+  it("restores pending feedback after reopening and permits an explicit retry after timeout", async () => {
+    const app = loadDashboard({ history: [historyRow({ resumePending: true,
+      resumeRetryAt: Date.now() + 30_000 })] });
+    await flush();
+    assert.equal(byClass(app.root, "session-history-resume")[0].disabled, true);
+    const expired = loadDashboard({ history: [historyRow({ resumePending: true,
+      resumeRetryAt: Date.now() - 1 })] });
+    await flush();
+    assert.equal(byClass(expired.root, "session-history-resume")[0].disabled, false);
+    assert.ok(textOf(expired.root).includes(i18n.en.dashboardHistoryNotConfirmed));
+    assert.equal(expired.resumeCalls.length, 0, "timeout must never auto-retry");
+  });
+
+  it("queues a fresh read when the live set changes during an outstanding history read", async () => {
+    let finish;
+    let calls = 0;
+    const app = loadDashboard({ history: () => ++calls === 1
+      ? new Promise((resolve) => { finish = resolve; }) : [] });
+    await flush();
+    app.pushSnapshot({ sessions: [{ id: "new" }], groups: [] });
+    finish([historyRow()]);
+    await flush();
+    assert.equal(calls, 2);
+    assert.equal(byClass(app.root, "session-history-card").length, 0);
+  });
+
   it("renders an interrupted row with its folder and a resume action", async () => {
     const app = loadDashboard({ history: [historyRow()] });
     await flush();
@@ -237,6 +283,8 @@ describe("dashboard session history section", () => {
     await flush();
 
     assert.equal(byClass(app.root, "empty").length, 1, "the empty state still renders");
+    assert.equal(byClass(app.root, "empty-with-history").length, 1,
+      "history needs a compact empty state so Resume remains above the fold");
     assert.equal(byClass(app.root, "session-history-card").length, 1);
   });
 
@@ -248,6 +296,7 @@ describe("dashboard session history section", () => {
     // With no history the empty state keeps its pre-existing node shape.
     assert.equal(app.root.children.length, 1);
     assert.ok(app.root.children[0].classList.contains("empty"));
+    assert.ok(!app.root.children[0].classList.contains("empty-with-history"));
   });
 
   it("re-reads only when the live session set changes, not every tick", async () => {

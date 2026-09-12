@@ -23,9 +23,13 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { writeJsonAtomic } = require("./json-utils");
+const { normalizeClaudeSessionId } = require("./claude-session-id");
 const {
   SUPPORTED_AGENT_IDS,
   classifyStateBodyForRecovery,
+  acquireLeaseLock,
+  releaseLeaseLock,
+  cleanupOrphanedLeaseLocks,
 } = require("./session-recovery-lease");
 
 const HISTORY_VERSION = 1;
@@ -60,9 +64,9 @@ const SUSTAINED_STATES = new Set(["thinking", "working", "juggling"]);
 
 function normalizeSessionId(value) {
   if (typeof value !== "string") return null;
-  const id = value.trim();
+  let id;
+  try { id = normalizeClaudeSessionId(value); } catch { return null; }
   if (!id || id === "default" || id.length > 256) return null;
-  if (/[\u0000-\u001f\u007f-\u009f]/.test(id)) return null;
   return id;
 }
 
@@ -154,7 +158,8 @@ function validateRecord(record, options = {}) {
   if (record.version !== HISTORY_VERSION) return null;
   const agentId = normalizeAgentId(record.agentId);
   const sessionId = normalizeSessionId(record.sessionId);
-  if (!agentId || !sessionId || agentId !== record.agentId || sessionId !== record.sessionId) return null;
+  if (!agentId || !SUPPORTED_AGENT_IDS.has(agentId) || !sessionId
+    || agentId !== record.agentId || sessionId !== record.sessionId) return null;
   if (!Number.isFinite(record.firstSeenAt) || record.firstSeenAt <= 0) return null;
   if (!Number.isFinite(record.lastEventAt) || record.lastEventAt <= 0) return null;
   if (record.lastEventAt < record.firstSeenAt) return null;
@@ -225,15 +230,27 @@ function pruneHistoryFiles(dir, options = {}) {
     return { name, filePath, record: readHistoryFile(filePath) };
   });
 
+  // Invalid/foreign rows are not ours to delete and do not count toward the
+  // retention budget. Every deletion re-reads under the writer's own lock.
+  entries = entries.filter((entry) => entry.record);
   const remove = (entry) => {
     if (skipFilePath && path.resolve(entry.filePath) === skipFilePath) return false;
-    try { fs.unlinkSync(entry.filePath); return true; } catch { return false; }
+    const lock = acquireLeaseLock(entry.filePath, { nonBlocking: true });
+    if (!lock) return false;
+    try {
+      const current = readHistoryFile(entry.filePath);
+      if (!current || current.lastEventAt !== entry.record.lastEventAt) return false;
+      fs.unlinkSync(entry.filePath);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      releaseLeaseLock(lock);
+    }
   };
 
-  // Unreadable or foreign files are dropped so they cannot accumulate.
   for (const entry of entries) {
-    if (!entry.record) entry.deleted = remove(entry);
-    else if (now - entry.record.lastEventAt > maxAgeMs) entry.deleted = remove(entry);
+    if (now - entry.record.lastEventAt > maxAgeMs) entry.deleted = remove(entry);
   }
   entries = entries.filter((entry) => !entry.deleted);
 
@@ -285,11 +302,17 @@ function recordSessionHistoryFromStateBody(body, options = {}) {
     return { written: false, reason: "unsafe-file" };
   }
 
+  const lock = acquireLeaseLock(filePath);
+  if (!lock) return { written: false, reason: "locked" };
   try {
     const existing = readHistoryFile(filePath);
-    const eventAt = Number.isFinite(options.eventAt) && options.eventAt > 0
+    // An existing invalid row may belong to a future schema or another owner.
+    if (!existing && fs.existsSync(filePath)) return { written: false, reason: "invalid-record" };
+    const observedAt = Number.isFinite(options.eventAt) && options.eventAt > 0
       ? options.eventAt
       : Date.now();
+    // Same tie-break as the lease: a terminal hook wins over same-tick work.
+    const eventAt = observedAt + (classified.terminal ? 0.5 : 0);
     if (existing && existing.lastEventAt > eventAt) {
       return { written: false, reason: "older-event" };
     }
@@ -305,7 +328,7 @@ function recordSessionHistoryFromStateBody(body, options = {}) {
     // again, so an earlier terminal event must not stick.
     const endedAt = classified.active
       ? null
-      : (classified.terminal ? eventAt : (existing && existing.endedAt) || null);
+      : (classified.terminal ? observedAt : (existing && existing.endedAt) || null);
 
     if (existing) {
       const identityUnchanged = existing.cwd === cwd
@@ -330,14 +353,19 @@ function recordSessionHistoryFromStateBody(body, options = {}) {
       firstSeenAt: existing ? existing.firstSeenAt : eventAt,
       lastEventAt: eventAt,
       endedAt,
-      bootApproxAt: getBootApproxAt({ now: eventAt, uptime: options.uptime }),
+      // In production sample wall clock and uptime together, after any hook
+      // buffering/lock wait. Fixtures may supply a paired event clock.
+      bootApproxAt: getBootApproxAt(options.uptime ? { now: observedAt, uptime: options.uptime } : {}),
     };
     writeJsonAtomic(filePath, record);
     try { fs.chmodSync(filePath, 0o600); } catch {}
-    pruneHistoryFiles(dir, { now: eventAt, skipFilePath: filePath, ...options });
+    releaseLeaseLock(lock);
+    pruneHistoryFiles(dir, { ...options, now: observedAt, skipFilePath: filePath });
     return { written: true, filePath, record };
   } catch {
     return { written: false, reason: "write-failed" };
+  } finally {
+    releaseLeaseLock(lock);
   }
 }
 
@@ -361,6 +389,9 @@ function loadSessionHistory(options = {}) {
   }
 
   const now = Number.isFinite(options.now) ? options.now : Date.now();
+  cleanupOrphanedLeaseLocks(dir, {
+    ...options, filePrefix: HISTORY_FILE_PREFIX, requireDeadOwner: true,
+  });
   const names = pruneHistoryFiles(dir, { ...options, now });
   const currentBootApproxAt = getBootApproxAt({ now, uptime: options.uptime });
   const isAgentEnabled = typeof options.isAgentEnabled === "function"

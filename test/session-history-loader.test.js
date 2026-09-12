@@ -8,6 +8,7 @@ const path = require("node:path");
 
 const {
   encodeClaudeProjectDir,
+  getClaudeProjectsDir,
   probeTranscript,
   loadResumableSessionHistory,
   resolveResumeTarget,
@@ -84,6 +85,38 @@ describe("session history loader", () => {
   });
 
   describe("transcript probing", () => {
+    it("honours the configured Claude home without probing the default account", () => {
+      const previous = process.env.CLAUDE_CONFIG_DIR;
+      try {
+        process.env.CLAUDE_CONFIG_DIR = path.join(root, "custom-claude");
+        assert.equal(getClaudeProjectsDir(), path.join(root, "custom-claude", "projects"));
+        assert.equal(getClaudeProjectsDir(loadOpts()), claudeProjectsDir);
+      } finally {
+        if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+        else process.env.CLAUDE_CONFIG_DIR = previous;
+      }
+    });
+
+    it("rejects path-bearing IDs before any transcript filesystem access", (t) => {
+      const reads = t.mock.method(fs, "lstatSync", () => { throw new Error("must not read"); });
+      for (const id of ["../secret", "x/y", "x\\y", "", "   ", "a\n"]) {
+        assert.equal(probeTranscript("claude-code", id, projectCwd, loadOpts()), null);
+      }
+      assert.equal(reads.mock.callCount(), 0);
+    });
+
+    it("treats access and I/O errors as unknown, not missing", (t) => {
+      writeTranscript("has-transcript");
+      const lstat = fs.lstatSync;
+      t.mock.method(fs, "lstatSync", (file, ...args) => {
+        if (String(file).endsWith("has-transcript.jsonl")) {
+          throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+        }
+        return lstat(file, ...args);
+      });
+      assert.equal(probeTranscript("claude-code", "has-transcript", projectCwd, loadOpts()), null);
+    });
+
     it("reports present, confidently missing, and unknown distinctly", () => {
       writeTranscript("has-transcript");
 
