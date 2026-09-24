@@ -1487,10 +1487,27 @@ function inferVisualSource(displayState, file) {
 
 // Last free-roam walk heading sent to the renderer (roam visuals face right).
 let roamHeadingLeft = false;
+// Last pet screen side sent to the renderer; decides the mirror of idle
+// animations that opt in with mirrorOnRightSide.
+let petOnRightSide = false;
+
+function syncPetScreenSide() {
+  const bounds = getPetWindowBounds();
+  if (!bounds) return;
+  const cx = bounds.x + bounds.width / 2;
+  const wa = getNearestWorkArea(cx, bounds.y + bounds.height / 2);
+  if (!wa) return;
+  petOnRightSide = cx > wa.x + wa.width / 2;
+  // Sent unconditionally: a reloaded renderer starts back at "left".
+  sendRawToRenderer("pet-screen-side", petOnRightSide);
+}
 
 function requestDisplayedVisual(displayState, file, options = {}) {
   if (!displayedVisualProjection) return null;
   const activeTheme = getActiveTheme();
+  // Re-sampled on every idle request, so a drag or roam since the last idle
+  // animation is picked up before the next one starts.
+  if (displayState === "idle") syncPetScreenSide();
   // A mirrored visual (left mini edge, leftward roam) may show a variant with
   // pre-mirrored glyphs (theme mirroredFiles). It shares the original's
   // silhouette, so the hit box still comes from the original file.
@@ -1498,6 +1515,8 @@ function requestDisplayedVisual(displayState, file, options = {}) {
     miniMode: _mini.getMiniMode(),
     miniEdge: _mini.getMiniEdge(),
     roamHeadingLeft,
+    file,
+    petOnRightSide,
   }));
   return displayedVisualProjection.request({
     themeId: activeTheme && activeTheme._id,
