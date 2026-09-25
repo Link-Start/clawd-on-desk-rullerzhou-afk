@@ -275,6 +275,14 @@ function handleStatePost(req, res, options) {
         tmuxSocket: normalizeTmuxSocket(data.tmux_socket),
         tmuxClient: normalizeTmuxClient(data.tmux_client),
       }, remoteProfile, wslSourced);
+      // Intentional exception to the WSL PID strip: per-session automation
+      // eligibility only strips Remote SSH, never WSL, to preserve the pre-fix
+      // user-visible automation. Its trust therefore ends on session timeout,
+      // not process exit (known gap, tracked).
+      const automationAgentPid = stripRemoteProcessMetadata(
+        { agentPid: Number.isFinite(rawAgentPid) && rawAgentPid > 0 ? Math.floor(rawAgentPid) : null },
+        remoteProfile
+      ).agentPid;
       const orcaPaneKey = normalizeOrcaPaneKey(data.orca_pane_key);
       const agentId = agentIdentity.agentId;
       const hasExplicitPermissionLifecycleSession = hasExplicitPermissionLifecycleSessionIdentity(
@@ -296,7 +304,7 @@ function handleStatePost(req, res, options) {
         hookSource: data.hook_source,
         codexOriginator: data.codex_originator,
         codexSource: data.codex_source,
-        agentPid,
+        agentPid: automationAgentPid,
       });
       const reportedSubagentId = agentId === "claude-code"
         ? normalizeSubagentMetadata(data.subagent_id, MAX_SUBAGENT_ID_LENGTH)

@@ -678,13 +678,13 @@ function handlePermissionPost(req, res, options) {
     // A WSL hook reports Linux PIDs that can alias live processes on this
     // Windows host, so they are stripped exactly like Remote SSH metadata.
     const wslSourced = isWslSourced({ wslDistro: data.wsl_distro, host: data.host });
-    // The per-session automation identity must see the same stripped agent PID
-    // the session state receives, otherwise WSL and Remote SSH Codex sessions
-    // could look process-bound on one channel but not the other.
-    const strippedAgentPid = stripRemoteProcessMetadata(
+    // Intentional exception to the WSL PID strip: per-session automation
+    // eligibility only strips Remote SSH, never WSL, to preserve the pre-fix
+    // user-visible automation. Its trust therefore ends on session timeout,
+    // not process exit (known gap, tracked).
+    const automationAgentPid = stripRemoteProcessMetadata(
       { agentPid: normalizePositiveInteger(data.agent_pid) },
-      remoteProfile,
-      wslSourced
+      remoteProfile
     ).agentPid;
     const sessionAutomationIdentity = assessSessionAutomationIdentity({
       agentId,
@@ -697,7 +697,7 @@ function handlePermissionPost(req, res, options) {
       hookSource: data.hook_source,
       codexOriginator: data.codex_originator,
       codexSource: data.codex_source,
-      agentPid: strippedAgentPid,
+      agentPid: automationAgentPid,
     });
     const resolvePermissionSession = (value, fallback) =>
       resolveSessionIdentity(value, trustedProfileId, fallback);

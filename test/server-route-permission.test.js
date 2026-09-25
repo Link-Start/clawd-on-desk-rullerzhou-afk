@@ -824,7 +824,7 @@ describe("server-route-permission POST", () => {
     });
   });
 
-  it("strips WSL permission process metadata for Codex and keeps it out of per-session automation", async () => {
+  it("strips WSL permission process metadata without changing Codex automation eligibility", async () => {
     const sessionId = "codex:019e115a-4df2-7ed0-b90e-8e6345aca777";
     const res = await callPermissionPost(JSON.stringify({
       agent_id: "codex",
@@ -859,11 +859,46 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(opts.cwd, "/repo");
     assert.strictEqual(opts.host, "wsl:Ubuntu");
     assert.deepStrictEqual(opts.sessionAutomationIdentity, {
-      eligible: false,
-      reason: "missing-codex-process-lifecycle",
+      eligible: true,
+      reason: "eligible",
     });
 
+    assert.ok(res.ctx.pendingPermissions[0], "the WSL request must produce a permission entry");
     const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.sourcePid ?? null, null);
+    assert.strictEqual(entry.agentPid ?? null, null);
+    assert.strictEqual(entry.pidChain ?? null, null);
+    assert.deepStrictEqual(entry.sessionAutomationIdentity, {
+      eligible: true,
+      reason: "eligible",
+    });
+  });
+
+  it("keeps a WSL Codex interactive subagent eligible for global auto-approval", async () => {
+    const sessionId = "codex:019e115a-4df2-7ed0-b90e-8e6345aca778";
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "codex",
+      session_id: sessionId,
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      hook_source: "codex-official",
+      codex_session_role: "subagent",
+      codex_originator: "codex-tui",
+      codex_source: "cli",
+      source_pid: 456,
+      agent_pid: 456,
+      pid_chain: [789, 456, -1],
+      wsl_distro: "Ubuntu",
+      host: "wsl:Ubuntu",
+    }));
+
+    assert.ok(res.ctx.pendingPermissions[0], "the WSL subagent request must produce a permission entry");
+    const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.codexInteractiveSubagent, true);
+    assert.deepStrictEqual(entry.sessionAutomationIdentity, {
+      eligible: true,
+      reason: "eligible",
+    });
     assert.strictEqual(entry.sourcePid ?? null, null);
     assert.strictEqual(entry.agentPid ?? null, null);
     assert.strictEqual(entry.pidChain ?? null, null);

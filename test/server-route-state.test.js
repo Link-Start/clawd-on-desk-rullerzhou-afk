@@ -949,7 +949,7 @@ describe("server-route-state POST", () => {
     assert.strictEqual(res.calls.userInputShown[0].cwd, "/home/user/repo");
   });
 
-  it("marks WSL Codex state identities ineligible for per-session automation", async () => {
+  it("keeps WSL markers from changing Codex per-session automation eligibility", async () => {
     const sessionId = "codex:019f9c87-23a9-7d03-a7ac-c11e3270c3b8";
     const body = {
       state: "working",
@@ -965,10 +965,15 @@ describe("server-route-state POST", () => {
     };
 
     const wsl = await callStatePost(JSON.stringify(body));
+    const opts = wsl.calls.updateSession[0][3];
     assert.deepStrictEqual(
-      wsl.calls.updateSession[0][3].sessionAutomationIdentity,
-      { eligible: false, reason: "missing-codex-process-lifecycle" }
+      opts.sessionAutomationIdentity,
+      { eligible: true, reason: "eligible" }
     );
+    // The automation identity path and the session process metadata path are
+    // deliberately separate: the WSL PID is stripped from the session but not
+    // from the automation eligibility input.
+    assert.strictEqual(opts.agentPid, null);
   });
 
   it("drops archived local Codex lifecycle and passive user-input while keeping quota (#655)", async () => {

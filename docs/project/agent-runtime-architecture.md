@@ -393,8 +393,10 @@ WSL 状态同步（本机 loopback，但 PID 属于 Linux VM）：
   清理决策对带 WSL 粘性标记的会话一律不再探测 PID（没有 agent-exit / source-exit /
   working-source-exit），工作态照常按 working timeout 转 idle，空闲超时后按 `unreachable` 清除；
   `sessionStaleMs === 0` 时不按年龄删除。
-  因此 WSL 会话没有按进程退出的清理，只按空闲超时清除；WSL 的 Codex 会话
-  因 agentPid 被剥离而不能配置 per-session 自动化（reason `missing-codex-process-lifecycle`）。
+  因此 WSL 会话没有按进程退出的清理，只按空闲超时清除。
+  per-session 自动化身份用的 agentPid 只按 Remote SSH 剥离（有意的例外，见 server-route-state.js /
+  server-route-permission.js），所以 WSL Codex 的资格与修复前一致；它的会话信任随会话被超时移除而结束，
+  而不是随进程退出（已知缺口，后续跟进）。
 
 权限决策流（Claude Code HTTP hook，阻塞）：
   Claude Code PermissionRequest
