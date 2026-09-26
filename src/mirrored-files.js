@@ -27,13 +27,17 @@ function hasDedicatedRoamVisual(theme) {
 
 function getRightSideMirrorFiles(theme) {
   const entries = theme && Array.isArray(theme.idleAnimations) ? theme.idleAnimations : [];
+  const followFile = theme && theme.states && Array.isArray(theme.states.idle) ? theme.states.idle[0] : null;
   const files = [];
   for (const entry of entries) {
     if (!entry || entry.mirrorOnRightSide !== true || typeof entry.file !== "string") continue;
+    const variant = resolveMirroredFile(theme, entry.file, true);
+    // The follow sprite keeps screen-space eye tracking, even when a theme
+    // also lists it in the random pool or uses it as a mirrored variant.
+    if (entry.file === followFile || variant === followFile) continue;
     files.push(entry.file);
     // The renderer only sees the file actually on screen, which may be the
     // pre-mirrored variant.
-    const variant = resolveMirroredFile(theme, entry.file, true);
     if (variant !== entry.file) files.push(variant);
   }
   return files;

@@ -188,7 +188,7 @@ const createPetWindowRuntime = require("./pet-window-runtime");
 const { collectRequiredAssetFiles } = require("./theme-schema");
 const { describeGeometrySync } = require("./pet-accessory-state");
 const { createDisplayedVisualProjection } = require("./displayed-visual-projection");
-const { isVisualMirrored, resolveMirroredFile } = require("./mirrored-files");
+const { getRightSideMirrorFiles, isVisualMirrored, resolveMirroredFile } = require("./mirrored-files");
 const { createTestReactionHandler } = require("./test-reaction");
 const createMacHideController = require("./mac-hide");
 const {
@@ -1528,6 +1528,21 @@ function requestDisplayedVisual(displayState, file, options = {}) {
     deliver: options.deliver || ((payload) => sendRawToRenderer("state-change", payload)),
     onLogicalSettlement: options.onLogicalSettlement,
   });
+}
+
+function refreshIdleVisualAfterDrag() {
+  if (!displayedVisualProjection || _state.getCurrentState() !== "idle") return null;
+  const snapshot = displayedVisualProjection.getSnapshot();
+  const visual = snapshot.requested || snapshot.committed;
+  // Reactions restore their visual themselves. Do not interrupt a click
+  // reaction that started during the drag or replace a transitional visual.
+  if (!visual || visual.displayState !== "idle" || visual.source === "reaction") return null;
+  const file = _state.getCurrentSvg();
+  if (!getRightSideMirrorFiles(getActiveTheme()).includes(file)) return null;
+  // A theme without a drag reaction keeps its resting sprite throughout the
+  // drag. Re-request after the final clamp so side, glyph variant and hitbox
+  // go through the same path as the initial idle request.
+  return requestDisplayedVisual("idle", file);
 }
 
 function resetDisplayedVisualProjection(detail = "projection-reset", options = {}) {
@@ -5170,6 +5185,7 @@ function createWindow() {
     sendToRenderer,
     requestDragReaction,
     requestClickReaction,
+    refreshIdleVisualAfterDrag,
     settleVisual: (event, payload) => {
       if (
         !win

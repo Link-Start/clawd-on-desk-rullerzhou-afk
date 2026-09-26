@@ -17,6 +17,31 @@ const theme = {
 };
 
 describe("getRightSideMirrorFiles", () => {
+  it("keeps follow-idle and its variant out of the mirror pool", () => {
+    const withFollow = {
+      states: { idle: ["idle.svg"] },
+      mirroredFiles: { "idle.svg": "idle-left.svg", "bubble.svg": "bubble-left.svg" },
+      idleAnimations: [
+        { file: "idle.svg", duration: 5000, mirrorOnRightSide: true },
+        { file: "bubble.svg", duration: 5000, mirrorOnRightSide: true },
+      ],
+    };
+    assert.deepStrictEqual(getRightSideMirrorFiles(withFollow), ["bubble.svg", "bubble-left.svg"]);
+    assert.strictEqual(isVisualMirrored(withFollow, "idle", { file: "idle.svg", petOnRightSide: true }), false);
+    assert.strictEqual(isVisualMirrored(withFollow, "idle", { file: "idle-left.svg", petOnRightSide: true }), false);
+    assert.strictEqual(isVisualMirrored(withFollow, "idle", { file: "bubble.svg", petOnRightSide: true }), true);
+  });
+
+  it("ignores an opt-in entry whose mirrored variant is follow-idle", () => {
+    const withFollowVariant = {
+      states: { idle: ["idle.svg"] },
+      mirroredFiles: { "bubble.svg": "idle.svg" },
+      idleAnimations: [{ file: "bubble.svg", duration: 5000, mirrorOnRightSide: true }],
+    };
+    assert.deepStrictEqual(getRightSideMirrorFiles(withFollowVariant), []);
+    assert.strictEqual(isVisualMirrored(withFollowVariant, "idle", { file: "bubble.svg", petOnRightSide: true }), false);
+  });
+
   it("lists opted-in idle animations plus their pre-mirrored variants", () => {
     const withVariants = {
       mirroredFiles: { "bubble.apng": "bubble-left.apng" },

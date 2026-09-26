@@ -418,6 +418,8 @@ Omit `idleAnimations` or use an empty array if you want idle to stay on `states.
 
 If an animation's effect reaches out to the right of the pet (bubbles, sparks, a thrown object), set `"mirrorOnRightSide": true` on its entry. The pet window may overhang the right screen edge, so while the pet sits on the right half of its display the animation plays mirrored and the effect stays on screen. Draw such art reaching right; give it a `mirroredFiles` variant if it carries legible glyphs.
 
+This also applies when the animation is selected as the default idle visual; its direction updates when a drag ends, even without a drag reaction. The follow-idle file (`states.idle[0]`) is never mirrored, so cursor tracking keeps its direction. The flag is ignored for entries whose file or mirrored variant is that follow-idle file.
+
 ### Conditional Idle Easter Eggs
 
 `idleEasterEggs` declares rare idle visuals that belong to one exact head + mouth accessory combination. It does not add another user-selectable idle option:
