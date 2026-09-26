@@ -12,7 +12,7 @@ const {
   buildShadowComparison,
   processMetadataForState,
 } = require("./server-windows-process-metadata");
-const { stripRemoteProcessMetadata } = require("./remote-process-metadata");
+const { isWslSourced, stripRemoteProcessMetadata } = require("./remote-process-metadata");
 const {
   CODEX_OFFICIAL_HOOK_SOURCE,
   CODEX_SESSION_ROLE_SUBAGENT,
@@ -249,12 +249,13 @@ function applyTerminalSessionOptions(options, data) {
   if (orcaPaneKey) options.orcaPaneKey = orcaPaneKey;
 }
 
-// Every build*PermissionSessionOptions below takes `remoteProfile` for one
-// reason: their result is spread straight into ctx.updateSession (and into the
-// permEntry that focus/liveness reads), so this is the single choke point where
-// a PID from the Remote SSH ingress would otherwise become local session state.
-// See remote-process-metadata.js for why `orcaPaneKey`/`cwd`/`host` survive.
-function buildCodexPermissionSessionOptions(data, remoteProfile) {
+// Every build*PermissionSessionOptions below takes `remoteProfile` and
+// `wslSourced` for one reason: their result is spread straight into
+// ctx.updateSession (and into the permEntry that focus/liveness reads), so this
+// is the single choke point where a PID from the Remote SSH ingress or from a
+// WSL hook would otherwise become local session state. See
+// remote-process-metadata.js for why `orcaPaneKey`/`cwd`/`host` survive.
+function buildCodexPermissionSessionOptions(data, remoteProfile, wslSourced) {
   const sourcePid = normalizePositiveInteger(data.source_pid);
   const rawAgentPid = data.agent_pid ?? data.claude_pid ?? data.cursor_pid;
   const agentPid = normalizePositiveInteger(rawAgentPid);
@@ -292,10 +293,10 @@ function buildCodexPermissionSessionOptions(data, remoteProfile) {
   if (codexAgentNickname) options.codexAgentNickname = codexAgentNickname;
   if (codexAgentRole) options.codexAgentRole = codexAgentRole;
   if (codexParentThreadId) options.codexParentThreadId = codexParentThreadId;
-  return stripRemoteProcessMetadata(options, remoteProfile);
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
 }
 
-function buildQwenCodePermissionSessionOptions(data, remoteProfile) {
+function buildQwenCodePermissionSessionOptions(data, remoteProfile, wslSourced) {
   const sourcePid = normalizePositiveInteger(data.source_pid);
   const rawAgentPid = data.agent_pid ?? data.claude_pid ?? data.cursor_pid;
   const agentPid = normalizePositiveInteger(rawAgentPid);
@@ -316,10 +317,10 @@ function buildQwenCodePermissionSessionOptions(data, remoteProfile) {
   if (host) options.host = host;
   if (platform) options.platform = platform;
   if (model) options.model = model;
-  return stripRemoteProcessMetadata(options, remoteProfile);
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
 }
 
-function buildCopilotPermissionSessionOptions(data, remoteProfile) {
+function buildCopilotPermissionSessionOptions(data, remoteProfile, wslSourced) {
   const sourcePid = normalizePositiveInteger(data.source_pid);
   const agentPid = normalizePositiveInteger(data.agent_pid);
   const pidChain = Array.isArray(data.pid_chain)
@@ -335,10 +336,10 @@ function buildCopilotPermissionSessionOptions(data, remoteProfile) {
   const host = normalizeString(data.host);
   if (cwd) options.cwd = cwd;
   if (host) options.host = host;
-  return stripRemoteProcessMetadata(options, remoteProfile);
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
 }
 
-function buildHermesPermissionSessionOptions(data, remoteProfile) {
+function buildHermesPermissionSessionOptions(data, remoteProfile, wslSourced) {
   const sourcePid = normalizePositiveInteger(data.source_pid);
   const agentPid = normalizePositiveInteger(data.agent_pid);
   const pidChain = Array.isArray(data.pid_chain)
@@ -354,10 +355,10 @@ function buildHermesPermissionSessionOptions(data, remoteProfile) {
   if (cwd) options.cwd = cwd;
   const editor = normalizeString(data.editor);
   if (editor) options.editor = editor;
-  return stripRemoteProcessMetadata(options, remoteProfile);
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
 }
 
-function buildZcodePermissionSessionOptions(data, remoteProfile) {
+function buildZcodePermissionSessionOptions(data, remoteProfile, wslSourced) {
   const sourcePid = normalizePositiveInteger(data.source_pid);
   const agentPid = normalizePositiveInteger(data.agent_pid);
   const pidChain = Array.isArray(data.pid_chain)
@@ -375,10 +376,10 @@ function buildZcodePermissionSessionOptions(data, remoteProfile) {
   if (cwd) options.cwd = cwd;
   if (host) options.host = host;
   if (model) options.model = model;
-  return stripRemoteProcessMetadata(options, remoteProfile);
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
 }
 
-function buildDshPermissionSessionOptions(data, remoteProfile) {
+function buildDshPermissionSessionOptions(data, remoteProfile, wslSourced) {
   const sourcePid = normalizePositiveInteger(data.source_pid);
   const agentPid = normalizePositiveInteger(data.agent_pid);
   const pidChain = Array.isArray(data.pid_chain)
@@ -391,7 +392,7 @@ function buildDshPermissionSessionOptions(data, remoteProfile) {
   applyTerminalSessionOptions(options, data);
   const cwd = normalizeString(data.cwd);
   if (cwd) options.cwd = cwd;
-  return stripRemoteProcessMetadata(options, remoteProfile);
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
 }
 
 function sendCodexPermissionNoDecision(res) {
@@ -674,6 +675,17 @@ function handlePermissionPost(req, res, options) {
     const trustedDisplayHost = remoteProfile && typeof remoteProfile.displayHost === "string"
       ? remoteProfile.displayHost
       : null;
+    // A WSL hook reports Linux PIDs that can alias live processes on this
+    // Windows host, so they are stripped exactly like Remote SSH metadata.
+    const wslSourced = isWslSourced({ wslDistro: data.wsl_distro, host: data.host });
+    // Intentional exception to the WSL PID strip: per-session automation
+    // eligibility only strips Remote SSH, never WSL, to preserve the pre-fix
+    // user-visible automation. Its trust therefore ends on session timeout,
+    // not process exit (known gap, tracked).
+    const automationAgentPid = stripRemoteProcessMetadata(
+      { agentPid: normalizePositiveInteger(data.agent_pid) },
+      remoteProfile
+    ).agentPid;
     const sessionAutomationIdentity = assessSessionAutomationIdentity({
       agentId,
       channel: "permission",
@@ -685,7 +697,7 @@ function handlePermissionPost(req, res, options) {
       hookSource: data.hook_source,
       codexOriginator: data.codex_originator,
       codexSource: data.codex_source,
-      agentPid: normalizePositiveInteger(data.agent_pid),
+      agentPid: automationAgentPid,
     });
     const resolvePermissionSession = (value, fallback) =>
       resolveSessionIdentity(value, trustedProfileId, fallback);
@@ -946,7 +958,7 @@ function handlePermissionPost(req, res, options) {
           ? data.tool_input_fingerprint
           : buildToolInputFingerprint(rawInput);
         const legacyCodexSessionOptions = {
-          ...buildCodexPermissionSessionOptions(data, remoteProfile),
+          ...buildCodexPermissionSessionOptions(data, remoteProfile, wslSourced),
           sessionAutomationIdentity,
           ...trustedSessionFields(sessionIdentity),
         };
@@ -1193,7 +1205,7 @@ function handlePermissionPost(req, res, options) {
           ? data.tool_input_fingerprint
           : buildToolInputFingerprint(rawInput);
         const qwenSessionOptions = {
-          ...buildQwenCodePermissionSessionOptions(data, remoteProfile),
+          ...buildQwenCodePermissionSessionOptions(data, remoteProfile, wslSourced),
           sessionAutomationIdentity,
           ...trustedSessionFields(sessionIdentity),
         };
@@ -1313,7 +1325,7 @@ function handlePermissionPost(req, res, options) {
           ? data.tool_input_fingerprint
           : buildToolInputFingerprint(rawInput);
         const zcodeSessionOptions = {
-          ...buildZcodePermissionSessionOptions(data, remoteProfile),
+          ...buildZcodePermissionSessionOptions(data, remoteProfile, wslSourced),
           sessionAutomationIdentity,
           ...trustedSessionFields(sessionIdentity),
         };
@@ -1503,7 +1515,7 @@ function handlePermissionPost(req, res, options) {
           ? data.tool_input_fingerprint
           : buildToolInputFingerprint(rawInput);
         const copilotSessionOptions = {
-          ...buildCopilotPermissionSessionOptions(data, remoteProfile),
+          ...buildCopilotPermissionSessionOptions(data, remoteProfile, wslSourced),
           sessionAutomationIdentity,
           ...trustedSessionFields(sessionIdentity),
         };
@@ -1681,7 +1693,7 @@ function handlePermissionPost(req, res, options) {
         // The view is still derived so that every accepted request carries one.
         const permissionReminder = preparePermissionReminder(toolName, rawInput);
         const sessionOptions = {
-          ...buildDshPermissionSessionOptions(data, remoteProfile),
+          ...buildDshPermissionSessionOptions(data, remoteProfile, wslSourced),
           sessionAutomationIdentity,
           ...trustedSessionFields(sessionIdentity),
         };
@@ -1845,7 +1857,7 @@ function handlePermissionPost(req, res, options) {
           }
           const elicitationInput = elicitation.displayInput;
           const hermesSessionOptions = {
-            ...buildHermesPermissionSessionOptions(data, remoteProfile),
+            ...buildHermesPermissionSessionOptions(data, remoteProfile, wslSourced),
             sessionAutomationIdentity,
             ...trustedSessionFields(sessionIdentity),
           };
@@ -1915,7 +1927,7 @@ function handlePermissionPost(req, res, options) {
 
         // General permission request
         const hermesSessionOptions = {
-          ...buildHermesPermissionSessionOptions(data, remoteProfile),
+          ...buildHermesPermissionSessionOptions(data, remoteProfile, wslSourced),
           sessionAutomationIdentity,
           ...trustedSessionFields(sessionIdentity),
         };

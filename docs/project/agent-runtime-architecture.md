@@ -384,6 +384,20 @@ DeepSeek Harness 权限气泡（approval waterfall，阻塞）：
   secure identity 缺失/损坏时 fail closed，不回退 23333-23337 扫描；
   通用本地 /state 与 /permission 不作为 SSH 隧道目标
 
+WSL 状态同步（本机 loopback，但 PID 属于 Linux VM）：
+  WSL 里的 hook 用 Linux `ps` 解析进程字段，又经 127.0.0.1 发到 Windows Clawd；
+  Windows 打开进程时忽略 PID 低两位，所以 Linux PID 可能正好对上无关的本地活进程。
+  服务端按请求自身标记（`wsl_distro` 非空或 `host: "wsl:<distro>"`）剥离与 Remote SSH
+  完全相同的进程字段（sourcePid / wtHwnd / agentPid / pidChain / editor / tmuxSocket / tmuxClient）；
+  `orcaPaneKey` / `cwd` / `host` / `wsl_distro` 保留。
+  清理决策对带 WSL 粘性标记的会话一律不再探测 PID（没有 agent-exit / source-exit /
+  working-source-exit），工作态照常按 working timeout 转 idle，空闲超时后按 `unreachable` 清除；
+  `sessionStaleMs === 0` 时不按年龄删除。
+  因此 WSL 会话没有按进程退出的清理，只按空闲超时清除。
+  per-session 自动化身份用的 agentPid 只按 Remote SSH 剥离（有意的例外，见 server-route-state.js /
+  server-route-permission.js），所以 WSL Codex 的资格与修复前一致；它的会话信任随会话被超时移除而结束，
+  而不是随进程退出（已知缺口，后续跟进）。
+
 权限决策流（Claude Code HTTP hook，阻塞）：
   Claude Code PermissionRequest
     → HTTP POST 127.0.0.1:23333/permission { tool_name, tool_input, session_id, permission_suggestions }
